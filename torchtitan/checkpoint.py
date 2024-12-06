@@ -46,6 +46,7 @@ class AsyncMode(str, enum.Enum):
 @dataclass
 class TrainState(Stateful):
     step: int = 0
+    ntokens: int = 0
     global_avg_losses: List[float] = field(default_factory=list)
     global_max_losses: List[float] = field(default_factory=list)
     log_steps: List[int] = field(default_factory=list)
@@ -61,6 +62,7 @@ class TrainState(Stateful):
         torch.save(self.log_steps, log_steps_bytes)
         return {
             "step": torch.tensor(self.step, dtype=torch.int32),
+            "ntokens": torch.tensor(self.ntokens, dtype=torch.int32),
             "global_avg_losses": global_avg_losses_bytes,
             "global_max_losses": global_max_losses_bytes,
             "log_steps": log_steps_bytes,
@@ -68,6 +70,7 @@ class TrainState(Stateful):
 
     def load_state_dict(self, state_dict) -> None:
         self.step = state_dict["step"].item()
+        self.ntokens = state_dict["ntokens"].item()
         state_dict["global_avg_losses"].seek(0)
         self.global_avg_losses = torch.load(
             state_dict["global_avg_losses"], weights_only=False

@@ -139,6 +139,29 @@ class JobConfig:
             help="Folder to dump TensorBoard states",
         )
         self.parser.add_argument(
+            "--metrics.enable_wandb",
+            action="store_true",
+            help="Whether to log metrics to wandb",
+        )
+        self.parser.add_argument(
+            "--metrics.wandb_dir",
+            type=str,
+            default="wandb",
+            help="Folder to dump wandb metrics",
+        )
+        self.parser.add_argument(
+            "--metrics.wandb_project_name",
+            type=str,
+            default="torchtitan",
+            help="Wandb project name, for a group of runs",
+        )
+        self.parser.add_argument(
+            "--metrics.wandb_run_id",
+            type=str,
+            default=None,
+            help="Wandb run id, for resuming a particular run",
+        )
+        self.parser.add_argument(
             "--metrics.rank_0_only",
             action="store_true",
             default=True,

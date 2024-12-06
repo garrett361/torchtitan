@@ -229,6 +229,28 @@ def main(job_config: JobConfig):
         )
 
     metric_logger = build_metric_logger(job_config, parallel_dims)
+    # ideally we can convert existing MetricLogger into an interface and have wandb_logger as an instance
+    # for now, we create it separately for simplicity.
+    if job_config.metrics.enable_wandb:
+        try:
+            import wandb  # type: ignore
+        except ImportError:
+            raise ImportError("wandb is enabled in the config but wandb is not installed.")
+        if torch.distributed.get_rank() == 0:
+            logger.info("wandb is enabled!")
+            try:
+                wandb.init(
+                    project=job_config.metrics.wandb_project_name,
+                    dir=job_config.metrics.wandb_dir,
+                    resume="allow",
+                    id=job_config.metrics.wandb_run_id,
+                )
+            except wandb.errors.UsageError:
+                raise ValueError(
+                    "wandb failed to init, did you pass your wandb api key via WANDB_API_KEY?"
+                )
+            # TODO: dump job_config to wandb. Currently it is not a dataclass so we need some special handling.
+            # wandb.config = vars(job_config)
 
     # plot losses loaded from checkpoint (if any) to TensorBoard
     # NOTE: Loss info after the last log step before checkpoint saving will not be ploted.
@@ -250,6 +272,7 @@ def main(job_config: JobConfig):
 
     # variables used to keep info for metrics logging
     losses_since_last_log = []
+    gnorms_since_last_log = []
     ntokens_since_last_log = 0
     data_loading_times = []
     time_last_log = time.perf_counter()
@@ -273,6 +296,7 @@ def main(job_config: JobConfig):
     ) as memory_profiler:
         while train_state.step < job_config.training.steps:
             train_state.step += 1
+            train_state.ntokens += job_config.training.batch_size * dp_degree * job_config.training.seq_len
             gc_handler.run(train_state.step)
 
             # get batch
@@ -328,12 +352,13 @@ def main(job_config: JobConfig):
                     loss.backward()
 
             # clip gradients
-            utils.clip_grad_norm_(
+            gnorm = utils.clip_grad_norm_(
                 [p for m in model_parts for p in m.parameters()],
                 job_config.training.max_norm,
                 foreach=True,
                 pp_mesh=pp_mesh if parallel_dims.pp_enabled else None,
             )
+            gnorms_since_last_log.append(gnorm)
 
             # sync float8 amaxes and scales
             float8_handler.sync_float8_amax_and_scale_history(model_parts)
@@ -356,13 +381,17 @@ def main(job_config: JobConfig):
             ):
                 losses = [loss.item() for loss in losses_since_last_log]
                 avg_loss, max_loss = sum(losses) / len(losses), max(losses)
+                gnorms = [gnorm.item() for gnorm in gnorms_since_last_log]
+                avg_gnorm = sum(gnorms) / len(gnorms)
                 if parallel_dims.dp_enabled:
                     global_avg_loss, global_max_loss = (
                         utils.dist_mean(avg_loss, dp_mesh),
                         utils.dist_max(max_loss, dp_mesh),
                     )
+                    global_avg_gnorm = utils.dist_mean(avg_gnorm, dp_mesh)
                 else:
                     global_avg_loss, global_max_loss = avg_loss, max_loss
+                    global_avg_gnorm = avg_gnorm
 
                 # update train state
                 train_state.log_steps.append(train_state.step)
@@ -402,6 +431,18 @@ def main(job_config: JobConfig):
                     "memory/num_ooms": device_mem_stats.num_ooms,
                 }
                 metric_logger.log(metrics, step=train_state.step)
+                if job_config.metrics.enable_wandb:
+                    if torch.distributed.get_rank() == 0:
+                        # for wandb, we track a different set of metrics
+                        wandb_metrics = {
+                            "loss": global_avg_loss,
+                            "gradient norm": global_avg_gnorm,
+                            "learning rate": lr_schedulers.schedulers[0].get_last_lr()[0],
+                            "num tokens seen": train_state.ntokens,
+                            "current throughput": tps,
+                            "mfu": mfu,
+                        }
+                        wandb.log(wandb_metrics, step=train_state.step)
 
                 logger.info(
                     f"{color.cyan}step: {train_state.step:2}  "
