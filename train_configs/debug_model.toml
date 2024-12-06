@@ -31,6 +31,8 @@ name = "AdamW"
 lr = 8e-4
 
 [training]
+dataset_path = "/gpfs/dolma_v1_7/"
+seed = 2024
 batch_size = 8
 seq_len = 2048
 warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
@@ -41,6 +43,19 @@ data_parallel_shard_degree = -1
 tensor_parallel_degree = 1
 compile = false
 dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
+
+[dataset]
+use_experimental_dataloader = true
+data_logical_shards = 768
+bos_token = 128000
+eos_token = 128001
+datasets = "dataset=cc_en_head"
+# datasets = "CommonCrawl,C4,Github,Wikipedia,Books,ArXiv,StackExchange"
+# dataset_weights = "67,15,4.5,4.5,4.5,2.5,2"
+dataset_weights = "1"
+num_data_workers = 1
+file_type = "arrow"
+col_name = "tokens"
 
 [experimental]
 context_parallel_degree = 1
