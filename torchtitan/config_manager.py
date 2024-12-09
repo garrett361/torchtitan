@@ -138,8 +138,11 @@ class JobConfig:
             default="tb",
             help="Folder to dump TensorBoard states",
         )
+        # As of early Dec, official torchtitan also added wandb support, so we
+        # rename our "enable_wandb" to "enable_ibm_wandb" to avoid conflicts.
+        # In the future we should contribute back to official torchtitan
         self.parser.add_argument(
-            "--metrics.enable_wandb",
+            "--metrics.enable_ibm_wandb",
             action="store_true",
             help="Whether to log metrics to wandb",
         )

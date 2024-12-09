@@ -231,7 +231,7 @@ def main(job_config: JobConfig):
     metric_logger = build_metric_logger(job_config, parallel_dims)
     # ideally we can convert existing MetricLogger into an interface and have wandb_logger as an instance
     # for now, we create it separately for simplicity.
-    if job_config.metrics.enable_wandb:
+    if job_config.metrics.enable_ibm_wandb:
         try:
             import wandb  # type: ignore
         except ImportError:
@@ -431,7 +431,7 @@ def main(job_config: JobConfig):
                     "memory/num_ooms": device_mem_stats.num_ooms,
                 }
                 metric_logger.log(metrics, step=train_state.step)
-                if job_config.metrics.enable_wandb:
+                if job_config.metrics.enable_ibm_wandb:
                     if torch.distributed.get_rank() == 0:
                         # for wandb, we track a different set of metrics
                         wandb_metrics = {
