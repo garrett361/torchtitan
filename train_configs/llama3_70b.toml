@@ -2,18 +2,22 @@
 # NOTE: this toml config is a preset for 64 A100 GPUs.
 
 [job]
-dump_folder = "./outputs"
+dump_folder = "/gpfs/lchu/titan"
 description = "Llama 3 70B training"
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 profile_freq = 100
 
 [metrics]
-log_freq = 10
-enable_tensorboard = true
+log_freq = 100
+enable_tensorboard = false
 save_tb_folder = "tb"
+enable_ibm_wandb = true
+wandb_dir = "/gpfs/lchu/wandb"
+wandb_project_name = "70b-test"  # to be switched to prod name once tested
+wandb_run_id = "70b-test-1"  # to be switched to prod name once tested
 
 [model]
 name = "llama3"
@@ -26,32 +30,48 @@ name = "AdamW"
 lr = 1.5e-4
 
 [training]
-batch_size = 8
+dataset_path = "/datasets/olmo-mix-1124"
+seed = 2024
+batch_size = 1
 seq_len = 8192
-warmup_steps = 200  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 2000  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
 steps = 1000
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
-tensor_parallel_degree = 8  # 8-way TP
-compile = false
+tensor_parallel_degree = 1  # 8-way TP
+compile = true
 dataset = "c4"
+
+[dataset]
+use_experimental_dataloader = true
+data_logical_shards = 1536
+bos_token = 128000
+eos_token = 128001
+datasets = "dclm,arxiv,pes2o,starcoder,algebraic_stack,open_web_math,wiki"
+dataset_weights = "9050,114,236,450,49,51,50"
+num_data_workers = 1
+file_type = "hf_parquet"
+col_name = "text"
 
 [experimental]
 context_parallel_degree = 1
 pipeline_parallel_degree = 1
+enable_async_tensor_parallel = true
 
 [checkpoint]
-enable_checkpoint = false
+enable_checkpoint = true
 folder = "checkpoint"
 interval_type = "steps"
-interval = 500
+interval = 1000
 model_weights_only = false
 export_dtype = "float32"
-async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
+async_mode = "async_with_pinned_mem" # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
 mode = 'full'
 
 [float8]
-enable_float8_linear = false
+enable_float8_linear = true
+enable_fsdp_float8_all_gather = true
+precompute_float8_dynamic_scale_for_fsdp = true
