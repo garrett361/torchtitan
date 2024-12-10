@@ -98,6 +98,8 @@ def main(job_config: JobConfig):
             None if job_config.dataset.file_type=="arrow" else tokenizer,
         )
     else:
+        tokenizer_type = model_name_to_tokenizer[model_name]
+        tokenizer = build_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
         data_loader = build_hf_data_loader(
             job_config.training.dataset,
             job_config.training.dataset_path,
