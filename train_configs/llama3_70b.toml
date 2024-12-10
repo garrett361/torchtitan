@@ -23,7 +23,7 @@ wandb_run_id = "70b-test-1"  # to be switched to prod name once tested
 name = "llama3"
 flavor = "70B"
 norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
-tokenizer_path = "datasets/tokenizers/llama3"
+tokenizer_path = "/datasets/tokenizers/llama3"
 
 [optimizer]
 name = "AdamW"
