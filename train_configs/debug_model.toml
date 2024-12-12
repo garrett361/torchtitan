@@ -31,8 +31,8 @@ name = "AdamW"
 lr = 8e-4
 
 [training]
-dataset_path = "/gpfs/dolma_v1_7/"
-seed = 2024
+# dataset_path = "/gpfs/dolma_v1_7/"
+# seed = 2024
 batch_size = 8
 seq_len = 2048
 warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
