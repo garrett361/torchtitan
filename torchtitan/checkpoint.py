@@ -62,7 +62,7 @@ class TrainState(Stateful):
         torch.save(self.log_steps, log_steps_bytes)
         return {
             "step": torch.tensor(self.step, dtype=torch.int32),
-            "ntokens": torch.tensor(self.ntokens, dtype=torch.int32),
+            "ntokens": torch.tensor(self.ntokens, dtype=torch.int64),
             "global_avg_losses": global_avg_losses_bytes,
             "global_max_losses": global_max_losses_bytes,
             "log_steps": log_steps_bytes,
