@@ -31,6 +31,8 @@ from torchtitan.utils import device_module, device_type
 
 from transformers import AutoTokenizer
 
+from torchao.float8.fsdp_utils import WeightWithDynamicFloat8CastTensor
+torch.serialization.add_safe_globals([WeightWithDynamicFloat8CastTensor])
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
