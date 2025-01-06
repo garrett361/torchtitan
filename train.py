@@ -458,6 +458,7 @@ def main(job_config: JobConfig):
                 )
 
                 losses_since_last_log.clear()
+                gnorms_since_last_log.clear()
                 ntokens_since_last_log = 0
                 data_loading_times.clear()
                 time_last_log = time.perf_counter()
