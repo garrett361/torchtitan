@@ -77,7 +77,7 @@ def linear_warmup_linear_decay(
     #     curr_adjustment = 1 - (decay_steps - normalized_step) / decay_steps
 
     # return curr_adjustment
-    return 1
+    return 8/15
 
 
 def build_lr_schedulers(optimizers, job_config: JobConfig):
