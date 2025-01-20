@@ -60,23 +60,24 @@ def build_optimizers(model_parts, job_config: JobConfig):
 def linear_warmup_linear_decay(
     warmup_steps: int, decay_steps: int, current_step: int
 ) -> float:
-    """Computes linear warmup followed by linear decay.
-    Per LambdaLR requirement, this is accomplished by returning
-    a multiplicative factor to adjust the learning rate to
-    create the desired schedule.
-    """
-    if current_step < warmup_steps:
-        # linear warmup
-        # 0-indexed step, hence + 1 adjustments
-        current_step += 1
-        curr_adjustment = float(current_step / (warmup_steps + 1))
+    # """Computes linear warmup followed by linear decay.
+    # Per LambdaLR requirement, this is accomplished by returning
+    # a multiplicative factor to adjust the learning rate to
+    # create the desired schedule.
+    # """
+    # if current_step < warmup_steps:
+    #     # linear warmup
+    #     # 0-indexed step, hence + 1 adjustments
+    #     current_step += 1
+    #     curr_adjustment = float(current_step / (warmup_steps + 1))
 
-    else:
-        # linear decay
-        normalized_step = decay_steps - (current_step - warmup_steps)
-        curr_adjustment = 1 - (decay_steps - normalized_step) / decay_steps
+    # else:
+    #     # linear decay
+    #     normalized_step = decay_steps - (current_step - warmup_steps)
+    #     curr_adjustment = 1 - (decay_steps - normalized_step) / decay_steps
 
-    return curr_adjustment
+    # return curr_adjustment
+    return 1
 
 
 def build_lr_schedulers(optimizers, job_config: JobConfig):
