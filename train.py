@@ -455,8 +455,8 @@ def main(job_config: JobConfig):
                     f"({device_mem_stats.max_reserved_pct:.2f}%)  "
                     f"{color.blue}tps: {round(tps):,}  "
                     f"{color.magenta}mfu: {mfu:.2f}%  "
-                    f"{color.yellow}gnorm: global_avg_gnorm  "
-                    f"{color.yellow}lr: lr_schedulers.schedulers[0].get_last_lr()[0]{color.reset}"
+                    f"{color.yellow}gnorm: {global_avg_gnorm}  "
+                    f"{color.yellow}lr: {lr_schedulers.schedulers[0].get_last_lr()[0]}{color.reset}"
                 )
 
                 losses_since_last_log.clear()
