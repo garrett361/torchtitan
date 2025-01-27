@@ -482,6 +482,17 @@ class JobConfig:
 
         # checkpointing configs
         self.parser.add_argument(
+            "--checkpoint.warm_start_ckpt_path",
+            type=str,
+            default=None,
+            help="""
+                Warm-start checkpoint to be loaded from.
+                This is mainly designed for annealing phase.
+                Only model checkpoint will be loaded from the given checkpoint and everything
+                else will be discarded.
+            """,
+        )
+        self.parser.add_argument(
             "--checkpoint.enable_checkpoint",
             action="store_true",
             help="Whether to enable checkpoint",

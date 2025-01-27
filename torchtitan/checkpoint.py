@@ -174,6 +174,7 @@ class CheckpointManager:
         job_config: JobConfig,
     ) -> None:
         ckpt_config = job_config.checkpoint
+        self.warm_start_path = ckpt_config.warm_start_ckpt_path
         self.enable_checkpoint = ckpt_config.enable_checkpoint
         self.keep_latest_k = ckpt_config.keep_latest_k
 
@@ -445,6 +446,23 @@ class CheckpointManager:
             self.staging = False
 
     def load(self, step: int = -1) -> bool:
+        if self.warm_start_path is not None:
+            states = {"model": self.states["model"]}
+            original_stateful_states = {
+                k: v for k, v in states.items() if isinstance(v, Stateful)
+            }
+            logger.info(f"Loading a warm-start checkpoint from {self.warm_start_path}.")
+            begin = time.monotonic()
+            dcp.load(
+                states,
+                checkpoint_id=self.warm_start_path,
+            )
+            logger.info(
+                f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
+            )
+            states.update(original_stateful_states)
+            return True
+
         if not self.enable_checkpoint:
             return False
         if not os.path.isdir(self.folder):
