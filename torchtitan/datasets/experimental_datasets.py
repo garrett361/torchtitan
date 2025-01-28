@@ -424,8 +424,8 @@ class ParquetHandler(_ShardFileHandler):
 
 
 class AutoHandler(_ShardFileHandler):
-    def __init__(self, tokenizer_path: str, col_name: str = "text"):
-        self.PHandler = ParquetHandler(tokenizer_path, col_name)
+    def __init__(self, tokenizer: Tokenizer, col_name: str = "text"):
+        self.PHandler = ParquetHandler(tokenizer, col_name)
         self.AHandler = ArrowHandler()
         self.current = _ShardFileHandler()
 
@@ -1447,6 +1447,7 @@ class SamplingDataset(_WrapperDataset):
 _handler_map = {
     "arrow": ArrowHandler,
     "hf_parquet": ParquetHandler,
+    "auto": AutoHandler,
 }
 
 
@@ -1493,12 +1494,10 @@ def build_experimental_data_loader(cfg, rank, world_size, tokenizer: Tokenizer =
     assert (
         cfg.dataset.file_type in _handler_map
     ), f"File type {cfg.dataset.file_type} is not recognized ({list(_handler_map.keys())})"
-    if cfg.dataset.file_type == "hf_parquet":
-        assert tokenizer is not None, "You must provide a tokenizer for hf_parquet raw text file shards."
-        filehandler = ParquetHandler(tokenizer, cfg.dataset.col_name)
+    if cfg.dataset.file_type in ["hf_parquet", "auto"]:
+        filehandler = _handler_map[cfg.dataset.file_type](tokenizer, cfg.dataset.col_name)
     else:
-        filehandler = _handler_map[cfg.dataset.file_type](cfg.dataset.col_name)
-    
+        filehandler = _handler_map[cfg.dataset.file_type](cfg.dataset.col_name)    
     # Base reader layer
     data = StreamingDocDataset(
         cfg.training.dataset_path,
