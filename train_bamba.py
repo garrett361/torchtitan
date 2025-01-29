@@ -154,6 +154,8 @@ def main(job_config: JobConfig):
         pp_schedule, model_parts = models_pipelining_fns[model_name](
             model, pp_mesh, parallel_dims, job_config, device, model_config, loss_fn
         )
+        # when PP is enabled, `model` obj is no longer used after this point, model_parts is used instead
+        del model
 
         # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
         # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
@@ -231,7 +233,6 @@ def main(job_config: JobConfig):
     )
 
     # variables used to keep info for metrics logging
-    losses_since_last_log = []
     ntokens_since_last_log = 0
     data_loading_times = []
     time_last_log = time.perf_counter()
@@ -269,11 +270,12 @@ def main(job_config: JobConfig):
             optimizers.zero_grad()
 
             # apply context parallelism if cp is enabled
+            # ensure CP handles the separate freqs_cis buffer for each pp stage
             optional_context_parallel_ctx = (
                 utils.create_context_parallel_ctx(
                     cp_mesh=world_mesh["cp"],
-                    cp_buffers=[input_ids, labels, model.freqs_cis],
-                    cp_seq_dims=[1, 1, 0],
+                    cp_buffers=[input_ids, labels] + [m.freqs_cis for m in model_parts],
+                    cp_seq_dims=[1, 1] + [0 for _ in model_parts],
                     cp_no_restore_buffers={input_ids, labels},
                     cp_rotate_method=job_config.experimental.context_parallel_rotate_method,
                 )
@@ -295,10 +297,11 @@ def main(job_config: JobConfig):
                         pp_schedule.step()
 
                 # accumulate losses across pipeline microbatches
+                # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
                 loss = (
-                    torch.mean(torch.stack(losses))
+                    torch.mean(torch.stack(losses)).to(device)
                     if is_last_stage
-                    else torch.Tensor([-1.0])
+                    else torch.tensor([-1.0], device=device)
                 )
             else:
                 # Non-PP forward / backward
@@ -330,26 +333,23 @@ def main(job_config: JobConfig):
             # it issues a single all-reduce for all parameters at once for better performance
             float8_handler.precompute_float8_dynamic_scale_for_fsdp(model_parts)
 
-            losses_since_last_log.append(loss)
-
             # log metrics
             if (
                 train_state.step == 1
                 or train_state.step % job_config.metrics.log_freq == 0
             ):
-                losses = [loss.item() for loss in losses_since_last_log]
-                avg_loss, max_loss = sum(losses) / len(losses), max(losses)
                 if (
                     parallel_dims.dp_replicate_enabled
                     or parallel_dims.dp_shard_enabled
                     or parallel_dims.cp_enabled
                 ):
+                    loss = loss.detach()
                     global_avg_loss, global_max_loss = (
-                        utils.dist_mean(avg_loss, world_mesh["dp_cp"]),
-                        utils.dist_max(max_loss, world_mesh["dp_cp"]),
+                        utils.dist_mean(loss, world_mesh["dp_cp"]),
+                        utils.dist_max(loss, world_mesh["dp_cp"]),
                     )
                 else:
-                    global_avg_loss, global_max_loss = avg_loss, max_loss
+                    global_avg_loss = global_max_loss = loss.item()
 
                 # update train state
                 train_state.log_steps.append(train_state.step)
@@ -399,7 +399,6 @@ def main(job_config: JobConfig):
                     f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
                 )
 
-                losses_since_last_log.clear()
                 ntokens_since_last_log = 0
                 data_loading_times.clear()
                 time_last_log = time.perf_counter()
