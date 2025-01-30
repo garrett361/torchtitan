@@ -102,7 +102,70 @@ def torch_chunk_scan_combined(
     D: Optional[torch.Tensor] = None,  # (n_heads,)
 ):
     """
-    Chunked O(chunk_size * seq_len) solution to the mamba2 scan.
+    Chunked O(chunk_size * seq_len) solution to the mamba2 scan. Modified from mamba_ssm, with
+    einops removed.
+
+    Signature mimics mamba_chunk_scan_combined.
+    """
+    X = x * dt[..., None]
+    A = A * dt
+
+    # Chunk seq_len dim
+    X, A, B, C = [
+        t.reshape(t.shape[0], t.shape[1] // chunk_size, chunk_size, *t.shape[2:])
+        for t in (X, A, B, C)
+    ]
+
+    A = torch.einsum("bclh->bhcl", A)  # (B, h, c, l)
+    A_cumsum = torch.cumsum(A, dim=-1)
+
+    # 1. Compute the output for each intra-chunk (diagonal blocks)
+    L = torch.exp(segsum(A))
+    Y_diag = torch.einsum("bclgn,bcsgn,bhcls,bcshp->bclhp", C, B, L, X)  # O(L S B C D)
+
+    # 2. Compute the state for each intra-chunk
+    # (right term of low-rank factorization of off-diagonal blocks; B terms)
+    decay_states = torch.exp((A_cumsum[:, :, :, -1:] - A_cumsum))
+    states = torch.einsum(
+        "bclgn,bhcl,bclhp->bcghpn", B, decay_states, X
+    )  # O(B S D G N)
+
+    # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
+    # (middle term of factorization of off-diag blocks; A terms)
+    initial_states = torch.zeros_like(states[:, :1])
+    states = torch.cat([initial_states, states], dim=1)
+    decay_chunk = torch.exp(segsum(F.pad(A_cumsum[:, :, :, -1], (1, 0))))
+    new_states = torch.einsum("bhzc,bcghpn->bzghpn", decay_chunk, states)
+    states = new_states[:, :-1]
+
+    # 4. Compute state -> output conversion per chunk
+    # (left term of low-rank factorization of off-diagonal blocks; C terms)
+    state_decay_out = torch.exp(A_cumsum)
+    Y_off = torch.einsum("bclgn,bcghpn,bhcl->bclhp", C, states, state_decay_out)
+
+    Y = Y_diag + Y_off
+
+    # Unchunk
+    Y = Y.reshape(Y.shape[0], Y.shape[1] * Y.shape[2], *Y.shape[3:])
+
+    # Residual
+    if D is not None:
+        Y = Y + D[:, None] * x
+    return Y
+
+
+def torch_chunk_scan_combined_alt(
+    x: torch.Tensor,  # (batch_size, seq_len, n_heads, d_head)
+    dt: torch.Tensor,  # (batch_size, seq_len, n_heads)
+    A: torch.Tensor,  # (n_heads,)
+    B: torch.Tensor,  # (batch_size, seq_len, n_groups, d_state)
+    C: torch.Tensor,  # (batch_size, seq_len, n_groups, d_state)
+    chunk_size: int,
+    D: Optional[torch.Tensor] = None,  # (n_heads,)
+):
+    """
+    Alternative chunked O(chunk_size * seq_len) solution to the mamba2 scan which does not create
+    O((seq_len / chunk_size)^2) intermediates.
 
     Signature mimics mamba_chunk_scan_combined.
     """
@@ -194,10 +257,10 @@ class Mamba2(nn.Module):
         inv_dt = dt + torch.log(-torch.expm1(-dt))
         self.dt_bias = nn.Parameter(inv_dt)
 
-        # A = torch.empty(self.n_heads, dtype=torch.float32).uniform_(0, 16)
-        A = (
-            1.0 + torch.randn(self.n_heads, dtype=torch.float32).abs()
-        )  # default init giving me infs
+        A = torch.empty(self.n_heads, dtype=torch.float32).uniform_(0, 16)
+        # A = (
+        #     1.0 + torch.randn(self.n_heads, dtype=torch.float32).abs()
+        # )  # default init giving me infs
         A_log = torch.log(A)
         self.A_log = nn.Parameter(A_log)
 
