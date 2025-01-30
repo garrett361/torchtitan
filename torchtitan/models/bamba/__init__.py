@@ -19,4 +19,13 @@ bamba_configs = {
         max_seq_len=512,
         chunk_size=64,
     ),
+    "debugmodel_mamba_kernels": BambaModelArgs(
+        dim=256,
+        n_layers=8,
+        n_heads=16,
+        rope_theta=500000,
+        max_seq_len=512,
+        chunk_size=64,
+        use_mamba_kernels=True,
+    ),
 }
