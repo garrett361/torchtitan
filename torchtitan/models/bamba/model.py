@@ -24,6 +24,33 @@ from torchtitan.models.llama.model import (
 from torchtitan.models.norms import build_norm
 
 
+@dataclass
+class BambaModelArgs(ModelArgs):
+    attn_layer_indices: Optional[list[int]] = None
+    d_state: int = 128
+    d_conv: int = 4
+    expand: int = 2
+    n_groups: int = 1
+    dt_min: float = 0.001
+    dt_max: float = 0.1
+    dt_init_floor: float = 1e-4
+    conv_bias: bool = True
+    chunk_size: int = 256
+    use_mamba_kernels: bool = False
+
+    def __post_init__(self) -> None:
+        if self.attn_layer_indices is None:
+            self.attn_layer_indices = [
+                n for n in range(self.n_layers) if not (n + 1) % 8
+            ]
+        self.d_inner = self.expand * self.dim
+        assert self.d_inner == self.expand * self.dim
+        self.conv_dim = self.d_inner + 2 * self.n_groups * self.d_state
+        self.d_in_proj = (
+            2 * self.d_inner + 2 * self.n_groups * self.d_state + self.n_heads
+        )
+
+
 def segsum(x):
     """More stable segment sum calculation."""
     x_shape = x.shape
@@ -37,30 +64,94 @@ def segsum(x):
     return x_segsum
 
 
-@dataclass
-class BambaModelArgs(ModelArgs):
-    attn_layer_indices: Optional[list[int]] = None
-    d_state: int = 128
-    d_conv: int = 4
-    expand: int = 2
-    n_groups: int = 1
-    dt_min: float = 0.001
-    dt_max: float = 0.1
-    dt_init_floor: float = 1e-4
-    conv_bias: bool = True
-    chunk_size: int = 256
+def torch_scan(
+    x: torch.Tensor,  # (batch_size, seq_len, n_heads, d_head)
+    dt: torch.Tensor,  # (batch_size, seq_len, n_heads)
+    A: torch.Tensor,  # (n_heads,)
+    B: torch.Tensor,  # (batch_size, seq_len, n_groups, d_state)
+    C: torch.Tensor,  # (batch_size, seq_len, n_groups, d_state)
+    chunk_size: int,
+    D: Optional[torch.Tensor] = None,  # (n_heads,)
+):
+    """
+    Minimal O(seq_len) core pytorch solution to the mamba2 scan. The `torch_chunk_scan_combined` has
+    better `torch.compile` perf (assuming chunk_size ~ 64).
 
-    def __post_init__(self) -> None:
-        if self.attn_layer_indices is None:
-            self.attn_layer_indices = [
-                n for n in range(self.n_layers) if not (n + 1) % 8
-            ]
-        self.d_inner = self.expand * self.dim
-        assert self.d_inner == self.expand * self.dim
-        self.conv_dim = self.d_inner + 2 * self.n_groups * self.d_state
-        self.d_in_proj = (
-            2 * self.d_inner + 2 * self.n_groups * self.d_state + self.n_heads
-        )
+    Signature mimics mamba_chunk_scan_combined.
+    """
+    X = x * dt[..., None]
+    A = A * dt
+    A_cs = A.cumsum(dim=1)
+    Y = torch.einsum("bsh,bsgn,bshp->bsghpn", (-A_cs).exp(), B, X).cumsum(dim=1)
+    Y = torch.einsum("bsgn,bsghpn->bshp", C, Y)
+    Y = torch.einsum("bsh,bshp->bshp", A_cs.exp(), Y)
+
+    if D is not None:
+        Y = Y + D[:, None] * x
+
+    return Y
+
+
+def torch_chunk_scan_combined(
+    x: torch.Tensor,  # (batch_size, seq_len, n_heads, d_head)
+    dt: torch.Tensor,  # (batch_size, seq_len, n_heads)
+    A: torch.Tensor,  # (n_heads,)
+    B: torch.Tensor,  # (batch_size, seq_len, n_groups, d_state)
+    C: torch.Tensor,  # (batch_size, seq_len, n_groups, d_state)
+    chunk_size: int,
+    D: Optional[torch.Tensor] = None,  # (n_heads,)
+):
+    """
+    Chunked O(chunk_size * seq_len) solution to the mamba2 scan.
+
+    Signature mimics mamba_chunk_scan_combined.
+    """
+    X = x * dt[..., None]
+    A = A * dt
+
+    # Chunk seq_len dim
+    X, A, B, C = [
+        t.reshape(t.shape[0], t.shape[1] // chunk_size, chunk_size, *t.shape[2:])
+        for t in (X, A, B, C)
+    ]
+
+    A = torch.einsum("bclh->bhcl", A)  # (B, h, c, l)
+    A_sum = A.sum(dim=-1)  # (b, h, c)
+    A_cs = A.cumsum(dim=-1)  # (b, h, c, l)
+
+    # 1. Compute the output for each intra-chunk (diagonal blocks)
+    L = torch.exp(segsum(A))
+    Y_diag = torch.einsum("bclgn,bcsgn,bhcls,bcshp->bclhp", C, B, L, X)
+
+    # 2. Compute the state for each intra-chunk
+    # (right term of low-rank factorization of off-diagonal blocks; B terms)
+    T = (A_sum[..., None] - A_cs).exp()
+    right_factor = torch.einsum("bhcl,bclgn,bclhp->bcghpn", T, B, X)
+
+    # 3. Center-factor. (A terms)
+    A_sum_cs = A_sum.cumsum(dim=-1)
+    center_right = (-A_sum_cs).exp()  # (b, h, c)
+    center_right = (
+        torch.einsum("bhc->bch", center_right)[:, :, None, :, None, None] * right_factor
+    )
+    center_right = center_right.cumsum(dim=1) - center_right  # (b, c, g, h, p n)
+    center_factor = (
+        torch.einsum("bhc->bch", (A_sum_cs - A_sum).exp())[:, :, None, :, None, None]
+        * center_right
+    )  # (b, c, g, h, p, n)
+
+    # 4. Left-factor (C terms)
+    Y_off = torch.einsum("bclgn,bcghpn,bhcl->bclhp", C, center_factor, A_cs.exp())
+
+    Y = Y_diag + Y_off
+
+    # Unchunk
+    Y = Y.reshape(Y.shape[0], Y.shape[1] * Y.shape[2], *Y.shape[3:])
+
+    # Residual
+    if D is not None:
+        Y = Y + D[:, None] * x
+    return Y
 
 
 class Mamba2(nn.Module):
@@ -116,6 +207,13 @@ class Mamba2(nn.Module):
             model_args.norm_type, dim=self.d_inner, eps=model_args.norm_eps
         )
 
+        if model_args.use_mamba_kernels:
+            from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
+
+            self.scan_impl = mamba_chunk_scan_combined
+        else:
+            self.scan_impl = torch_chunk_scan_combined
+
     def forward(self, inputs: torch.Tensor):
         batch, seqlen, _ = inputs.shape
         A = -torch.exp(self.A_log)  # (n_heads) or (d_inner, d_state)
@@ -147,76 +245,12 @@ class Mamba2(nn.Module):
         B = B.reshape(*B.shape[:-1], self.n_groups, B.shape[-1] // self.n_groups)
         C = C.reshape(*C.shape[:-1], self.n_groups, C.shape[-1] // self.n_groups)
 
-        y = self._mamba_scan_wip(x, dt, A, B, C, self.D)
+        y = self.scan_impl(x, dt, A, B, C, self.chunk_size, self.D)
         # Join heads
         y = y.reshape(*y.shape[:-2], -1)
         out = self.out_proj(self.norm(y * self.act(z)))
 
         return out
-
-    def _mamba_scan_no_op(self, x, *args, **kwargs) -> None:
-        # pass-through placeholder for testing
-        return x.reshape(*x.shape[:-1], self.n_heads, x.shape[-1] // self.n_heads)
-
-    def _mamba_scan_wip(
-        self,
-        x: torch.Tensor,  # (batch_size, seq_len, n_heads * d_head)
-        dt: torch.Tensor,  # (batch_size, seq_len, n_heads)
-        A: torch.Tensor,  # (n_heads,)
-        B: torch.Tensor,  # (batch_size, seq_len, n_groups * d_state)
-        C: torch.Tensor,  # (batch_size, seq_len, n_groups * d_state)
-        D: Optional[torch.Tensor] = None,
-    ):
-        x = x * dt[..., None]  # (batch_size, seq_len, d_inner)
-        A = A * dt  # (batch_size, seq_len, d_inner)
-
-        # Rearrange into blocks/chunks
-        x, A, B, C = [
-            t.reshape(
-                t.shape[0], t.shape[1] // self.chunk_size, self.chunk_size, *t.shape[2:]
-            )
-            for t in (x, A, B, C)
-        ]
-
-        A = torch.einsum("bclh->bhcl", A)  # (B, h, c, l)
-        A_sum = A.sum(dim=-1)  # (b, h, c)
-        A_cs = A.cumsum(dim=-1)  # (b, h, c, l)
-
-        # 1. Compute the output for each intra-chunk (diagonal blocks)
-        L = torch.exp(segsum(A))
-        Y_diag = torch.einsum("bclgn,bcsgn,bhcls,bcshp->bclhp", C, B, L, x)
-
-        # 2. Compute the state for each intra-chunk
-        # (right term of low-rank factorization of off-diagonal blocks; B terms)
-        T = (A_sum[..., None] - A_cs).exp()
-        right_factor = torch.einsum("bhcl,bclgn,bclhp->bcghpn", T, B, x)
-
-        # 3. Center-factor. (A terms)
-        A_sum_cs = A_sum.cumsum(dim=-1)
-        center_right = (-A_sum_cs).exp()  # (b, h, c)
-        center_right = (
-            torch.einsum("bhc->bch", center_right)[:, :, None, :, None, None]
-            * right_factor
-        )
-        center_right = center_right.cumsum(dim=1) - center_right  # (b, c, g, h, p n)
-        center_factor = (
-            torch.einsum("bhc->bch", (A_sum_cs - A_sum).exp())[
-                :, :, None, :, None, None
-            ]
-            * center_right
-        )  # (b, c, g, h, p, n)
-
-        # 4. Left-factor (C terms)
-        Y_off = torch.einsum("bclgn,bcghpn,bhcl->bclhp", C, center_factor, A_cs.exp())
-
-        Y = Y_diag + Y_off
-        # Residual
-        if D is not None:
-            Y = Y + D[:, None]
-
-        # Unchunk
-        Y = Y.reshape(Y.shape[0], Y.shape[1] * Y.shape[2], *Y.shape[3:])
-        return Y
 
     def init_weights(self, init_std: float):
         nn.init.uniform_(self.conv1d.weight)
