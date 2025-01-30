@@ -64,34 +64,6 @@ def segsum(x):
     return x_segsum
 
 
-def torch_scan(
-    x: torch.Tensor,  # (batch_size, seq_len, n_heads, d_head)
-    dt: torch.Tensor,  # (batch_size, seq_len, n_heads)
-    A: torch.Tensor,  # (n_heads,)
-    B: torch.Tensor,  # (batch_size, seq_len, n_groups, d_state)
-    C: torch.Tensor,  # (batch_size, seq_len, n_groups, d_state)
-    chunk_size: int,
-    D: Optional[torch.Tensor] = None,  # (n_heads,)
-):
-    """
-    Minimal O(seq_len) core pytorch solution to the mamba2 scan. The `torch_chunk_scan_combined` has
-    better `torch.compile` perf (assuming chunk_size ~ 64).
-
-    Signature mimics mamba_chunk_scan_combined.
-    """
-    X = x * dt[..., None]
-    A = A * dt
-    A_cs = A.cumsum(dim=1)
-    Y = torch.einsum("bsh,bsgn,bshp->bsghpn", (-A_cs).exp(), B, X).cumsum(dim=1)
-    Y = torch.einsum("bsgn,bsghpn->bshp", C, Y)
-    Y = torch.einsum("bsh,bshp->bshp", A_cs.exp(), Y)
-
-    if D is not None:
-        Y = Y + D[:, None] * x
-
-    return Y
-
-
 def torch_chunk_scan_combined(
     x: torch.Tensor,  # (batch_size, seq_len, n_heads, d_head)
     dt: torch.Tensor,  # (batch_size, seq_len, n_heads)
@@ -154,6 +126,36 @@ def torch_chunk_scan_combined(
     return Y
 
 
+def torch_scan(
+    x: torch.Tensor,  # (batch_size, seq_len, n_heads, d_head)
+    dt: torch.Tensor,  # (batch_size, seq_len, n_heads)
+    A: torch.Tensor,  # (n_heads,)
+    B: torch.Tensor,  # (batch_size, seq_len, n_groups, d_state)
+    C: torch.Tensor,  # (batch_size, seq_len, n_groups, d_state)
+    chunk_size: int,
+    D: Optional[torch.Tensor] = None,  # (n_heads,)
+):
+    """
+    Minimal O(seq_len) core pytorch solution to the mamba2 scan. Not as performant as the other
+    torch impls under compile.
+
+    Signature mimics mamba_chunk_scan_combined.
+
+    NOTE: Appears too numerically unstable to use.
+    """
+    X = x * dt[..., None]
+    A = A * dt
+    A_cs = A.cumsum(dim=1)
+    Y = torch.einsum("bsh,bsgn,bshp->bsghpn", (-A_cs).exp(), B, X).cumsum(dim=1)
+    Y = torch.einsum("bsgn,bsghpn->bshp", C, Y)
+    Y = torch.einsum("bsh,bshp->bshp", A_cs.exp(), Y)
+
+    if D is not None:
+        Y = Y + D[:, None] * x
+
+    return Y
+
+
 def torch_chunk_scan_combined_linear(
     x: torch.Tensor,  # (batch_size, seq_len, n_heads, d_head)
     dt: torch.Tensor,  # (batch_size, seq_len, n_heads)
@@ -168,6 +170,8 @@ def torch_chunk_scan_combined_linear(
     O((seq_len / chunk_size)^2) intermediates.
 
     Signature mimics mamba_chunk_scan_combined.
+
+    NOTE: Appears too numerically unstable to use.
     """
     X = x * dt[..., None]
     A = A * dt
@@ -275,7 +279,7 @@ class Mamba2(nn.Module):
 
             self.scan_impl = mamba_chunk_scan_combined
         else:
-            self.scan_impl = torch_chunk_scan_combined_alt_linear
+            self.scan_impl = torch_chunk_scan_combined
 
     def forward(self, inputs: torch.Tensor):
         batch, seqlen, _ = inputs.shape
