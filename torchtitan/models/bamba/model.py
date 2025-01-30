@@ -228,6 +228,7 @@ class Mamba2(nn.Module):
             dim=-1,
         )
         dt = F.softplus(dt + self.dt_bias)  # (B, L, n_heads)
+        dt = dt.clamp(0, float("inf"))
         xBC = self.act(self.conv1d(xBC.transpose(1, 2)).transpose(1, 2))
         xBC = xBC[:, :seqlen, :]
 
