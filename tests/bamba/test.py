@@ -67,7 +67,9 @@ class TestScan:
     seq_len = 256
     chunk_size = 32
     d_state = 16
-    n_groups = 1  # Getting failures with n_groups 2
+    # Getting failures with n_groups 2. TODO: @goon - Investigate. Also happens when testing against
+    # mamba-ssm's own torch reference impl.
+    n_groups = 1
 
     def _get_args(
         self,
