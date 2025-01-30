@@ -12,38 +12,44 @@ from torchtitan.models.bamba.model import (
 )
 
 
-def test_config() -> None:
+def test_model_args() -> None:
     BambaModelArgs(max_seq_len=256, chunk_size=16)
 
 
 class TestMamba2:
-    config = BambaModelArgs(max_seq_len=256, chunk_size=16)
+    model_args = BambaModelArgs(max_seq_len=256, chunk_size=16)
     batch_size = 2
 
     def test_model(self):
-        mamba2 = Mamba2(self.config).cuda()
+        mamba2 = Mamba2(self.model_args).cuda()
         inputs = torch.randn(
-            self.batch_size, self.config.max_seq_len, self.config.dim, device="cuda"
+            self.batch_size,
+            self.model_args.max_seq_len,
+            self.model_args.dim,
+            device="cuda",
         )
         outputs = mamba2(inputs)
         assert outputs.shape == inputs.shape
 
 
 class TestBambaBlock:
-    config = BambaModelArgs(max_seq_len=256, chunk_size=16)
+    model_args = BambaModelArgs(max_seq_len=256, chunk_size=16)
     batch_size = 2
 
     def test_model(self):
-        block = BambaBlock(0, self.config).cuda()
+        block = BambaBlock(0, self.model_args).cuda()
         inputs = torch.randn(
-            self.batch_size, self.config.max_seq_len, self.config.dim, device="cuda"
+            self.batch_size,
+            self.model_args.max_seq_len,
+            self.model_args.dim,
+            device="cuda",
         )
         outputs = block(inputs)
         assert outputs.shape == inputs.shape
 
 
 class TestBamba:
-    config = BambaModelArgs(
+    model_args = BambaModelArgs(
         max_seq_len=256,
         chunk_size=16,
         vocab_size=64,
@@ -55,15 +61,15 @@ class TestBamba:
     batch_size = 2
 
     def test_model(self):
-        model = Bamba(self.config).cuda()
+        model = Bamba(self.model_args).cuda()
         inputs = torch.randint(
-            self.config.vocab_size,
-            size=(self.batch_size, self.config.max_seq_len),
+            self.model_args.vocab_size,
+            size=(self.batch_size, self.model_args.max_seq_len),
             device="cuda",
         )
         outputs = model(inputs)
         assert outputs.shape == torch.Size(
-            (self.batch_size, self.config.max_seq_len, self.config.vocab_size)
+            (self.batch_size, self.model_args.max_seq_len, self.model_args.vocab_size)
         )
 
 
