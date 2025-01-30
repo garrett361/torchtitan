@@ -154,7 +154,7 @@ def torch_chunk_scan_combined(
     return Y
 
 
-def torch_chunk_scan_combined_alt(
+def torch_chunk_scan_combined_linear(
     x: torch.Tensor,  # (batch_size, seq_len, n_heads, d_head)
     dt: torch.Tensor,  # (batch_size, seq_len, n_heads)
     A: torch.Tensor,  # (n_heads,)
@@ -275,7 +275,7 @@ class Mamba2(nn.Module):
 
             self.scan_impl = mamba_chunk_scan_combined
         else:
-            self.scan_impl = torch_chunk_scan_combined
+            self.scan_impl = torch_chunk_scan_combined_alt_linear
 
     def forward(self, inputs: torch.Tensor):
         batch, seqlen, _ = inputs.shape

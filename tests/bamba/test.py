@@ -7,6 +7,7 @@ from torchtitan.models.bamba.model import (
     BambaBlock,
     Bamba,
     torch_chunk_scan_combined,
+    torch_chunk_scan_combined_linear,
     torch_scan,
 )
 
@@ -20,8 +21,10 @@ class TestMamba2:
     batch_size = 2
 
     def test_model(self):
-        mamba2 = Mamba2(self.config)
-        inputs = torch.randn(self.batch_size, self.config.max_seq_len, self.config.dim)
+        mamba2 = Mamba2(self.config).cuda()
+        inputs = torch.randn(
+            self.batch_size, self.config.max_seq_len, self.config.dim, device="cuda"
+        )
         outputs = mamba2(inputs)
         assert outputs.shape == inputs.shape
 
@@ -31,8 +34,10 @@ class TestBambaBlock:
     batch_size = 2
 
     def test_model(self):
-        block = BambaBlock(0, self.config)
-        inputs = torch.randn(self.batch_size, self.config.max_seq_len, self.config.dim)
+        block = BambaBlock(0, self.config).cuda()
+        inputs = torch.randn(
+            self.batch_size, self.config.max_seq_len, self.config.dim, device="cuda"
+        )
         outputs = block(inputs)
         assert outputs.shape == inputs.shape
 
@@ -43,15 +48,18 @@ class TestBamba:
         chunk_size=16,
         vocab_size=64,
         dim=256,
-        n_layers=2,
-        attn_layer_indices=[1],
+        n_layers=8,
+        attn_layer_indices=[7],
+        use_mamba_kernels=True,
     )
     batch_size = 2
 
     def test_model(self):
-        model = Bamba(self.config)
+        model = Bamba(self.config).cuda()
         inputs = torch.randint(
-            self.config.vocab_size, size=(self.batch_size, self.config.max_seq_len)
+            self.config.vocab_size,
+            size=(self.batch_size, self.config.max_seq_len),
+            device="cuda",
         )
         outputs = model(inputs)
         assert outputs.shape == torch.Size(
@@ -145,10 +153,13 @@ class TestScan:
         args = self._get_args()
         out = torch_scan(*args)
         out_chunked = torch_chunk_scan_combined(*args)
-        out_mamba_chunked = mamba_chunk_scan_combined(*args)
-        torch.testing.assert_close(out_chunked, out)
+        out_chunked_linear = torch_chunk_scan_combined_linear(*args)
+
+        torch.testing.assert_close(out, out_chunked)
+        torch.testing.assert_close(out, out_chunked_linear)
 
         tol = 1e-2
-        torch.testing.assert_close(out_chunked, out_mamba_chunked, atol=tol, rtol=tol)
+        mamba_out_chunked = mamba_chunk_scan_combined(*args)
+        torch.testing.assert_close(out_chunked, mamba_out_chunked, atol=tol, rtol=tol)
 
         assert out is not None
