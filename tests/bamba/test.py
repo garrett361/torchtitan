@@ -169,3 +169,24 @@ class TestScan:
         torch.testing.assert_close(out_chunked, mamba_out_chunked, atol=tol, rtol=tol)
 
         assert out is not None
+
+    def test_torch_scan_compiled(self):
+        from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
+
+        torch.manual_seed(42)
+
+        args = self._get_args()
+        out = torch.compile(torch_scan, fullgraph=True)(*args)
+        out_chunked = torch.compile(torch_chunk_scan_combined, fullgraph=True)(*args)
+        out_chunked_linear = torch.compile(
+            torch_chunk_scan_combined_linear, fullgraph=True
+        )(*args)
+
+        torch.testing.assert_close(out, out_chunked)
+        torch.testing.assert_close(out, out_chunked_linear)
+
+        tol = 1e-2
+        mamba_out_chunked = mamba_chunk_scan_combined(*args)
+        torch.testing.assert_close(out_chunked, mamba_out_chunked, atol=tol, rtol=tol)
+
+        assert out is not None
