@@ -633,7 +633,6 @@ class DeepSeekV3(nn.Module):
         )
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
 
-    @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int = 0):
         """
         Forward pass for the Transformer model.
