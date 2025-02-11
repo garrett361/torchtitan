@@ -13,7 +13,7 @@ world_size = 1
 rank = 0
 block_size = 128
 gemm_impl: Literal["bf16", "fp8"] = "bf16"
-attn_impl: Literal["naive", "absorb"] = "absorb"
+attn_impl: Literal["naive", "absorb"] = "naive"  # Changed from "absorb"
 
 
 @dataclass
@@ -88,7 +88,7 @@ class ModelArgs:
     beta_slow: int = 1
     mscale: float = 1.0
     # norm
-    norm: str = "rmsnorm"
+    norm_type: str = "rmsnorm"
     ffn_dim_multiplier: int = 1
     multiple_of: int = 1
 
@@ -231,10 +231,10 @@ class MLA(nn.Module):
             self.wq = nn.Linear(self.dim, self.n_heads * self.qk_head_dim)
         else:
             self.wq_a = nn.Linear(self.dim, self.q_lora_rank)
-            self.q_norm = build_norm(self.q_lora_rank)
+            self.q_norm = build_norm(args.norm_type, self.q_lora_rank)
             self.wq_b = nn.Linear(self.q_lora_rank, self.n_heads * self.qk_head_dim)
         self.wkv_a = nn.Linear(self.dim, self.kv_lora_rank + self.qk_rope_head_dim)
-        self.kv_norm = build_norm(self.kv_lora_rank)
+        self.kv_norm = build_norm(args.norm_type, self.kv_lora_rank)
         self.wkv_b = nn.Linear(
             self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim)
         )
@@ -570,8 +570,8 @@ class Block(nn.Module):
             if layer_id < args.n_dense_layers
             else MoE(args)
         )
-        self.attn_norm = build_norm(args.dim)
-        self.ffn_norm = build_norm(args.dim)
+        self.attn_norm = build_norm(args.norm_type, args.dim)
+        self.ffn_norm = build_norm(args.norm_type, args.dim)
 
     def forward(
         self,
@@ -627,7 +627,7 @@ class DeepSeekV3(nn.Module):
         self.layers = torch.nn.ModuleList()
         for layer_id in range(args.n_layers):
             self.layers.append(Block(layer_id, args))
-        self.norm = build_norm(args.dim)
+        self.norm = build_norm(args.norm_type, args.dim)
         self.head = nn.Linear(
             args.dim, args.vocab_size, dtype=torch.get_default_dtype()
         )
