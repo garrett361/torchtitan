@@ -4,9 +4,9 @@ from typing import Tuple, Optional, Literal
 
 import torch
 from torch import nn
-import torch.nn.functional as F
 import torch.distributed as dist
 from torchtitan.models.norms import build_norm
+from torchtitan.models.llama.model import FeedForward
 
 
 world_size = 1
@@ -50,7 +50,10 @@ class ModelArgs:
         beta_fast (int): Fast beta correction factor.
         beta_slow (int): Slow beta correction factor.
         mscale (float): Scaling factor for extended attention.
+        # Args for torch titan components
         norm_type (str): type of norm layer
+        ffn_dim_multiplier (int)
+        multiple_of (int)
     """
 
     max_batch_size: int = 8
@@ -86,6 +89,8 @@ class ModelArgs:
     mscale: float = 1.0
     # norm
     norm: str = "rmsnorm"
+    ffn_dim_multiplier: int = 1
+    multiple_of: int = 1
 
 
 def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
@@ -353,7 +358,7 @@ class MLA(nn.Module):
         return x
 
 
-class MLP(nn.Module):
+class MLP(FeedForward):
     """
     Multi-Layer Perceptron (MLP) used as a feed-forward layer.
 
@@ -371,22 +376,9 @@ class MLP(nn.Module):
             dim (int): Input and output dimensionality.
             inter_dim (int): Hidden layer dimensionality.
         """
-        super().__init__()
-        self.w1 = ColumnParallelLinear(dim, inter_dim)
-        self.w2 = RowParallelLinear(inter_dim, dim)
-        self.w3 = ColumnParallelLinear(dim, inter_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass for the MLP layer.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Output tensor after MLP computation.
-        """
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        super().__init__(
+            dim=dim, hidden_dim=3 * inter_dim / 2, multiple_of=1, ffn_dim_multiplier=1
+        )
 
 
 class Gate(nn.Module):
@@ -460,7 +452,7 @@ class Gate(nn.Module):
         return weights.type_as(x), indices
 
 
-class Expert(nn.Module):
+class Expert(FeedForward):
     """
     Expert layer for Mixture-of-Experts (MoE) models.
 
@@ -478,22 +470,9 @@ class Expert(nn.Module):
             dim (int): Input and output dimensionality.
             inter_dim (int): Hidden layer dimensionality.
         """
-        super().__init__()
-        self.w1 = Linear(dim, inter_dim)
-        self.w2 = Linear(inter_dim, dim)
-        self.w3 = Linear(dim, inter_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass for the Expert layer.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Output tensor after expert computation.
-        """
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        super().__init__(
+            dim=dim, hidden_dim=3 * inter_dim / 2, multiple_of=1, ffn_dim_multiplier=1
+        )
 
 
 class MoE(nn.Module):
