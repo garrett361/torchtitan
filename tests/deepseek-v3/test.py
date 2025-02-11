@@ -149,4 +149,6 @@ class TestLayers:
         )
 
         outputs = model(inputs)
-        assert outputs.shape == torch.Size((self.batch_size, self.vocab_size))
+        assert outputs.shape == torch.Size(
+            (self.batch_size, self.seq_len, self.vocab_size)
+        )
