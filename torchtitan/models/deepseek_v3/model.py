@@ -233,7 +233,7 @@ class MLA(nn.Module):
             self.wq_a = nn.Linear(self.dim, self.q_lora_rank)
             self.q_norm = build_norm(self.q_lora_rank)
             self.wq_b = nn.Linear(self.q_lora_rank, self.n_heads * self.qk_head_dim)
-        self.wkv_a = Linear(self.dim, self.kv_lora_rank + self.qk_rope_head_dim)
+        self.wkv_a = nn.Linear(self.dim, self.kv_lora_rank + self.qk_rope_head_dim)
         self.kv_norm = build_norm(self.kv_lora_rank)
         self.wkv_b = nn.Linear(
             self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim)
@@ -620,7 +620,7 @@ class DeepSeekV3(nn.Module):
         global world_size, rank
         world_size = dist.get_world_size() if dist.is_initialized() else 1
         rank = dist.get_rank() if dist.is_initialized() else 0
-        Linear.dtype = torch.float8_e4m3fn if args.dtype == "fp8" else torch.bfloat16
+        # linear.dtype = torch.float8_e4m3fn if args.dtype == "fp8" else torch.bfloat16
         super().__init__()
         self.max_seq_len = args.max_seq_len
         self.embed = nn.Embedding(args.vocab_size, args.dim)
