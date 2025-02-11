@@ -152,3 +152,16 @@ class TestLayers:
         assert outputs.shape == torch.Size(
             (self.batch_size, self.seq_len, self.vocab_size)
         )
+
+    def test_model_bwd(self) -> None:
+        model = DeepSeekV3(args=self.model_args).to(**self.factory_kwargs)
+        inputs = torch.randint(
+            self.vocab_size,
+            size=(
+                self.batch_size,
+                self.seq_len,
+            ),
+            device=self.device,
+        )
+
+        model(inputs).sum().backward()
