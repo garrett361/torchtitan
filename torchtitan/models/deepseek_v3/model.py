@@ -6,6 +6,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
+from torchtitan.models.norms import build_norm
 
 
 world_size = 1
@@ -49,6 +50,7 @@ class ModelArgs:
         beta_fast (int): Fast beta correction factor.
         beta_slow (int): Slow beta correction factor.
         mscale (float): Scaling factor for extended attention.
+        norm_type (str): type of norm layer
     """
 
     max_batch_size: int = 8
@@ -82,6 +84,8 @@ class ModelArgs:
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.0
+    # norm
+    norm: str = "rmsnorm"
 
 
 def linear(
@@ -241,34 +245,6 @@ class RowParallelLinear(Linear):
         return y
 
 
-class RMSNorm(nn.Module):
-    """
-    Root Mean Square Layer Normalization (RMSNorm).
-
-    Args:
-        dim (int): Dimension of the input tensor.
-        eps (float): Epsilon value for numerical stability. Defaults to 1e-6.
-    """
-
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.dim = dim
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x: torch.Tensor):
-        """
-        Forward pass for RMSNorm.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Normalized tensor with the same shape as input.
-        """
-        return F.rms_norm(x, (self.dim,), self.weight, self.eps)
-
-
 def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
     """
     Precomputes frequency-based complex exponential values for rotary positional embeddings.
@@ -407,12 +383,12 @@ class MLA(nn.Module):
             self.wq = ColumnParallelLinear(self.dim, self.n_heads * self.qk_head_dim)
         else:
             self.wq_a = Linear(self.dim, self.q_lora_rank)
-            self.q_norm = RMSNorm(self.q_lora_rank)
+            self.q_norm = build_norm(self.q_lora_rank)
             self.wq_b = ColumnParallelLinear(
                 self.q_lora_rank, self.n_heads * self.qk_head_dim
             )
         self.wkv_a = Linear(self.dim, self.kv_lora_rank + self.qk_rope_head_dim)
-        self.kv_norm = RMSNorm(self.kv_lora_rank)
+        self.kv_norm = build_norm(self.kv_lora_rank)
         self.wkv_b = ColumnParallelLinear(
             self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim)
         )
@@ -774,8 +750,8 @@ class Block(nn.Module):
             if layer_id < args.n_dense_layers
             else MoE(args)
         )
-        self.attn_norm = RMSNorm(args.dim)
-        self.ffn_norm = RMSNorm(args.dim)
+        self.attn_norm = build_norm(args.dim)
+        self.ffn_norm = build_norm(args.dim)
 
     def forward(
         self,
@@ -831,7 +807,7 @@ class DeepSeekV3(nn.Module):
         self.layers = torch.nn.ModuleList()
         for layer_id in range(args.n_layers):
             self.layers.append(Block(layer_id, args))
-        self.norm = RMSNorm(args.dim)
+        self.norm = build_norm(args.dim)
         self.head = ColumnParallelLinear(
             args.dim, args.vocab_size, dtype=torch.get_default_dtype()
         )
