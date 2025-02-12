@@ -11,3 +11,17 @@ import torchtitan.models.llama  # noqa: F401
 
 
 model_name_to_tokenizer = {"llama3": "tiktoken"}
+from torchtitan.models.llama import llama3_configs, Transformer
+from torchtitan.models.bamba import bamba_configs, Bamba
+
+models_config = {
+    "llama3": llama3_configs,
+    "bamba": bamba_configs,
+}
+
+model_name_to_cls = {"llama3": Transformer, "bamba": Bamba}
+
+model_name_to_tokenizer = {
+    "llama3": "tiktoken",
+    "bamba": "tiktoken",
+}
