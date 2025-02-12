@@ -21,7 +21,7 @@ save_tb_folder = "tb"
 enable_wandb = false
 
 [model]
-name = "llama3"
+name = "bamba"
 flavor = "debugmodel"
 norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only

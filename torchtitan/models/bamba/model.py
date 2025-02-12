@@ -19,7 +19,6 @@ from torchtitan.models.llama.model import (
     Attention,
     FeedForward,
     ModelArgs,
-    TransformerBlock,
     precompute_freqs_cis,
 )
 from torchtitan.models.norms import build_norm
@@ -329,7 +328,7 @@ class Bamba(nn.Module):
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
-            self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
+            self.layers[str(layer_id)] = BambaBlock(layer_id, model_args)
 
         self.norm = build_norm(
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps

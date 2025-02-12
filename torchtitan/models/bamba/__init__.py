@@ -11,5 +11,12 @@ from torchtitan.models.bamba.model import BambaModelArgs, Bamba
 __all__ = ["Bamba"]
 
 bamba_configs = {
-    "debugmodel": BambaModelArgs(dim=256, n_layers=8, n_heads=16, rope_theta=500000),
+    "debugmodel": BambaModelArgs(
+        dim=256,
+        n_layers=8,
+        n_heads=16,
+        rope_theta=500000,
+        max_seq_len=512,
+        chunk_size=64,
+    ),
 }
