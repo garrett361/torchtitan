@@ -37,7 +37,7 @@ class TestTPTransformers(DTest):
     def test_attn_tp(self) -> None:
         torch.manual_seed(42)
         mesh = init_device_mesh(
-            "cuda", mesh_shape=(self.get_world_size(),), mesh_dim_names=("tp",)
+            "cuda", mesh_shape=(self.world_size,), mesh_dim_names=("tp",)
         )
         freqs_cis = precompute_freqs_cis(
             self.model_args.dim // self.model_args.n_heads,
@@ -48,7 +48,7 @@ class TestTPTransformers(DTest):
             self.model_args.rope_theta,
         ).cuda()
 
-        attn = Attention(self.model_args).to(dtype=self.dtype, device=self.get_device())
+        attn = Attention(self.model_args).to(dtype=self.dtype, device=self.device)
         model_copy = deepcopy(attn)
         parallelize_module(
             module=attn,
@@ -60,7 +60,7 @@ class TestTPTransformers(DTest):
             self.batch_size,
             self.seq_len,
             self.model_args.dim,
-            device=self.get_device(),
+            device=self.device,
             dtype=self.dtype,
         )
         outputs_tp = attn(inputs, freqs_cis)
@@ -72,11 +72,9 @@ class TestTPTransformers(DTest):
     def test_model_tp(self) -> None:
         torch.manual_seed(42)
         mesh = init_device_mesh(
-            "cuda", mesh_shape=(self.get_world_size(),), mesh_dim_names=("tp",)
+            "cuda", mesh_shape=(self.world_size,), mesh_dim_names=("tp",)
         )
-        model = Transformer(self.model_args).to(
-            dtype=self.dtype, device=self.get_device()
-        )
+        model = Transformer(self.model_args).to(dtype=self.dtype, device=self.device)
         model_copy = deepcopy(model)
         apply_tp_llama(
             model,
@@ -88,7 +86,7 @@ class TestTPTransformers(DTest):
         inputs = torch.randint(
             self.model_args.vocab_size,
             size=(self.batch_size, self.seq_len),
-            device=self.get_device(),
+            device=self.device,
         )
         outputs_tp = model(inputs)
         outputs = model_copy(inputs)
@@ -107,11 +105,9 @@ class TestTPBamba(DTest):
     def test_basic_tp(self) -> None:
         torch.manual_seed(42)
         mesh = init_device_mesh(
-            "cuda", mesh_shape=(self.get_world_size(),), mesh_dim_names=("tp",)
+            "cuda", mesh_shape=(self.world_size,), mesh_dim_names=("tp",)
         )
-        model = Transformer(self.model_args).to(
-            dtype=self.dtype, device=self.get_device()
-        )
+        model = Transformer(self.model_args).to(dtype=self.dtype, device=self.device)
         model_copy = deepcopy(model)
         apply_tp_llama(
             model,
@@ -123,7 +119,7 @@ class TestTPBamba(DTest):
         inputs = torch.randint(
             self.model_args.vocab_size,
             size=(self.batch_size, self.seq_len),
-            device=self.get_device(),
+            device=self.device,
         )
         outputs_tp = model(inputs)
         outputs = model_copy(inputs)
