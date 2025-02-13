@@ -1,11 +1,13 @@
 import math
 from dataclasses import dataclass
-from typing import Tuple, Optional, Literal
+from typing import Literal, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from torch import nn
-from torchtitan.models.norms import build_norm
+
 from torchtitan.models.llama.model import FeedForward
+from torchtitan.models.norms import build_norm
 
 
 @dataclass
@@ -273,13 +275,14 @@ class MLA(nn.Module):
         )
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_local_heads, -1)], dim=-1)
-        scores = torch.einsum("bshd,bthd->bsht", q, k) * self.softmax_scale
-        if mask is not None:
-            scores += mask.unsqueeze(1)
-        scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
-        x = torch.einsum("bsht,bthd->bshd", scores, v)
-        x = self.wo(x.flatten(2))
-        return x
+        output = F.scaled_dot_product_attention(
+            q, k, v, scale=self.softmax_scale, is_causal=True
+        )
+        output = output.transpose(
+            1, 2
+        ).contiguous()  # (bsz, seqlen, n_local_heads, head_dim)
+        output = output.view(bsz, seqlen, -1)
+        return self.wo(output)
 
 
 class MLP(FeedForward):
