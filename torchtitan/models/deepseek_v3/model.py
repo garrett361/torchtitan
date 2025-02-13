@@ -11,8 +11,6 @@ from torchtitan.models.llama.model import FeedForward
 
 world_size = 1
 rank = 0
-block_size = 128
-gemm_impl: Literal["bf16", "fp8"] = "bf16"
 
 
 @dataclass
