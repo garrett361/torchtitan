@@ -13,7 +13,6 @@ world_size = 1
 rank = 0
 block_size = 128
 gemm_impl: Literal["bf16", "fp8"] = "bf16"
-attn_impl: Literal["naive", "absorb"] = "naive"  # Changed from "absorb"
 
 
 @dataclass
@@ -277,39 +276,18 @@ class MLA(nn.Module):
         kv = self.wkv_a(x)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis)
-        if attn_impl == "naive":
-            q = torch.cat([q_nope, q_pe], dim=-1)
-            kv = self.wkv_b(self.kv_norm(kv))
-            kv = kv.view(
-                bsz, seqlen, self.n_local_heads, self.qk_nope_head_dim + self.v_head_dim
-            )
-            k_nope, v = torch.split(
-                kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-            )
-            k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_local_heads, -1)], dim=-1)
-            scores = torch.einsum("bshd,bthd->bsht", q, k) * self.softmax_scale
-        else:
-            wkv_b = (
-                self.wkv_b.weight
-                if self.wkv_b.scale is None
-                else weight_dequant(self.wkv_b.weight, self.wkv_b.scale, block_size)
-            )
-            wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
-            q_nope = torch.einsum(
-                "bshd,hdc->bshc", q_nope, wkv_b[:, : self.qk_nope_head_dim]
-            )
-            scores = (
-                torch.einsum("bshc,btc->bsht", q_nope, self.kv_norm(kv))
-                + torch.einsum("bshr,btr->bsht", q_pe, k_pe.squeeze(2))
-            ) * self.softmax_scale
+        q = torch.cat([q_nope, q_pe], dim=-1)
+        kv = self.wkv_b(self.kv_norm(kv))
+        kv = kv.view(
+            bsz, seqlen, self.n_local_heads, self.qk_nope_head_dim + self.v_head_dim
+        )
+        k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_local_heads, -1)], dim=-1)
+        scores = torch.einsum("bshd,bthd->bsht", q, k) * self.softmax_scale
         if mask is not None:
             scores += mask.unsqueeze(1)
         scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
-        if attn_impl == "naive":
-            x = torch.einsum("bsht,bthd->bshd", scores, v)
-        else:
-            x = torch.einsum("bsht,btc->bshc", scores, self.kv_norm(kv))
-            x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim :])
+        x = torch.einsum("bsht,bthd->bshd", scores, v)
         x = self.wo(x.flatten(2))
         return x
 
