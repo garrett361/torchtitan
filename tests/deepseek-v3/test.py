@@ -99,12 +99,11 @@ class TestLayers:
         inputs = torch.randn(
             self.batch_size, self.seq_len, self.dim, **self.factory_kwargs
         )
-        start_pos = 0
         freqs_cis = precompute_freqs_cis(self.model_args).to(self.device)
-        freqs_cis_slice = freqs_cis[start_pos : start_pos + self.seq_len]
+        freqs_cis_slice = freqs_cis[: self.seq_len]
         mask = None
 
-        outputs = mla(inputs, start_pos, freqs_cis_slice, mask)
+        outputs = mla(inputs, freqs_cis_slice, mask)
         assert outputs.shape == inputs.shape
 
     def test_block_dense(self) -> None:
@@ -114,12 +113,11 @@ class TestLayers:
         inputs = torch.randn(
             self.batch_size, self.seq_len, self.dim, **self.factory_kwargs
         )
-        start_pos = 0
         freqs_cis = precompute_freqs_cis(self.model_args).to(self.device)
-        freqs_cis_slice = freqs_cis[start_pos : start_pos + self.seq_len]
+        freqs_cis_slice = freqs_cis[: self.seq_len]
         mask = None
 
-        outputs = block_dense(inputs, start_pos, freqs_cis_slice, mask)
+        outputs = block_dense(inputs, freqs_cis_slice, mask)
         assert outputs.shape == inputs.shape
 
     def test_block_moe(self) -> None:
@@ -129,12 +127,12 @@ class TestLayers:
         inputs = torch.randn(
             self.batch_size, self.seq_len, self.dim, **self.factory_kwargs
         )
-        start_pos = 0
+
         freqs_cis = precompute_freqs_cis(self.model_args).to(self.device)
-        freqs_cis_slice = freqs_cis[start_pos : start_pos + self.seq_len]
+        freqs_cis_slice = freqs_cis[: self.seq_len]
         mask = None
 
-        outputs = block_moe(inputs, start_pos, freqs_cis_slice, mask)
+        outputs = block_moe(inputs, freqs_cis_slice, mask)
         assert outputs.shape == inputs.shape
 
     def test_model(self) -> None:

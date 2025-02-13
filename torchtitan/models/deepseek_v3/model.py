@@ -239,7 +239,6 @@ class MLA(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        start_pos: int,
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
     ):
@@ -248,7 +247,6 @@ class MLA(nn.Module):
 
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
-            start_pos (int): Starting position in the sequence for caching.
             freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
             mask (Optional[torch.Tensor]): Mask tensor to exclude certain positions from attention.
 
@@ -256,7 +254,6 @@ class MLA(nn.Module):
             torch.Tensor: Output tensor with the same shape as the input.
         """
         bsz, seqlen, _ = x.size()
-        end_pos = start_pos + seqlen
         if self.q_lora_rank == 0:
             q = self.wq(x)
         else:
@@ -502,7 +499,6 @@ class Block(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        start_pos: int,
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
@@ -511,14 +507,13 @@ class Block(nn.Module):
 
         Args:
             x (torch.Tensor): Input tensor.
-            start_pos (int): Starting position in the sequence.
             freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
             mask (Optional[torch.Tensor]): Mask tensor to exclude certain positions from attention.
 
         Returns:
             torch.Tensor: Output tensor after block computation.
         """
-        x = x + self.attn(self.attn_norm(x), start_pos, freqs_cis, mask)
+        x = x + self.attn(self.attn_norm(x), freqs_cis, mask)
         x = x + self.ffn(self.ffn_norm(x))
         return x
 
@@ -556,27 +551,29 @@ class DeepSeekV3(nn.Module):
         )
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
 
-    def forward(self, tokens: torch.Tensor, start_pos: int = 0):
+    def forward(
+        self,
+        tokens: torch.Tensor,
+    ):
         """
         Forward pass for the Transformer model.
 
         Args:
             tokens (torch.Tensor): Input tensor of token IDs with shape (batch_size, seq_len).
-            start_pos (int, optional): Starting position in the sequence for rotary embeddings. Defaults to 0.
 
         Returns:
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
         seqlen = tokens.size(1)
         h = self.embed(tokens)
-        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+        freqs_cis = self.freqs_cis[:seqlen]
         mask = None
         if seqlen > 1:
             mask = torch.full(
                 (seqlen, seqlen), float("-inf"), device=tokens.device
             ).triu_(1)
         for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis, mask)
+            h = layer(h, freqs_cis, mask)
         h = self.norm(h)
         logits = self.head(h)
         # NOTE: @goon -  Original code below
