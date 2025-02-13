@@ -4,13 +4,8 @@ from typing import Tuple, Optional, Literal
 
 import torch
 from torch import nn
-import torch.distributed as dist
 from torchtitan.models.norms import build_norm
 from torchtitan.models.llama.model import FeedForward
-
-
-world_size = 1
-rank = 0
 
 
 @dataclass
@@ -216,7 +211,7 @@ class MLA(nn.Module):
         super().__init__()
         self.dim = args.dim
         self.n_heads = args.n_heads
-        self.n_local_heads = args.n_heads // world_size
+        self.n_local_heads = args.n_heads
         self.q_lora_rank = args.q_lora_rank
         self.kv_lora_rank = args.kv_lora_rank
         self.qk_nope_head_dim = args.qk_nope_head_dim
@@ -430,13 +425,11 @@ class MoE(nn.Module):
         """
         super().__init__()
         self.dim = args.dim
-        assert (
-            args.n_routed_experts % world_size == 0
-        ), f"Number of experts must be divisible by world size (world_size={world_size})"
+        # TODO: @goon - Reinsert removed sanity check on n_routed_experts / world_size divisibilty
         self.n_routed_experts = args.n_routed_experts
-        self.n_local_experts = args.n_routed_experts // world_size
+        self.n_local_experts = args.n_routed_experts
         self.n_activated_experts = args.n_activated_experts
-        self.experts_start_idx = rank * self.n_local_experts
+        self.experts_start_idx = 0  # was rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(args)
         self.experts = nn.ModuleList(
@@ -473,8 +466,7 @@ class MoE(nn.Module):
             idx, top = torch.where(indices == i)
             y[idx] += expert(x[idx]) * weights[idx, top, None]
         z = self.shared_experts(x)
-        if world_size > 1:
-            dist.all_reduce(y)
+        # NOTE: @goon - previously, there was a dist.all_reduce(y) when world_size > 1 here
         return (y + z).view(shape)
 
 
@@ -551,9 +543,6 @@ class DeepSeekV3(nn.Module):
         Args:
             args (ModelArgs): Model arguments containing transformer parameters.
         """
-        global world_size, rank
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
-        rank = dist.get_rank() if dist.is_initialized() else 0
         # linear.dtype = torch.float8_e4m3fn if args.dtype == "fp8" else torch.bfloat16
         super().__init__()
         self.max_seq_len = args.max_seq_len
@@ -590,8 +579,9 @@ class DeepSeekV3(nn.Module):
             h = layer(h, start_pos, freqs_cis, mask)
         h = self.norm(h)
         logits = self.head(h)
-        if world_size > 1:
-            all_logits = [torch.empty_like(logits) for _ in range(world_size)]
-            dist.all_gather(all_logits, logits)
-            logits = torch.cat(all_logits, dim=-1)
+        # NOTE: @goon -  Original code below
+        # if world_size > 1:
+        #     all_logits = [torch.empty_like(logits) for _ in range(world_size)]
+        #     dist.all_gather(all_logits, logits)
+        #     logits = torch.cat(all_logits, dim=-1)
         return logits
