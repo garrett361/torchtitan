@@ -244,41 +244,6 @@ class MLA(nn.Module):
             mscale = 0.1 * args.mscale * math.log(args.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
-        if attn_impl == "naive":
-            self.register_buffer(
-                "k_cache",
-                torch.zeros(
-                    args.max_batch_size,
-                    args.max_seq_len,
-                    self.n_local_heads,
-                    self.qk_head_dim,
-                ),
-                persistent=False,
-            )
-            self.register_buffer(
-                "v_cache",
-                torch.zeros(
-                    args.max_batch_size,
-                    args.max_seq_len,
-                    self.n_local_heads,
-                    self.v_head_dim,
-                ),
-                persistent=False,
-            )
-        else:
-            self.register_buffer(
-                "kv_cache",
-                torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank),
-                persistent=False,
-            )
-            self.register_buffer(
-                "pe_cache",
-                torch.zeros(
-                    args.max_batch_size, args.max_seq_len, self.qk_rope_head_dim
-                ),
-                persistent=False,
-            )
-
     def forward(
         self,
         x: torch.Tensor,
@@ -322,12 +287,7 @@ class MLA(nn.Module):
                 kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
             )
             k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_local_heads, -1)], dim=-1)
-            self.k_cache[:bsz, start_pos:end_pos] = k
-            self.v_cache[:bsz, start_pos:end_pos] = v
-            scores = (
-                torch.einsum("bshd,bthd->bsht", q, self.k_cache[:bsz, :end_pos])
-                * self.softmax_scale
-            )
+            scores = torch.einsum("bshd,bthd->bsht", q, k) * self.softmax_scale
         else:
             wkv_b = (
                 self.wkv_b.weight
@@ -338,19 +298,17 @@ class MLA(nn.Module):
             q_nope = torch.einsum(
                 "bshd,hdc->bshc", q_nope, wkv_b[:, : self.qk_nope_head_dim]
             )
-            self.kv_cache[:bsz, start_pos:end_pos] = self.kv_norm(kv)
-            self.pe_cache[:bsz, start_pos:end_pos] = k_pe.squeeze(2)
             scores = (
-                torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos])
-                + torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])
+                torch.einsum("bshc,btc->bsht", q_nope, self.kv_norm(kv))
+                + torch.einsum("bshr,btr->bsht", q_pe, k_pe.squeeze(2))
             ) * self.softmax_scale
         if mask is not None:
             scores += mask.unsqueeze(1)
         scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
         if attn_impl == "naive":
-            x = torch.einsum("bsht,bthd->bshd", scores, self.v_cache[:bsz, :end_pos])
+            x = torch.einsum("bsht,bthd->bshd", scores, v)
         else:
-            x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])
+            x = torch.einsum("bsht,btc->bshc", scores, self.kv_norm(kv))
             x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim :])
         x = self.wo(x.flatten(2))
         return x
