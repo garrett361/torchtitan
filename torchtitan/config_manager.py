@@ -471,7 +471,7 @@ class JobConfig:
             "--dataset.file_type",
             type=str,
             default="arrow",
-            help="Shard file format. Current options are pretokenized 'arrow' and raw text 'hf_parquet'.",
+            help="Shard file format. Current options are pretokenized 'arrow', raw text 'hf_parquet', auto-detect 'auto'.",
         )
         self.parser.add_argument(
             "--dataset.col_name",

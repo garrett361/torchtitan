@@ -423,6 +423,59 @@ class ParquetHandler(_ShardFileHandler):
         return doc[index : index + n_pull]
 
 
+class AutoHandler(_ShardFileHandler):
+    def __init__(self, tokenizer: Tokenizer, col_name: str = "text"):
+        self.PHandler = ParquetHandler(tokenizer, col_name)
+        self.AHandler = ArrowHandler()
+        self.current = _ShardFileHandler()
+
+    def is_legal(self, filepath: str):
+        return (
+            "parquet" in os.path.splitext(filepath)[1]
+            or "arrow" in os.path.splitext(filepath)[1]
+        )
+
+    def open(self, path: str):
+        """
+        Open the file, to be indexed via self.get() method.
+        Avoid reading entire multi-Gb files when possible!
+        """
+        if "arrow" in os.path.splitext(path)[1]:
+            self.current = self.AHandler
+        else:
+            self.current = self.PHandler
+        return self.current.open(path)
+
+    def length(self, path: str):
+        """
+        Calculate the number of documents in the given file.
+        Avoid reading entire multi-Gb files when possible!
+        """
+        if "arrow" in os.path.splitext(path)[1]:
+            return self.AHandler.length(path)
+        else:
+            return self.PHandler.length(path)
+
+    def get(self, reader, index: int, drop_tokens: Set):
+        """
+        Given the output of self.open() and an index, return the document at that index.
+        Then, remove the first and/or last items if they appear in drop_tokens.
+        Try to avoid reading entire documents at a time in case of long documents,
+        but this is less important than avoiding reading entire files as above.
+        Output must support len().
+        """
+        return self.current.get(reader, index, drop_tokens)
+
+    def slice(self, doc, index: int, n_pull: int) -> List:
+        """
+        Given a long document, retrieve n_pull consecutive items starting from index.
+        Again, try to be memory-efficient when doing so, but efficiency in self.get()
+        and self.open() is far more important.
+        Must return a python list.
+        """
+        return self.current.slice(doc, index, n_pull)
+
+
 # --------------  DATASET LAYERS  --------------
 
 
@@ -1394,6 +1447,7 @@ class SamplingDataset(_WrapperDataset):
 _handler_map = {
     "arrow": ArrowHandler,
     "hf_parquet": ParquetHandler,
+    "auto": AutoHandler,
 }
 
 
@@ -1440,12 +1494,10 @@ def build_experimental_data_loader(cfg, rank, world_size, tokenizer: Tokenizer =
     assert (
         cfg.dataset.file_type in _handler_map
     ), f"File type {cfg.dataset.file_type} is not recognized ({list(_handler_map.keys())})"
-    if cfg.dataset.file_type == "hf_parquet":
-        assert tokenizer is not None, "You must provide a tokenizer for hf_parquet raw text file shards."
-        filehandler = ParquetHandler(tokenizer, cfg.dataset.col_name)
+    if cfg.dataset.file_type in ["hf_parquet", "auto"]:
+        filehandler = _handler_map[cfg.dataset.file_type](tokenizer, cfg.dataset.col_name)
     else:
-        filehandler = _handler_map[cfg.dataset.file_type](cfg.dataset.col_name)
-    
+        filehandler = _handler_map[cfg.dataset.file_type](cfg.dataset.col_name)    
     # Base reader layer
     data = StreamingDocDataset(
         cfg.training.dataset_path,
