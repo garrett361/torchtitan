@@ -1481,7 +1481,7 @@ def build_experimental_data_loader(cfg, rank, world_size, tokenizer: Tokenizer =
     """
 
     datasets, weights, cols = parse_data_args(
-        cfg.dataset.datasets, cfg.dataset.dataset_weights
+        cfg.dataset.datasets, cfg.dataset.dataset_weights, cfg.dataset.col_name
     )
 
     def causal_lm(data_seq, prompt_len=0):
