@@ -359,8 +359,8 @@ class ArrowHandler(_ShardFileHandler):
     Non-standard data format, though.
     """
 
-    def __init__(self, col_name: str = "tokens"):
-        self.col_name = col_name
+    def __init__(self, col_names: List[str] = ["tokens"]):
+        self.col_names = col_names
 
     def is_legal(self, filepath: str):
         return "arrow" in os.path.splitext(filepath)[1]
@@ -372,7 +372,13 @@ class ArrowHandler(_ShardFileHandler):
         return self.open(path).num_record_batches
 
     def get(self, reader: pa.RecordBatchFileReader, index: int, drop_tokens: Set):
-        doc = reader.get_batch(index)[self.col_name]
+        frame = reader.get_batch(index)
+        doc = None
+        for name in self.col_names:
+            if name in frame.column_names:
+                doc = frame[name]
+                break
+        assert doc is not None, f"None of column names {self.col_names} found in file headers {frame.column_names}"
         if len(doc) > 0 and doc[0].as_py() in drop_tokens:
             doc = doc.slice(1, len(doc) - 1)
         if len(doc) > 0 and doc[-1].as_py() in drop_tokens:
@@ -391,22 +397,22 @@ class ParquetHandler(_ShardFileHandler):
     before getting/slicing. However, this is a standard and widely-used data format.
     """
 
-    def __init__(self, tokenizer: Tokenizer, col_name: str = "text"):
+    def __init__(self, tokenizer: Tokenizer, col_names: List[str] = ["text"]):
         self.tokenizer = tokenizer
-        self.col_name = col_name
+        self.col_names = col_names
 
     def is_legal(self, filepath: str):
         return "parquet" in os.path.splitext(filepath)[1]
 
     def open(self, path: str):
-        colnames = pq.read_metadata(path).schema.names
-        legal_fields = ["text", "content", "contents"]
-        overlap = set(legal_fields).intersection(set(colnames))
-        assert (
-            len(overlap) == 1
-        ), f"{len(overlap)} shared column names detected, need 1 ({overlap})"
-        name = overlap.pop()
-        return pq.read_pandas(path, columns=[name], partitioning=None)[name]
+        names = pq.read_metadata(path).schema.names
+        match = None
+        for name in self.col_names:
+            if name in names:
+                match = name
+                break
+        assert match is not None, f"None of column names {self.col_names} found in file headers {names}"
+        return pq.read_pandas(path, columns=[match], partitioning=None)[match]
 
     def length(self, path: str):
         return pq.read_metadata(path).num_rows
@@ -424,9 +430,9 @@ class ParquetHandler(_ShardFileHandler):
 
 
 class AutoHandler(_ShardFileHandler):
-    def __init__(self, tokenizer: Tokenizer, col_name: str = "text"):
-        self.PHandler = ParquetHandler(tokenizer, col_name)
-        self.AHandler = ArrowHandler()
+    def __init__(self, tokenizer: Tokenizer, col_names: List[str] = ["text"]):
+        self.PHandler = ParquetHandler(tokenizer, col_names)
+        self.AHandler = ArrowHandler(col_names)
         self.current = _ShardFileHandler()
 
     def is_legal(self, filepath: str):
@@ -893,6 +899,7 @@ class StreamingDocDataset(_StatefulDataset):
         # Position
         self.docset_index = 0
         self.chunk_index = -1
+        self.has_yielded = False
 
         # Stats
         self.epochs_seen = -1
@@ -1137,6 +1144,7 @@ class StreamingDocDataset(_StatefulDataset):
                                 self.percent_seen = (
                                     self.docs_seen * 100 / (self._len + 1e-9)
                                 )
+                            self.has_yielded = True
                             yield self._construct_chunk(j, doc, n_chunks)
 
                 # Advance RNG state
@@ -1157,7 +1165,11 @@ class StreamingDocDataset(_StatefulDataset):
                 n_chunks = math.ceil(doclen / self.chunksize)
                 for j in range(residual_chunks):
                     self.chunk_index = j
+                    self.has_yielded = True
                     yield self._construct_chunk(j, doc, n_chunks)
+
+            # Check that epoch was non-empty
+            assert self.has_yielded, f"Empty logical shard detected: {self.dataset, self.docset}"
 
     def load_state_dict(self, state_dicts, sharded_input=False):
         self.setup()
@@ -1468,7 +1480,7 @@ def build_experimental_data_loader(cfg, rank, world_size, tokenizer: Tokenizer =
         If performing tokenization dynamically, the tokenizer to use.
     """
 
-    datasets, weights = parse_data_args(
+    datasets, weights, cols = parse_data_args(
         cfg.dataset.datasets, cfg.dataset.dataset_weights
     )
 
@@ -1495,9 +1507,9 @@ def build_experimental_data_loader(cfg, rank, world_size, tokenizer: Tokenizer =
         cfg.dataset.file_type in _handler_map
     ), f"File type {cfg.dataset.file_type} is not recognized ({list(_handler_map.keys())})"
     if cfg.dataset.file_type in ["hf_parquet", "auto"]:
-        filehandler = _handler_map[cfg.dataset.file_type](tokenizer, cfg.dataset.col_name)
+        filehandler = _handler_map[cfg.dataset.file_type](tokenizer, cols)
     else:
-        filehandler = _handler_map[cfg.dataset.file_type](cfg.dataset.col_name)    
+        filehandler = _handler_map[cfg.dataset.file_type](cols)    
     # Base reader layer
     data = StreamingDocDataset(
         cfg.training.dataset_path,
@@ -1551,7 +1563,7 @@ def build_experimental_data_loader(cfg, rank, world_size, tokenizer: Tokenizer =
     )
 
 
-def parse_data_args(datas, weights):
+def parse_data_args(datas, weights, cols):
     # Convert csv inputs into corresponding lists of values
     def splitstrip(x):
         if isinstance(x, str):
@@ -1565,4 +1577,5 @@ def parse_data_args(datas, weights):
 
     datas = splitstrip(datas)
     weights = [float(x) for x in splitstrip(weights)]
-    return datas, weights
+    cols = splitstrip(cols)
+    return datas, weights, cols
