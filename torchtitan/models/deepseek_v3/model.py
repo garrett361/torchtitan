@@ -429,7 +429,11 @@ class MoE(nn.Module):
         """
         super().__init__()
         self.dim = args.dim
-        # TODO: @goon - Reinsert removed sanity check on n_routed_experts / world_size divisibilty
+        if ep_mesh is not None and args.n_routed_experts % ep_mesh.size():
+            raise ValueError(
+                f"{args.n_grouped_experts=} must be divisible by {ep_mesh.size()=}"
+            )
+
         self.n_routed_experts = args.n_routed_experts
         self.n_local_experts = args.n_routed_experts
         self.n_activated_experts = args.n_activated_experts
