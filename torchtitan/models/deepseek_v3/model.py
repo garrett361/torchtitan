@@ -464,12 +464,21 @@ class MoE(nn.Module):
             torch.Tensor: Output tensor after expert routing and computation.
         """
         shape = x.size()
+        # NOTE: @goon - the below line makes the results non-parallel across batches.
         x = x.view(-1, self.dim)
         weights, indices = self.gate(x)
         y = torch.zeros_like(x)
         counts = torch.bincount(
             indices.flatten(), minlength=self.n_routed_experts
         ).tolist()
+        # Naive EP Strategy:
+        # 1) AllGather `counts` so all EP ranks have tok-to-expert mapping info. Needed for
+        #    preparing recv buffers.
+        # 2) P2P isend/irecv of {x, } based on the results of 1.
+        # 3) Compute y=expert(x) on the concatenates x's from 2)
+        # 4) Send y's back to original ranks.
+        # 5) Complete  y = y * weights locally.
+        # 6) AllReduce(y)
         for i in range(self.experts_start_idx, self.experts_end_idx):
             if counts[i] == 0:
                 continue
