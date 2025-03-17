@@ -1,10 +1,11 @@
 import math
 from dataclasses import dataclass
-from typing import Literal, Tuple
+from typing import Literal, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.models.llama.model import FeedForward
 from torchtitan.models.norms import build_norm
@@ -302,7 +303,10 @@ class MLP(FeedForward):
             inter_dim (int): Hidden layer dimensionality.
         """
         super().__init__(
-            dim=dim, hidden_dim=3 * inter_dim / 2, multiple_of=1, ffn_dim_multiplier=1
+            dim=dim,
+            hidden_dim=3 * (inter_dim // 2),
+            multiple_of=1,
+            ffn_dim_multiplier=1,
         )
 
 
@@ -416,7 +420,7 @@ class MoE(nn.Module):
         shared_experts (nn.Module): Shared experts applied to all inputs.
     """
 
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, ep_mesh: Optional[DeviceMesh] = None):
         """
         Initializes the MoE module.
 
@@ -429,7 +433,10 @@ class MoE(nn.Module):
         self.n_routed_experts = args.n_routed_experts
         self.n_local_experts = args.n_routed_experts
         self.n_activated_experts = args.n_activated_experts
-        self.experts_start_idx = 0  # was rank * self.n_local_experts
+        self.ep_mesh = ep_mesh
+        self.experts_start_idx = (
+            0 if ep_mesh is None else ep_mesh.get_local_rank() * self.n_local_experts
+        )
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(args)
         self.experts = nn.ModuleList(
@@ -481,7 +488,9 @@ class Block(nn.Module):
         ffn_norm (nn.Module): Layer normalization for feed-forward network.
     """
 
-    def __init__(self, layer_id: int, args: ModelArgs):
+    def __init__(
+        self, layer_id: int, args: ModelArgs, ep_mesh: Optional[DeviceMesh] = None
+    ):
         """
         Initializes the Transformer block.
 
@@ -494,7 +503,7 @@ class Block(nn.Module):
         self.ffn = (
             MLP(args.dim, args.inter_dim)
             if layer_id < args.n_dense_layers
-            else MoE(args)
+            else MoE(args, ep_mesh)
         )
         self.attn_norm = build_norm(args.norm_type, args.dim)
         self.ffn_norm = build_norm(args.norm_type, args.dim)
@@ -533,7 +542,7 @@ class DeepSeekV3(nn.Module):
         freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
     """
 
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, ep_mesh: Optional[DeviceMesh] = None):
         """
         Initializes the Transformer model.
 
@@ -546,7 +555,7 @@ class DeepSeekV3(nn.Module):
         self.embed = nn.Embedding(args.vocab_size, args.dim)
         self.layers = torch.nn.ModuleList()
         for layer_id in range(args.n_layers):
-            self.layers.append(Block(layer_id, args))
+            self.layers.append(Block(layer_id, args, ep_mesh))
         self.norm = build_norm(args.norm_type, args.dim)
         self.head = nn.Linear(
             args.dim, args.vocab_size, dtype=torch.get_default_dtype()
