@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import Literal, Optional, Tuple
+from typing import Literal, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -242,7 +242,6 @@ class MLA(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor],
     ):
         """
         Forward pass for the Multi-Headed Attention Layer (MLA).
@@ -250,7 +249,6 @@ class MLA(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
             freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
-            mask (Optional[torch.Tensor]): Mask tensor to exclude certain positions from attention.
 
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
@@ -505,7 +503,6 @@ class Block(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """
         Forward pass for the Transformer block.
@@ -518,7 +515,7 @@ class Block(nn.Module):
         Returns:
             torch.Tensor: Output tensor after block computation.
         """
-        x = x + self.attn(self.attn_norm(x), freqs_cis, mask)
+        x = x + self.attn(self.attn_norm(x), freqs_cis)
         x = x + self.ffn(self.ffn_norm(x))
         return x
 
@@ -572,13 +569,8 @@ class DeepSeekV3(nn.Module):
         seqlen = tokens.size(1)
         h = self.embed(tokens)
         freqs_cis = self.freqs_cis[:seqlen]
-        mask = None
-        if seqlen > 1:
-            mask = torch.full(
-                (seqlen, seqlen), float("-inf"), device=tokens.device
-            ).triu_(1)
         for layer in self.layers:
-            h = layer(h, freqs_cis, mask)
+            h = layer(h, freqs_cis)
         h = self.norm(h)
         logits = self.head(h)
         # NOTE: @goon -  Original code below
