@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Literal, Optional, Tuple
 
 import torch
+import torch.distributed._functional_collectives as funcol
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
@@ -428,16 +429,22 @@ class MoE(nn.Module):
             args (ModelArgs): Model arguments containing MoE parameters.
         """
         super().__init__()
-        self.dim = args.dim
+        self.ep_mesh = ep_mesh
         if ep_mesh is not None and args.n_routed_experts % ep_mesh.size():
             raise ValueError(
-                f"{args.n_grouped_experts=} must be divisible by {ep_mesh.size()=}"
+                f"{args.n_routed_experts=} must be divisible by {ep_mesh.size()=}"
+            )
+        if ep_mesh is not None and ep_mesh.ndim != 1:
+            raise ValueError(
+                f"The expert parallel mesh must be one-dimensional: {ep_mesh.ndim=}"
             )
 
+        self.dim = args.dim
         self.n_routed_experts = args.n_routed_experts
-        self.n_local_experts = args.n_routed_experts
+        self.n_local_experts = args.n_routed_experts // (
+            self.ep_mesh.size() if self.ep_mesh is not None else 1
+        )
         self.n_activated_experts = args.n_activated_experts
-        self.ep_mesh = ep_mesh
         self.experts_start_idx = (
             0 if ep_mesh is None else ep_mesh.get_local_rank() * self.n_local_experts
         )
@@ -463,28 +470,77 @@ class MoE(nn.Module):
         Returns:
             torch.Tensor: Output tensor after expert routing and computation.
         """
+        if self.ep_mesh is not None:
+            return self._ep_forward(x)
         shape = x.size()
-        # NOTE: @goon - the below line makes the results non-parallel across batches.
         x = x.view(-1, self.dim)
         weights, indices = self.gate(x)
         y = torch.zeros_like(x)
-        counts = torch.bincount(
-            indices.flatten(), minlength=self.n_routed_experts
-        ).tolist()
-        # Naive EP Strategy:
-        # 1) AllGather `counts` so all EP ranks have tok-to-expert mapping info. Needed for
-        #    preparing recv buffers.
-        # 2) P2P isend/irecv of {x, } based on the results of 1.
-        # 3) Compute y=expert(x) on the concatenates x's from 2)
-        # 4) Send y's back to original ranks.
-        # 5) Complete  y = y * weights locally.
-        # 6) AllReduce(y)
+        counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts)
+
         for i in range(self.experts_start_idx, self.experts_end_idx):
             if counts[i] == 0:
                 continue
             expert = self.experts[i]
             idx, top = torch.where(indices == i)
             y[idx] += expert(x[idx]) * weights[idx, top, None]
+        z = self.shared_experts(x)
+        return (y + z).view(shape)
+
+    def _ep_forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Naive EP Strategy:
+        # 1) AllGather `counts` so all EP ranks have tok-to-expert mapping info. Needed for
+        #    preparing recv buffers.
+        # 2) All-to-all of x based on the results of 1.
+        # 3) Compute y=expert(x) on the concatenates x's from 2)
+        # 4) Send y's back to original ranks.
+        # 5) Complete  y = y * weights locally.
+        # 6) AllReduce(y)
+        # TODO: @goon - DRY
+
+        shape = x.size()
+        x = x.view(-1, self.dim)
+        weights, indices = self.gate(x)
+        y = torch.zeros_like(x)
+        counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts)
+
+        assert self.ep_mesh is not None  # mypy
+        counts_ag = funcol.all_gather_tensor_autograd(
+            counts, gather_dim=0, group=self.ep_mesh
+        ).reshape(self.ep_mesh.size(), -1)
+        counts = counts_ag.sum(dim=0)
+        for iter_idx in range(self.n_local_experts):
+            expert_idxs = list(
+                range(iter_idx, self.n_routed_experts, self.n_local_experts)
+            )
+            expert_idx_this_rank = expert_idxs[self.ep_mesh.get_local_rank()]
+
+            # TODO: @goon - torch.where called this way is apparently identical to torch.nonzero,
+            # which incurs a CUDA sync. Verify this is true and avoid, if so.
+            idxs_and_tops = [torch.where(indices == exp_idx) for exp_idx in expert_idxs]
+            x_slice = torch.cat([x[idx] for idx, _ in idxs_and_tops], dim=0)
+
+            # counts_ag_slice[rank, idx] gives how many tokens `rank` sends to expert `idx`
+            counts_ag_slice = counts_ag[:, iter_idx :: self.n_local_experts]
+
+            # TODO: @goon - avoid tolist() syncs :(  Not sure how since the split sizes need to be
+            # list[int]'s.
+            input_split_sizes = counts_ag_slice[self.ep_mesh.get_local_rank()].tolist()
+            output_split_sizes = counts_ag_slice[
+                :, self.ep_mesh.get_local_rank()
+            ].tolist()
+
+            x_all = funcol.all_to_all_single_autograd(
+                x_slice, output_split_sizes, input_split_sizes, group=self.ep_mesh
+            )
+
+            expert = self.experts[i]
+            out_all = expert(x_all)
+            out_slice = funcol.all_to_all_single_autograd(
+                out_all, input_split_sizes, output_split_sizes, group=self.ep_mesh
+            )
+
+            y[idx] += out_slice * weights[idx, top, None]
         z = self.shared_experts(x)
         # NOTE: @goon - previously, there was a dist.all_reduce(y) when world_size > 1 here
         return (y + z).view(shape)
