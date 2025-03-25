@@ -453,9 +453,7 @@ class MoE(nn.Module):
         self.experts = nn.ModuleDict(
             {
                 str(i): Expert(args.dim, args.moe_inter_dim)
-                if self.experts_start_idx <= i < self.experts_end_idx
-                else None
-                for i in range(self.n_routed_experts)
+                for i in range(self.experts_start_idx, self.experts_end_idx)
             }
         )
         self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
