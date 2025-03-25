@@ -1,15 +1,16 @@
+import torch
+
 from torchtitan.models.deepseek_v3.model import (
     MLA,
-    Block,
-    Gate,
-    MoE,
-    ModelArgs,
-    DeepSeekV3,
     MLP,
+    Block,
+    DeepSeekV3,
     Expert,
+    Gate,
+    ModelArgs,
+    MoE,
     precompute_freqs_cis,
 )
-import torch
 
 
 class TestLayers:
@@ -101,9 +102,8 @@ class TestLayers:
         )
         freqs_cis = precompute_freqs_cis(self.model_args).to(self.device)
         freqs_cis_slice = freqs_cis[: self.seq_len]
-        mask = None
 
-        outputs = mla(inputs, freqs_cis_slice, mask)
+        outputs = mla(inputs, freqs_cis_slice)
         assert outputs.shape == inputs.shape
 
     def test_block_dense(self) -> None:
@@ -115,9 +115,8 @@ class TestLayers:
         )
         freqs_cis = precompute_freqs_cis(self.model_args).to(self.device)
         freqs_cis_slice = freqs_cis[: self.seq_len]
-        mask = None
 
-        outputs = block_dense(inputs, freqs_cis_slice, mask)
+        outputs = block_dense(inputs, freqs_cis_slice)
         assert outputs.shape == inputs.shape
 
     def test_block_moe(self) -> None:
@@ -130,9 +129,8 @@ class TestLayers:
 
         freqs_cis = precompute_freqs_cis(self.model_args).to(self.device)
         freqs_cis_slice = freqs_cis[: self.seq_len]
-        mask = None
 
-        outputs = block_moe(inputs, freqs_cis_slice, mask)
+        outputs = block_moe(inputs, freqs_cis_slice)
         assert outputs.shape == inputs.shape
 
     def test_model(self) -> None:
