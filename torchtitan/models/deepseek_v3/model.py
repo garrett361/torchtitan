@@ -450,13 +450,13 @@ class MoE(nn.Module):
         )
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(args)
-        self.experts = nn.ModuleList(
-            [
-                Expert(args.dim, args.moe_inter_dim)
+        self.experts = nn.ModuleDict(
+            {
+                str(i): Expert(args.dim, args.moe_inter_dim)
                 if self.experts_start_idx <= i < self.experts_end_idx
                 else None
                 for i in range(self.n_routed_experts)
-            ]
+            }
         )
         self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
 
@@ -481,7 +481,7 @@ class MoE(nn.Module):
         for i in range(self.experts_start_idx, self.experts_end_idx):
             if counts[i] == 0:
                 continue
-            expert = self.experts[i]
+            expert = self.experts[str(i)]
             idx, top = torch.where(indices == i)
             y[idx] += expert(x[idx]) * weights[idx, top, None]
         z = self.shared_experts(x)
@@ -492,7 +492,7 @@ class MoE(nn.Module):
         # 1) AllGather `counts` so all EP ranks have tok-to-expert mapping info. Needed for
         #    preparing recv buffers.
         # 2) All-to-all of x based on the results of 1.
-        # 3) Compute y=expert(x) on the concatenates x's from 2)
+        # 3) Compute y=expert(x) on the concatenated x's from 2)
         # 4) Send y's back to original ranks.
         # 5) Complete  y = y * weights locally.
         # 6) AllReduce(y)
