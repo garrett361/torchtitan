@@ -681,9 +681,4 @@ class DeepSeekV3(nn.Module):
             h = layer(h, freqs_cis)
         h = self.norm(h)
         logits = self.head(h)
-        # NOTE: @goon -  Original code below
-        # if world_size > 1:
-        #     all_logits = [torch.empty_like(logits) for _ in range(world_size)]
-        #     dist.all_gather(all_logits, logits)
-        #     logits = torch.cat(all_logits, dim=-1)
         return logits
