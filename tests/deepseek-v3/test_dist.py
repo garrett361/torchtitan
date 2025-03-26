@@ -1,6 +1,7 @@
 from typing import Any
 
 import torch
+import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 
 from dtest import DTest
@@ -10,13 +11,15 @@ from torchtitan.models.deepseek_v3.model import (
 )
 
 
-class TestModel(DTest):
-    """
-    Basic functionality tests.
-    """
+def _copy_params(dst: nn.Module, src: nn.Module) -> None:
+    with torch.no_grad():
+        for p_dest, p_src in zip(dst.parameters(), src.parameters()):
+            p_dest.data.copy_(p_src.data)
 
+
+class TestEP(DTest):
     batch_size = 2
-    seq_len = 32
+    seq_len = 4
     # ModelArgs args
     vocab_size: int = 512
     dim: int = 256
@@ -27,7 +30,7 @@ class TestModel(DTest):
     n_heads: int = 8
     # moe
     n_shared_experts: int = 1
-    n_activated_experts: int = 2
+    n_activated_experts: int = 1
     # mla
     kv_lora_rank: int = dim // 4
     qk_nope_head_dim: int = dim // 8
@@ -42,7 +45,7 @@ class TestModel(DTest):
 
     @property
     def n_routed_experts(self) -> int:
-        return 4 * self.world_size
+        return 1 * self.world_size
 
     @property
     def model_args(self) -> ModelArgs:
@@ -65,12 +68,24 @@ class TestModel(DTest):
 
     def test_moe(self) -> None:
         torch.manual_seed(42)
+        moe = MoE(self.model_args).to(**self.factory_kwargs)
         ep_mesh = init_device_mesh(
             self.device_type, (self.world_size,), mesh_dim_names=("ep",)
         )
-        moe = MoE(self.model_args, ep_mesh).to(**self.factory_kwargs)
+        moe_ep = MoE(self.model_args, ep_mesh).to(**self.factory_kwargs)
+
+        # Force models equal
+        _copy_params(moe_ep.gate, moe.gate)
+        if self.n_shared_experts > 0:
+            _copy_params(moe_ep.shared_experts, moe.shared_experts)
+        if self.n_routed_experts > 0:
+            for idx in moe_ep.experts:
+                _copy_params(moe_ep.experts[idx], moe.experts[idx])
+
+        torch.manual_seed(42 + self.rank)
         inputs = torch.randn(
             self.batch_size, self.seq_len, self.dim, **self.factory_kwargs
         )
         outputs = moe(inputs)
+        outputs_ep = moe_ep(inputs)
         assert outputs.shape == inputs.shape
