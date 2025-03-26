@@ -19,7 +19,7 @@ def _copy_params(dst: nn.Module, src: nn.Module) -> None:
 
 class TestEP(DTest):
     batch_size = 2
-    seq_len = 4
+    seq_len = 32
     # ModelArgs args
     vocab_size: int = 512
     dim: int = 256
@@ -30,7 +30,7 @@ class TestEP(DTest):
     n_heads: int = 8
     # moe
     n_shared_experts: int = 1
-    n_activated_experts: int = 1
+    n_activated_experts: int = 2
     # mla
     kv_lora_rank: int = dim // 4
     qk_nope_head_dim: int = dim // 8
@@ -38,6 +38,7 @@ class TestEP(DTest):
     v_head_dim: int = dim // 8
 
     dtype = torch.bfloat16
+    tol = 1e-2
 
     @property
     def factory_kwargs(self) -> dict[str, Any]:
@@ -45,7 +46,7 @@ class TestEP(DTest):
 
     @property
     def n_routed_experts(self) -> int:
-        return 1 * self.world_size
+        return 4 * self.world_size
 
     @property
     def model_args(self) -> ModelArgs:
@@ -88,4 +89,4 @@ class TestEP(DTest):
         )
         outputs = moe(inputs)
         outputs_ep = moe_ep(inputs)
-        assert outputs.shape == inputs.shape
+        torch.testing.assert_close(outputs, outputs_ep, atol=self.tol, rtol=self.tol)

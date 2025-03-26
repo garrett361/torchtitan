@@ -430,7 +430,6 @@ class MoE(nn.Module):
             args (ModelArgs): Model arguments containing MoE parameters.
         """
         super().__init__()
-        self.ep_mesh = ep_mesh
         if ep_mesh is not None and args.n_routed_experts % ep_mesh.size():
             raise ValueError(
                 f"{args.n_routed_experts=} must be divisible by {ep_mesh.size()=}"
@@ -439,6 +438,8 @@ class MoE(nn.Module):
             raise ValueError(
                 f"The expert parallel mesh must be one-dimensional: {ep_mesh.ndim=}"
             )
+        self.ep_mesh = ep_mesh
+        self.ep_mesh_size = 1 if ep_mesh is None else ep_mesh.size()
 
         self.dim = args.dim
         self.n_routed_experts = args.n_routed_experts
@@ -473,61 +474,66 @@ class MoE(nn.Module):
         Returns:
             torch.Tensor: Output tensor after expert routing and computation.
         """
-        if self.ep_mesh is not None:
-            return self._ep_forward(x)
 
         x_shape = x.size()
         x = x.view(-1, self.dim)
 
         weights, indices = self.gate(x)
-        z = torch.zeros_like(x)
+        # counts[e] = num tokens this rank sends to expert e
         counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts)
 
-        for i in range(self.experts_start_idx, self.experts_end_idx):
-            if counts[i] == 0:
-                continue
-            expert = self.experts[str(i)]
-            idx, top = torch.where(indices == i)
-            z[idx] += expert(x[idx]) * weights[idx, top, None]
+        if self.ep_mesh is None:
+            z = self._get_routed_expert_outputs(x, weights, indices, counts)
+        else:
+            z = self._get_ep_routed_expert_outputs(x, weights, indices, counts)
 
         if self.shared_experts is None:
             return z.view(x_shape)
 
         return (z + self.shared_experts(x)).view(x_shape)
 
-    def _ep_forward(self, x: torch.Tensor) -> torch.Tensor:
-        # TODO: @goon - DRY
+    def _get_routed_expert_outputs(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.LongTensor,
+        counts: torch.LongTensor,
+    ) -> torch.Tensor:
+        z = torch.zeros_like(x)
+        for i in range(self.experts_start_idx, self.experts_end_idx):
+            if counts[i] == 0:
+                continue
+            expert = self.experts[str(i)]
+            idx, top = torch.where(indices == i)
+            z[idx] += expert(x[idx]) * weights[idx, top, None]
+        return z
 
-        x_shape = x.size()
-        x = x.view(-1, self.dim)
-        weights, indices = self.gate(x)
-
+    def _get_ep_routed_expert_outputs(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.LongTensor,
+        counts: torch.LongTensor,
+    ) -> torch.Tensor:
         # Sort tokens by the expert they are indexed to.
-        flat_sorted_indices = indices.flatten().argsort(dim=-1) // self.n_routed_experts
-        x_by_expert = x[flat_sorted_indices]
+        flat_sorted_indices = indices.flatten().argsort(dim=-1)
+        x_by_expert = x[flat_sorted_indices // self.n_activated_experts]
 
-        # Get counts of outgoing and incoming tensors
         assert self.ep_mesh is not None  # mypy
-        # send_counts_per_expert[e] = num tokens this rank sends to expert e
-        send_counts_per_expert = torch.bincount(
-            indices.flatten(), minlength=self.n_routed_experts
-        )
-        # recv_counts_per_local_expert.reshape(self.ep_mesh.size(), self.n_local_experts[r, l] = num
-        # tokens rank r sent to local expert l
+        # Get counts of incoming tensors. recv_counts_per_local_expert.reshape(self.ep_mesh.size(),
+        # self.n_local_experts[r, l] = num tokens rank r sent to local expert l
         recv_counts_per_local_expert = funcol.all_to_all_single(
-            send_counts_per_expert, None, None, group=self.ep_mesh
+            counts, None, None, group=self.ep_mesh
         )
 
         # We need the list version of the counts due to NCCL sigatures. This incurs a CUDA sync.
         # TODO: avoid https://github.com/NVIDIA/nccl/issues/1648
         send_counts = (
-            send_counts_per_expert.reshape(self.ep_mesh.size(), self.n_local_experts)
-            .sum(dim=1)
-            .tolist()
+            counts.reshape(self.ep_mesh_size, self.n_local_experts).sum(dim=1).tolist()
         )
         recv_counts = (
             recv_counts_per_local_expert.reshape(
-                self.ep_mesh.size(), self.n_local_experts
+                self.ep_mesh_size, self.n_local_experts
             )
             .sum(dim=1)
             .tolist()
@@ -567,11 +573,7 @@ class MoE(nn.Module):
         # Reshape and weight
         x_by_expert = x_by_expert.reshape(*(weights.shape + x_by_expert.shape[-1:]))
         z = torch.bmm(weights[:, None], x_by_expert).squeeze(1)
-
-        if self.shared_experts is None:
-            return z.view(x_shape)
-
-        return (z + self.shared_experts(x)).view(x_shape)
+        return z
 
 
 class Block(nn.Module):
