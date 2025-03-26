@@ -75,11 +75,11 @@ class TestLayers:
         assert outputs.shape == inputs.shape
 
     def test_gate(self) -> None:
-        expert = Gate(self.model_args).to(**self.factory_kwargs)
+        gate = Gate(self.model_args).to(**self.factory_kwargs)
         inputs = torch.randn(
             self.batch_size, self.seq_len, self.dim, **self.factory_kwargs
         )
-        weights, indices = expert(inputs)
+        weights, indices = gate(inputs)
         assert weights.shape == torch.Size(
             (self.batch_size, self.seq_len, self.n_activated_experts)
         )
