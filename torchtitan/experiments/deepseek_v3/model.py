@@ -663,12 +663,13 @@ class MoE(nn.Module):
 
         output_tokens = torch.empty_like(returned_tokens)
         output_tokens[idxs] = returned_tokens
+        output_tokens = output_tokens.view(
+            *(topk_weight.shape + output_tokens.shape[-1:])
+        ).to(topk_weight.dtype)
         final_out = (
-            output_tokens.view(*topk_ids.shape, -1)
-            .type(topk_weight.dtype)
-            .mul_(topk_weight.unsqueeze(dim=-1))
-            .sum(dim=1)
-            .type(returned_tokens.dtype)
+            torch.bmm(topk_weight[:, None], output_tokens)
+            .to(returned_tokens.dtype)
+            .squeeze(1)
         )
         return final_out
 
