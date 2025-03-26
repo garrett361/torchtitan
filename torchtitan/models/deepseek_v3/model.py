@@ -419,6 +419,7 @@ class MoE(nn.Module):
         gate (nn.Module): Gating mechanism to route inputs to experts.
         experts (nn.ModuleList): List of expert modules.
         shared_experts (nn.Module): Shared experts applied to all inputs.
+        ep_mesh (Optional[DeviceMesh]): 1D device mesh for expert parallel, if desired.
     """
 
     def __init__(self, args: ModelArgs, ep_mesh: Optional[DeviceMesh] = None):
@@ -456,7 +457,11 @@ class MoE(nn.Module):
                 for i in range(self.experts_start_idx, self.experts_end_idx)
             }
         )
-        self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
+        self.shared_experts = (
+            MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
+            if args.n_shared_experts
+            else None
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -470,10 +475,12 @@ class MoE(nn.Module):
         """
         if self.ep_mesh is not None:
             return self._ep_forward(x)
-        shape = x.size()
+
+        x_shape = x.size()
         x = x.view(-1, self.dim)
+
         weights, indices = self.gate(x)
-        y = torch.zeros_like(x)
+        z = torch.zeros_like(x)
         counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts)
 
         for i in range(self.experts_start_idx, self.experts_end_idx):
@@ -481,67 +488,90 @@ class MoE(nn.Module):
                 continue
             expert = self.experts[str(i)]
             idx, top = torch.where(indices == i)
-            y[idx] += expert(x[idx]) * weights[idx, top, None]
-        z = self.shared_experts(x)
-        return (y + z).view(shape)
+            z[idx] += expert(x[idx]) * weights[idx, top, None]
+
+        if self.shared_experts is None:
+            return z.view(x_shape)
+
+        return (z + self.shared_experts(x)).view(x_shape)
 
     def _ep_forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Naive EP Strategy:
-        # 1) AllGather `counts` so all EP ranks have tok-to-expert mapping info. Needed for
-        #    preparing recv buffers.
-        # 2) All-to-all of x based on the results of 1.
-        # 3) Compute y=expert(x) on the concatenated x's from 2)
-        # 4) Send y's back to original ranks.
-        # 5) Complete  y = y * weights locally.
-        # 6) AllReduce(y)
         # TODO: @goon - DRY
 
-        shape = x.size()
+        x_shape = x.size()
         x = x.view(-1, self.dim)
         weights, indices = self.gate(x)
-        y = torch.zeros_like(x)
-        counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts)
 
+        # Sort tokens by the expert they are indexed to.
+        flat_sorted_indices = indices.flatten().argsort(dim=-1) // self.n_routed_experts
+        x_by_expert = x[flat_sorted_indices]
+
+        # Get counts of outgoing and incoming tensors
         assert self.ep_mesh is not None  # mypy
-        counts_ag = funcol.all_gather_tensor_autograd(
-            counts, gather_dim=0, group=self.ep_mesh
-        ).reshape(self.ep_mesh.size(), -1)
-        counts = counts_ag.sum(dim=0)
-        for iter_idx in range(self.n_local_experts):
-            expert_idxs = list(
-                range(iter_idx, self.n_routed_experts, self.n_local_experts)
+        # send_counts_per_expert[e] = num tokens this rank sends to expert e
+        send_counts_per_expert = torch.bincount(
+            indices.flatten(), minlength=self.n_routed_experts
+        )
+        # recv_counts_per_local_expert.reshape(self.ep_mesh.size(), self.n_local_experts[r, l] = num
+        # tokens rank r sent to local expert l
+        recv_counts_per_local_expert = funcol.all_to_all_single(
+            send_counts_per_expert, None, None, group=self.ep_mesh
+        )
+
+        # We need the list version of the counts due to NCCL sigatures. This incurs a CUDA sync.
+        # TODO: avoid https://github.com/NVIDIA/nccl/issues/1648
+        send_counts = (
+            send_counts_per_expert.reshape(self.ep_mesh.size(), self.n_local_experts)
+            .sum(dim=1)
+            .tolist()
+        )
+        recv_counts = (
+            recv_counts_per_local_expert.reshape(
+                self.ep_mesh.size(), self.n_local_experts
             )
-            expert_idx_this_rank = expert_idxs[self.ep_mesh.get_local_rank()]
+            .sum(dim=1)
+            .tolist()
+        )
 
-            # TODO: @goon - torch.where called this way is apparently identical to torch.nonzero,
-            # which incurs a CUDA sync. Verify this is true and avoid, if so.
-            idxs_and_tops = [torch.where(indices == exp_idx) for exp_idx in expert_idxs]
-            x_slice = torch.cat([x[idx] for idx, _ in idxs_and_tops], dim=0)
+        # Receive toks from other workers
+        x_recv = funcol.all_to_all_single_autograd(
+            x_by_expert, recv_counts, send_counts, group=self.ep_mesh
+        )
 
-            # counts_ag_slice[rank, idx] gives how many tokens `rank` sends to expert `idx`
-            counts_ag_slice = counts_ag[:, iter_idx :: self.n_local_experts]
+        # Prepare outputs
+        x_send = torch.empty_like(x_recv)
 
-            # TODO: @goon - avoid tolist() syncs :(  Not sure how since the split sizes need to be
-            # list[int]'s.
-            input_split_sizes = counts_ag_slice[self.ep_mesh.get_local_rank()].tolist()
-            output_split_sizes = counts_ag_slice[
-                :, self.ep_mesh.get_local_rank()
-            ].tolist()
+        # Need to know which idxs in x_recv correspond to which local experts. Can derive from
+        # recv_counts_per_local_expert.
+        local_expert_idxs = torch.arange(
+            recv_counts_per_local_expert.numel(),
+            device=recv_counts_per_local_expert.device,
+        )
+        local_expert_idxs = (
+            local_expert_idxs.repeat_interleave(recv_counts_per_local_expert)
+            % self.n_local_experts
+        ) + self.experts_start_idx
 
-            x_all = funcol.all_to_all_single_autograd(
-                x_slice, output_split_sizes, input_split_sizes, group=self.ep_mesh
-            )
+        for exp_idx in range(self.experts_start_idx, self.experts_end_idx):
+            idxs = local_expert_idxs == exp_idx
+            # TODO: @goon - handle no-tokens edge case
+            x_send[idxs] = self.experts[str(exp_idx)](x_recv[idxs])
 
-            expert = self.experts[i]
-            out_all = expert(x_all)
-            out_slice = funcol.all_to_all_single_autograd(
-                out_all, input_split_sizes, output_split_sizes, group=self.ep_mesh
-            )
+        # Send results back to original ranks (reversed send/recv count data)
+        x_out = funcol.all_to_all_single_autograd(
+            x_send, send_counts, recv_counts, group=self.ep_mesh
+        )
 
-            y[idx] += out_slice * weights[idx, top, None]
-        z = self.shared_experts(x)
-        # NOTE: @goon - previously, there was a dist.all_reduce(y) when world_size > 1 here
-        return (y + z).view(shape)
+        # Store the unsorted results back in x_by_expert
+        x_by_expert[flat_sorted_indices] = x_out
+        # Reshape and weight
+        x_by_expert = x_by_expert.reshape(*(weights.shape + x_by_expert.shape[-1:]))
+        z = torch.bmm(weights[:, None], x_by_expert).squeeze(1)
+
+        if self.shared_experts is None:
+            return z.view(x_shape)
+
+        return (z + self.shared_experts(x)).view(x_shape)
 
 
 class Block(nn.Module):
