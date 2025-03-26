@@ -161,3 +161,42 @@ class TestLayers:
         )
 
         model(inputs).sum().backward()
+
+    def test_mock_ep(self) -> None:
+        torch.manual_seed(42)
+        expert = Gate(self.model_args).to(**self.factory_kwargs)
+        inputs = torch.randn(
+            self.batch_size * self.seq_len, self.dim, **self.factory_kwargs
+        )
+        # Original
+        weights, indices = expert(inputs)
+        outputs = torch.zeros_like(inputs)
+        for i in range(self.n_routed_experts):
+            idx, top = torch.where(indices == i)
+            outputs[idx] += (2 * i - 1) * inputs[idx] * weights[idx, top, None]
+            # outputs[idx] += inputs[idx]
+
+        # EP
+        flat_sorted_indices = indices.flatten().argsort(dim=-1)
+        inputs_flat_sorted = inputs[flat_sorted_indices // self.n_activated_experts]
+        counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts)
+        local_expert_idxs = torch.arange(
+            counts.numel(),
+            device=counts.device,
+        )
+
+        local_expert_idxs = local_expert_idxs.repeat_interleave(counts)
+        temp = torch.empty_like(inputs_flat_sorted)
+        temp2 = torch.empty_like(inputs_flat_sorted)
+        for i in range(self.n_routed_experts):
+            temp[local_expert_idxs == i] = (2 * i - 1) * inputs_flat_sorted[
+                local_expert_idxs == i
+            ]
+            # temp[local_expert_idxs == i] = inputs_flat_sorted[local_expert_idxs == i]
+        # unsort
+        temp2[flat_sorted_indices] = temp
+        temp2 = temp2.reshape(*(weights.shape + temp2.shape[-1:]))
+        outputs_ep = torch.bmm(weights[:, None], temp2).squeeze(1)
+
+        tol = 1e-2
+        torch.testing.assert_close(outputs, outputs_ep, atol=1e-2, rtol=1e-2)
