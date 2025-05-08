@@ -312,7 +312,6 @@ def main(job_config: JobConfig):
 
             input_ids = input_ids.to(device_type)
             labels = labels.to(device_type)
-            optimizers.zero_grad()
 
             # apply context parallelism if cp is enabled
             optional_context_parallel_ctx = (
@@ -350,26 +349,28 @@ def main(job_config: JobConfig):
                 with train_context(optional_context_parallel_ctx):
                     pred = model(input_ids)
                     loss = loss_fn(pred, labels)
+                    loss = loss / 2
                     # pred.shape=(bs, seq_len, vocab_size)
                     # need to free to before bwd to avoid peaking memory
                     del pred
                     loss.backward()
-
-            # clip gradients
-            gnorm = utils.clip_grad_norm_(
-                [p for m in model_parts for p in m.parameters()],
-                job_config.training.max_norm,
-                foreach=True,
-                pp_mesh=pp_mesh if parallel_dims.pp_enabled else None,
-            )
-            gnorms_since_last_log.append(gnorm)
 
             # sync float8 amaxes and scales
             float8_handler.sync_float8_amax_and_scale_history(model_parts)
 
             # optimizer step
             checkpoint.maybe_wait_for_staging()
-            optimizers.step()
+            if train_state.step % 2 == 0:
+                # clip gradients
+                gnorm = utils.clip_grad_norm_(
+                    [p for m in model_parts for p in m.parameters()],
+                    job_config.training.max_norm,
+                    foreach=True,
+                    pp_mesh=pp_mesh if parallel_dims.pp_enabled else None,
+                )
+                gnorms_since_last_log.append(gnorm)
+                optimizers.step()
+                optimizers.zero_grad()
             lr_schedulers.step()
 
             # calculate float8 dynamic amax/scale for all-parameter for FSDP2
@@ -384,7 +385,7 @@ def main(job_config: JobConfig):
                 or train_state.step % job_config.metrics.log_freq == 0
             ):
                 losses = [loss.item() for loss in losses_since_last_log]
-                avg_loss, max_loss = sum(losses) / len(losses), max(losses)
+                avg_loss, max_loss = sum(losses) / len(losses) * 2, max(losses)
                 gnorms = [gnorm.item() for gnorm in gnorms_since_last_log]
                 avg_gnorm = sum(gnorms) / len(gnorms)
                 if parallel_dims.dp_enabled:
