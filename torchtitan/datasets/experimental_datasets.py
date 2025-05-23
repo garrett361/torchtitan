@@ -1018,11 +1018,10 @@ class StreamingDocDataset(_StatefulDataset):
             doccount = 0
             for shard in shardset:
                 ndocs = doc_counts[shard]
-                doc_start = round(ndocs * shardset[shard][0])
-                doc_end = round(ndocs * shardset[shard][1]) - 1  # inclusive upper bound
-                if doc_end >= doc_start:
-                    self.docset.append([shard, doc_start, doc_end])
-                    doccount += doc_end - doc_start + 1
+                doc_start = int(ndocs * shardset[shard][0])
+                doc_end = max(doc_start, int(ndocs * shardset[shard][1]) - 1)  # inclusive upper bound
+                self.docset.append([shard, doc_start, doc_end])
+                doccount += doc_end - doc_start + 1
             self._len = doccount
 
             if self.verbose:
@@ -1128,10 +1127,8 @@ class StreamingDocDataset(_StatefulDataset):
                 doclcg = self._random_map_docid(docrange)
                 docid = doclcg + mindoc
                 doc = self.filehandler.get(reader, docid, self.drop)
-                if len(doc) == 0:
-                    continue
                 doclen = len(doc) + 1 if self.bos is None else len(doc) + 2
-                if doclen >= self.min_length:
+                if len(doc) > 0 and doclen >= self.min_length:
                     n_chunks = math.ceil(doclen / self.chunksize)
                     for j in range(n_chunks):
                         if i == 0 and j < residual_chunks:
@@ -1242,12 +1239,12 @@ class ScalableShardDataset(_WrapperDataset):
         if not self.is_setup:
             _StatefulDataset.setup(self)
             n_logical_shards = self.total_shards
+            assert (
+                n_logical_shards % self.worldsize == 0
+            ), f"Total workers {self.worldsize} must divide n_logical_shards {n_logical_shards} evenly"
             logicals = list(range(n_logical_shards))
             self.logicals_owned = _shard_partition(logicals, self.rank, self.worldsize)
             self.n_logicals = n_logical_shards // self.worldsize
-            assert (
-                len(self.logicals_owned) == self.n_logicals
-            ), "(world size * num workers) does not divide logical shards evenly"
 
             # Build logical shards
             for i in range(self.n_logicals):
@@ -1264,6 +1261,9 @@ class ScalableShardDataset(_WrapperDataset):
                     )
             [d.setup() for d in self.data]
             self.n_docs_remaining = [d._len for d in self.data]
+            assert (
+                sum(self.n_docs_remaining) > 0
+            ), f"No documents detected in shard {self.rank} of {self.datapath}"
 
             self.generator = torch.Generator().manual_seed(self.rank)
 
@@ -1271,6 +1271,11 @@ class ScalableShardDataset(_WrapperDataset):
         self.setup()
         # Grab one doc at a time in random order
         data = [iter(d) for d in self.data]
+        # Reset if we're rescaling into a prematurely finished epoch
+        # (i.e. [1,1,0,0,0,0] into [1,1,0] [0,0,0] )
+        if sum(self.n_docs_remaining) == 0:
+            self.n_docs_remaining = [d._len for d in self.data]
+            self.generator.manual_seed(self.rank)
         while True:
             # Sample logical shard (or load from ckp)
             if self.current_reader is not None:
@@ -1367,6 +1372,8 @@ class SamplingDataset(_WrapperDataset):
             ]
         )
         assert len(self.datasets) > 0, "You must specify at least one dataset"
+        for d in datasets:
+            assert os.path.exists(os.path.join(datapath, d)), f"Invalid subdataset path: {os.path.join(datapath, d)}"
 
         if weights is not None:
             assert len(weights) == len(
