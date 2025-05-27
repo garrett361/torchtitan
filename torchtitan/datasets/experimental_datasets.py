@@ -418,8 +418,6 @@ class ParquetHandler(_ShardFileHandler):
         return pq.read_metadata(path).num_rows
 
     def get(self, reader, index: int, drop_tokens: Set):
-        if reader.length() == 0:
-            return []
         doc = self.tokenizer.encode(str(reader[index])[:128_000])
         if len(doc) > 0 and doc[0] in drop_tokens:
             doc = doc[1:]
