@@ -349,7 +349,7 @@ def main(job_config: JobConfig):
                 with train_context(optional_context_parallel_ctx):
                     pred = model(input_ids)
                     loss = loss_fn(pred, labels)
-                    loss = loss / 2
+                    loss = loss / 3
                     # pred.shape=(bs, seq_len, vocab_size)
                     # need to free to before bwd to avoid peaking memory
                     del pred
@@ -360,7 +360,7 @@ def main(job_config: JobConfig):
 
             # optimizer step
             checkpoint.maybe_wait_for_staging()
-            if train_state.step % 2 == 0:
+            if train_state.step % 3 == 0:
                 # clip gradients
                 gnorm = utils.clip_grad_norm_(
                     [p for m in model_parts for p in m.parameters()],
@@ -385,7 +385,7 @@ def main(job_config: JobConfig):
                 or train_state.step % job_config.metrics.log_freq == 0
             ):
                 losses = [loss.item() for loss in losses_since_last_log]
-                avg_loss, max_loss = sum(losses) / len(losses) * 2, max(losses)
+                avg_loss, max_loss = sum(losses) / len(losses) * 3, max(losses)
                 gnorms = [gnorm.item() for gnorm in gnorms_since_last_log]
                 avg_gnorm = sum(gnorms) / len(gnorms)
                 if parallel_dims.dp_enabled:
