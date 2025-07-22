@@ -6,13 +6,14 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+from copy import deepcopy
+
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.experiments.llama4.optimizer import build_llama4_optimizers
-
-from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from torchtitan.protocols.train_spec import TrainSpec, register_train_spec
 
 from .infra.parallelize import parallelize_deepseekv3
 from .infra.pipeline import pipeline_deepseekv3
@@ -110,6 +111,9 @@ deepseekv3_configs = {
     ),
 }
 
+sixteen_b_for_loop = deepcopy(deepseekv3_configs["16B"])
+sixteen_b_for_loop.use_grouped_mm = False
+deepseekv3_configs["16B_for_loop"] = sixteen_b_for_loop
 
 register_train_spec(
     TrainSpec(
