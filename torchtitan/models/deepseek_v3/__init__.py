@@ -66,6 +66,7 @@ deepseekv3_configs = {
         qk_rope_head_dim=64,
         v_head_dim=128,
         mscale=0.70,
+        moe_mm_impl="grouped_mm"
     ),
     "236B": DeepSeekV3ModelArgs(
         vocab_size=102400,
@@ -112,7 +113,7 @@ deepseekv3_configs = {
 }
 
 sixteen_b_for_loop = deepcopy(deepseekv3_configs["16B"])
-sixteen_b_for_loop.use_grouped_mm = False
+sixteen_b_for_loop.moe_mm_impl = "for_loop"
 deepseekv3_configs["16B_for_loop"] = sixteen_b_for_loop
 
 register_train_spec(

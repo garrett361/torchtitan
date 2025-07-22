@@ -7,6 +7,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
+
 from torchtitan.experiments.llama4.infra.expert_parallel import expert_parallel
 
 from .args import DeepSeekV3ModelArgs
@@ -54,28 +55,32 @@ class GroupedExperts(nn.Module):
         dim: int,
         hidden_dim: int,
         num_experts: int,
-        use_grouped_mm: bool,
+        moe_mm_impl: str,
     ):
         super().__init__()
         self.num_experts = num_experts
         self.w1 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
         self.w2 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
         self.w3 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
-        self.use_grouped_mm = use_grouped_mm
+        if moe_mm_impl not in ("grouped_mm", "for_loop"):
+            raise ValueError(f"Unexpected {self.moe_mm_impl=} value.")
+        self.moe_mm_impl = moe_mm_impl
 
     def forward(
         self,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.use_grouped_mm:
+        if self.moe_mm_impl == "grouped_mm":
             return GroupedExperts._run_experts_grouped_mm(
                 self.w1, self.w2, self.w3, x, num_tokens_per_expert
             )
-        else:
+        elif self.moe_mm_impl == "for_loop":
             return GroupedExperts._run_experts_for_loop(
                 self.w1, self.w2, self.w3, x, num_tokens_per_expert
             )
+        else:
+            raise ValueError(f"Unexpected {self.moe_mm_impl=} value.")
 
     # TODO: keeping this for-loop implementation for comparison
     #       and readability, may remove later
@@ -249,7 +254,6 @@ class TokenChoiceTopKRouter(nn.Module):
 
 class MoE(nn.Module):
     def __init__(self, model_args: DeepSeekV3ModelArgs):
-
         super().__init__()
         dim = model_args.dim
 
@@ -262,7 +266,7 @@ class MoE(nn.Module):
             dim=dim,
             hidden_dim=hidden_dim,
             num_experts=num_experts,
-            use_grouped_mm=model_args.use_grouped_mm,
+            moe_mm_impl=model_args.moe_mm_impl,
         )
         self.router = TokenChoiceTopKRouter(
             dim=dim,
@@ -277,7 +281,7 @@ class MoE(nn.Module):
                 dim=dim,
                 hidden_dim=hidden_dim * model_args.n_shared_experts,
                 num_experts=1,  # Here needs to be 1 to make it equivalent to the MLP
-                use_grouped_mm=model_args.use_grouped_mm,
+                moe_mm_impl=model_args.moe_mm_impl,
             )
             if model_args.n_shared_experts > 0
             else None
