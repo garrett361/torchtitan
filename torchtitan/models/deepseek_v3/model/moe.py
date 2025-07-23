@@ -214,10 +214,10 @@ class GroupedExperts(nn.Module):
         else:
             # bmm fallback
             # x shape (num_experts, tokens_per_expert, dim)
-            h = F.silu(torch.bmm(x, w1))
-            h = h * torch.bmm(x, w3)
+            h = F.silu(torch.bmm(x, w1.swapdims(-1, -2)))
+            h = h * torch.bmm(x, w3.swapdims(-1, -2))
             # out shape (num_experts, tokens_per_expert, dim)
-            out = torch.bmm(h, w2)
+            out = torch.bmm(h, w2.swapdims(-1, -2))
         return out
 
     def init_weights(self, init_std: float):
