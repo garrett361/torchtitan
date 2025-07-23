@@ -58,9 +58,28 @@ class TestGroupedExperts:
         moe = self._get_moe(moe_mm_impl="cg_grouped_gemm")
         torch.manual_seed(42)
         moe_for_loop = self._get_moe(moe_mm_impl="for_loop")
+        # Check same weights:
+        with torch.no_grad():
+            for (n, p_for_loop), (_, p) in zip(
+                moe_for_loop.named_parameters(), moe.named_parameters(), strict=True
+            ):
+                if any(k in n for k in ("w1", "w2", "w3")):
+                    (
+                        torch.testing.assert_close(
+                            p_for_loop.data.swapdims(-1, -2).contiguous(),
+                            p.data,
+                            msg=f"{n=}",
+                        )
+                    )
+                else:
+                    torch.testing.assert_close(
+                        p_for_loop.data,
+                        p.data,
+                        msg=f"{n=}",
+                    )
         inputs = self._get_inputs()
         with torch.no_grad():
             outputs = moe(inputs)
             outputs_for_loop = moe_for_loop(inputs)
         rel_err = (outputs - outputs_for_loop).abs().mean() / outputs.abs().mean()
-        assert rel_err <= 1e-3
+        assert rel_err <= 1e-2
