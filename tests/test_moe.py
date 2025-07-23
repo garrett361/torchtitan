@@ -24,7 +24,7 @@ class TestGroupedExperts:
             moe_mm_impl=moe_mm_impl,
             n_routed_experts=self.n_routed_experts,
             n_shared_experts=self.n_shared_experts,
-            n_activated_experts=self.n_routed_experts,
+            n_activated_experts=self.n_activated_experts,
         )
 
     def _get_moe(self, moe_mm_impl: str = "grouped_mm") -> GroupedExperts:
