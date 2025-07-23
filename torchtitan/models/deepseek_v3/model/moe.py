@@ -179,39 +179,45 @@ class GroupedExperts(nn.Module):
     ) -> torch.Tensor:
         # NOTE: @goon - the ALIGN_SIZE_M in expert_parallel is 16; think this is the same as
         # group_size_m?
-        assert num_tokens_per_expert is not None
-        n_experts = w1.shape[0]
-        expert_indices = torch.arange(n_experts, dtype=torch.int32, device=x.device)
-        expert_indices = expert_indices.repeat_interleave(
-            num_tokens_per_expert, output_size=num_tokens_per_expert.sum()
-        )
-        # NOTE: @goon -  need to pad out to the shape of the actual input tensor. Don't fully
-        # understand the padding that is going on in the @expert_parallel wrapper with the
-        # torch.vstack call.
-        n_padding = x.shape[0] - expert_indices.shape[0]
-        padding = torch.zeros(
-            n_padding, dtype=expert_indices.dtype, device=expert_indices.device
-        )
-        expert_indices = torch.cat([expert_indices, padding], dim=0)
+        if num_tokens_per_expert is not None:
+            n_experts = w1.shape[0]
+            expert_indices = torch.arange(n_experts, dtype=torch.int32, device=x.device)
+            expert_indices = expert_indices.repeat_interleave(
+                num_tokens_per_expert, output_size=num_tokens_per_expert.sum()
+            )
+            # NOTE: @goon -  need to pad out to the shape of the actual input tensor. Don't fully
+            # understand the padding that is going on in the @expert_parallel wrapper with the
+            # torch.vstack call.
+            n_padding = x.shape[0] - expert_indices.shape[0]
+            padding = torch.zeros(
+                n_padding, dtype=expert_indices.dtype, device=expert_indices.device
+            )
+            expert_indices = torch.cat([expert_indices, padding], dim=0)
 
-        h = F.silu(
-            cg_grouped_gemm(
+            h = F.silu(
+                cg_grouped_gemm(
+                    x.bfloat16(),
+                    w1.bfloat16(),
+                    expert_indices=expert_indices,
+                    group_size_m=ALIGN_SIZE_M,
+                )
+            )
+            h = h * cg_grouped_gemm(
                 x.bfloat16(),
-                w1.bfloat16(),
+                w3.bfloat16(),
                 expert_indices=expert_indices,
                 group_size_m=ALIGN_SIZE_M,
             )
-        )
-        h = h * cg_grouped_gemm(
-            x.bfloat16(),
-            w3.bfloat16(),
-            expert_indices=expert_indices,
-            group_size_m=ALIGN_SIZE_M,
-        )
-        out = cg_grouped_gemm(
-            h, w2.bfloat16(), expert_indices=expert_indices, group_size_m=ALIGN_SIZE_M
-        ).type_as(x)
-
+            out = cg_grouped_gemm(
+                h, w2.bfloat16(), expert_indices=expert_indices, group_size_m=ALIGN_SIZE_M
+            ).type_as(x)
+        else:
+            # bmm fallback
+            # x shape (num_experts, tokens_per_expert, dim)
+            h = F.silu(torch.bmm(x, w1))
+            h = h * torch.bmm(x, w3)
+            # out shape (num_experts, tokens_per_expert, dim)
+            out = torch.bmm(h, w2)
         return out
 
     def init_weights(self, init_std: float):
