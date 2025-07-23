@@ -116,6 +116,10 @@ sixteen_b_for_loop = deepcopy(deepseekv3_configs["16B"])
 sixteen_b_for_loop.moe_mm_impl = "for_loop"
 deepseekv3_configs["16B_for_loop"] = sixteen_b_for_loop
 
+sixteen_b_cg_grouped_gemm = deepcopy(deepseekv3_configs["16B"])
+sixteen_b_cg_grouped_gemm.moe_mm_impl = "cg_grouped_gemm"
+deepseekv3_configs["16B_cg_grouped_gemm"] = sixteen_b_cg_grouped_gemm
+
 register_train_spec(
     TrainSpec(
         name="deepseek_v3",

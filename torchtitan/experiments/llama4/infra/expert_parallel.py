@@ -23,6 +23,7 @@ from torch.distributed.tensor import (
 from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
 
+ALIGN_SIZE_M = 16
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE
 class TensorParallel(ParallelStyle):
@@ -264,7 +265,6 @@ def expert_parallel(func: Callable) -> Callable:
             experts_per_ep_rank = w1.shape[0]
             num_ep_ranks = num_tokens_per_expert.shape[0] // experts_per_ep_rank
 
-            ALIGN_SIZE_M = 16
             with torch.no_grad():
                 (
                     permuted_indices,

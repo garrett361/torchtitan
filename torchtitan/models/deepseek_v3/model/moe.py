@@ -8,7 +8,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchtitan.experiments.llama4.infra.expert_parallel import expert_parallel
+from torchtitan.experiments.kernels.triton_contiguous_group_gemm.cg_backward import (
+    cg_grouped_gemm,
+)
+from torchtitan.experiments.llama4.infra.expert_parallel import (
+    ALIGN_SIZE_M,
+    expert_parallel,
+)
 
 from .args import DeepSeekV3ModelArgs
 
@@ -58,12 +64,20 @@ class GroupedExperts(nn.Module):
         moe_mm_impl: str,
     ):
         super().__init__()
+        if moe_mm_impl not in ("grouped_mm", "for_loop", "cg_grouped_gemm"):
+            raise ValueError(f"Unexpected {moe_mm_impl=} value.")
         self.num_experts = num_experts
-        self.w1 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
-        self.w2 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
-        self.w3 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
-        if moe_mm_impl not in ("grouped_mm", "for_loop"):
-            raise ValueError(f"Unexpected {self.moe_mm_impl=} value.")
+        w1 = torch.empty(num_experts, dim, hidden_dim)
+        w2 = torch.empty(num_experts, hidden_dim, dim)
+        w3 = torch.empty(num_experts, dim, hidden_dim)
+        if moe_mm_impl == "cg_grouped_gemm":
+            w1 = w1.swapdims(-1, -2).contiguous()
+            w2 = w2.swapdims(-1, -2).contiguous()
+            w3 = w3.swapdims(-1, -2).contiguous()
+
+        self.w1 = nn.Parameter(w1)
+        self.w2 = nn.Parameter(w2)
+        self.w3 = nn.Parameter(w3)
         self.moe_mm_impl = moe_mm_impl
 
     def forward(
@@ -75,12 +89,15 @@ class GroupedExperts(nn.Module):
             return GroupedExperts._run_experts_grouped_mm(
                 self.w1, self.w2, self.w3, x, num_tokens_per_expert
             )
-        elif self.moe_mm_impl == "for_loop":
+        if self.moe_mm_impl == "for_loop":
             return GroupedExperts._run_experts_for_loop(
                 self.w1, self.w2, self.w3, x, num_tokens_per_expert
             )
-        else:
-            raise ValueError(f"Unexpected {self.moe_mm_impl=} value.")
+        if self.moe_mm_impl == "cg_grouped_gemm":
+            return GroupedExperts._run_experts_cg_grouped_gemm(
+                self.w1, self.w2, self.w3, x, num_tokens_per_expert
+            )
+        raise ValueError(f"Unexpected {self.moe_mm_impl=} value.")
 
     # TODO: keeping this for-loop implementation for comparison
     #       and readability, may remove later
@@ -148,6 +165,52 @@ class GroupedExperts(nn.Module):
         h = F.silu(torch._grouped_mm(x.bfloat16(), w1.bfloat16(), offs=offsets))
         h = h * torch._grouped_mm(x.bfloat16(), w3.bfloat16(), offs=offsets)
         out = torch._grouped_mm(h, w2.bfloat16(), offs=offsets).type_as(x)
+
+        return out
+
+    @expert_parallel
+    @staticmethod
+    def _run_experts_cg_grouped_gemm(
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        w3: torch.Tensor,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # NOTE: @goon - the ALIGN_SIZE_M in expert_parallel is 16; think this is the same as
+        # group_size_m?
+        assert num_tokens_per_expert is not None
+        n_experts = w1.shape[0]
+        expert_indices = torch.arange(n_experts, dtype=torch.int32, device=x.device)
+        expert_indices = expert_indices.repeat_interleave(
+            num_tokens_per_expert, output_size=num_tokens_per_expert.sum()
+        )
+        # NOTE: @goon -  need to pad out to the shape of the actual input tensor. Don't fully
+        # understand the padding that is going on in the @expert_parallel wrapper with the
+        # torch.vstack call.
+        n_padding = x.shape[0] - expert_indices.shape[0]
+        padding = torch.zeros(
+            n_padding, dtype=expert_indices.dtype, device=expert_indices.device
+        )
+        expert_indices = torch.cat([expert_indices, padding], dim=0)
+
+        h = F.silu(
+            cg_grouped_gemm(
+                x.bfloat16(),
+                w1.bfloat16(),
+                expert_indices=expert_indices,
+                group_size_m=ALIGN_SIZE_M,
+            )
+        )
+        h = h * cg_grouped_gemm(
+            x.bfloat16(),
+            w3.bfloat16(),
+            expert_indices=expert_indices,
+            group_size_m=ALIGN_SIZE_M,
+        )
+        out = cg_grouped_gemm(
+            h, w2.bfloat16(), expert_indices=expert_indices, group_size_m=ALIGN_SIZE_M
+        ).type_as(x)
 
         return out
 

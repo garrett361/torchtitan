@@ -9,10 +9,12 @@ import time
 import unittest
 
 import torch
-from cg_backward import cg_grouped_gemm
-
-# Import implementations to test
-from cg_forward import cg_grouped_gemm_forward
+from torchtitan.experiments.kernels.triton_contiguous_group_gemm.cg_backward import (
+    cg_grouped_gemm,
+)
+from torchtitan.experiments.kernels.triton_contiguous_group_gemm.cg_forward import (
+    cg_grouped_gemm_forward,
+)
 
 
 def run_tests(run_benchmarks=False):

@@ -10,8 +10,8 @@ import triton
 import triton.language as tl
 
 # Import configs and utilities from cg_forward
-
-from tma_cuda_autotune import early_config_prune, STANDARD_CONFIGS
+from .cg_forward import cg_grouped_gemm_forward
+from .tma_cuda_autotune import early_config_prune, STANDARD_CONFIGS
 
 # ============ Triton kernel for contiguous grouped GEMM backward inputs ============
 
@@ -349,7 +349,6 @@ class ContiguousGroupedGEMM(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inputs, expert_weights, expert_indices, group_size_m=128):
         """Forward pass for contiguous grouped GEMM."""
-        from cg_forward import cg_grouped_gemm_forward
 
         # Save for backward
         ctx.save_for_backward(inputs, expert_weights, expert_indices)
