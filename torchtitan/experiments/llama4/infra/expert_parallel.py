@@ -26,7 +26,7 @@ from torch.distributed.tensor.placement_types import Placement
 # ALIGN_SIZE_M = 16
 # NOTE: @goon - bumping up ALIGN_SIZE_M because cg_grouped_gemm is silently wrong for ALIGN_SIZE_M =
 # 16 ( also 32).
-ALIGN_SIZE_M = 64
+ALIGN_SIZE_M = 128
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE
 class TensorParallel(ParallelStyle):
