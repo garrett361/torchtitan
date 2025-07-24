@@ -7,6 +7,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.distributed.tensor import DTensor
 
 from torchtitan.experiments.kernels.triton_contiguous_group_gemm.cg_backward import (
     cg_grouped_gemm,
@@ -209,7 +210,10 @@ class GroupedExperts(nn.Module):
                 group_size_m=ALIGN_SIZE_M,
             )
             out = cg_grouped_gemm(
-                h, w2.bfloat16(), expert_indices=expert_indices, group_size_m=ALIGN_SIZE_M
+                h,
+                w2.bfloat16(),
+                expert_indices=expert_indices,
+                group_size_m=ALIGN_SIZE_M,
             ).type_as(x)
         else:
             # bmm fallback
@@ -221,23 +225,26 @@ class GroupedExperts(nn.Module):
         return out
 
     def init_weights(self, init_std: float):
-        # # special cg_grouped_gemm handling
-        # if self.moe_mm_impl == "cg_grouped_gemm":
-        #     with torch.no_grad():
-        #         self.w1.data = self.w1.data.swapdims(-1, -2).contiguous()
-        #         self.w2.data = self.w2.data.swapdims(-1, -2).contiguous()
-        #         self.w3.data = self.w3.data.swapdims(-1, -2).contiguous()
+        # HACK: @goon - use special init only for non-DTensor weights. This lets us test correctness
+        # easily in test_moe.py. For some reason, though, doing this in the real training runs
+        # messes up autograd.
+        # special cg_grouped_gemm handling
+        if self.moe_mm_impl == "cg_grouped_gemm" and not isinstance(self.w1, DTensor):
+            with torch.no_grad():
+                self.w1.data = self.w1.data.swapdims(-1, -2).contiguous()
+                self.w2.data = self.w2.data.swapdims(-1, -2).contiguous()
+                self.w3.data = self.w3.data.swapdims(-1, -2).contiguous()
 
         nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.w2, mean=0.0, std=init_std)
         nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std)
 
-        # # special cg_grouped_gemm handling
-        # if self.moe_mm_impl == "cg_grouped_gemm":
-        #     with torch.no_grad():
-        #         self.w1.data = self.w1.data.swapdims(-1, -2).contiguous()
-        #         self.w2.data = self.w2.data.swapdims(-1, -2).contiguous()
-        #         self.w3.data = self.w3.data.swapdims(-1, -2).contiguous()
+        # special cg_grouped_gemm handling
+        if self.moe_mm_impl == "cg_grouped_gemm" and not isinstance(self.w1, DTensor):
+            with torch.no_grad():
+                self.w1.data = self.w1.data.swapdims(-1, -2).contiguous()
+                self.w2.data = self.w2.data.swapdims(-1, -2).contiguous()
+                self.w3.data = self.w3.data.swapdims(-1, -2).contiguous()
 
 
 class TokenChoiceTopKRouter(nn.Module):
