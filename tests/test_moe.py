@@ -1,3 +1,4 @@
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -143,20 +144,20 @@ class TestGroupedExperts:
                     x.bfloat16(),
                     moe_cg.experts.w1.bfloat16(),
                     expert_indices=expert_indices,
-                    group_size_m=ALIGN_SIZE_M,
+                    ALIGN_SIZE_M=ALIGN_SIZE_M,
                 )
             )
             h = h * cg_grouped_gemm(
                 x.bfloat16(),
                 moe_cg.experts.w3.bfloat16(),
                 expert_indices=expert_indices,
-                group_size_m=ALIGN_SIZE_M,
+                ALIGN_SIZE_M=ALIGN_SIZE_M,
             )
             out_cg = cg_grouped_gemm(
                 h,
                 moe_cg.experts.w2.bfloat16(),
                 expert_indices=expert_indices,
-                group_size_m=ALIGN_SIZE_M,
+                ALIGN_SIZE_M=ALIGN_SIZE_M,
             ).type_as(x)
 
         # Checks. Isolate the trivial and non-trivial indices
@@ -204,7 +205,7 @@ class TestGroupedExperts:
                 x.bfloat16(),
                 moe.experts.w1.swapdims(-1, -2).contiguous().bfloat16(),
                 expert_indices=expert_indices,
-                group_size_m=ALIGN_SIZE_M,
+                ALIGN_SIZE_M=ALIGN_SIZE_M,
             )
             h_non_zero = h[permuted_indices != -1]
             h_cg_non_zero = h_cg[permuted_indices != -1]
@@ -250,7 +251,7 @@ class TestGroupedExperts:
                 x.bfloat16(),
                 moe.experts.w1.swapdims(-1, -2).contiguous().bfloat16(),
                 expert_indices=expert_indices,
-                group_size_m=ALIGN_SIZE_M,
+                ALIGN_SIZE_M=ALIGN_SIZE_M,
             )
             h_non_zero = h[permuted_indices != -1]
             h_cg_non_zero = h_cg[permuted_indices != -1]
@@ -300,49 +301,85 @@ class TestGroupedExperts:
         rel_err = (outputs - outputs_for_loop).abs().mean() / outputs.abs().mean()
         assert rel_err <= 1e-2
 
-    def test4(self) -> None:
+    @pytest.mark.parametrize("alignment", (128, 64, 32, ALIGN_SIZE_M))
+    def test_zeros(self, alignment: int) -> None:
         torch.manual_seed(42)
-        moe = self._get_moe(moe_mm_impl="grouped_mm")
-        torch.manual_seed(42)
-        moe_cg = self._get_moe(moe_mm_impl="cg_grouped_gemm")
-        inputs = self._get_inputs()
+        n_experts = 2
+        tok_per_expert = alignment
+        d_model = 64
+        x = torch.randn(
+            n_experts * tok_per_expert, d_model, dtype=torch.bfloat16, device="cuda"
+        )
+        w = torch.randn(
+            n_experts, d_model, d_model, dtype=torch.bfloat16, device="cuda"
+        )
         with torch.no_grad():
-            x, num_tokens_per_expert, permuted_indices, actual_num_tokens_per_expert = (
-                self._get_moe_tensors(inputs, moe)
-            )
-            # TODO: @goon - DELETE
-            # x = torch.ones_like(x)
-            torch.nn.init.normal_(moe.experts.w1)
-            torch.nn.init.zeros_(moe.experts.w1[1:])
+            # Zero out everything but expert zero's weights.
+            torch.nn.init.zeros_(w[1:])
+            # And zero out the first expert's inputs
+            torch.nn.init.zeros_(x[:tok_per_expert])
 
-            # grouped_mm
+            num_tokens_per_expert = torch.full(
+                (n_experts,), alignment, dtype=torch.int32, device="cuda"
+            )
+
+            # Matmul outputs should be all zeros.
+
+            # For-loop.
+
+            # Setup
+            M_total = n_experts * tok_per_expert
+            num_groups = M_total // alignment
+            expert_indices = torch.zeros(M_total, dtype=torch.int32, device="cuda")
+            for group_idx in range(num_groups):
+                start_idx = group_idx * alignment
+                end_idx = start_idx + alignment
+                # Assign this entire group to one expert
+                expert_idx = group_idx % n_experts
+                expert_indices[start_idx:end_idx] = expert_idx
+
+            # For-loop compute
+            out_fl = torch.zeros((M_total, d_model), device="cuda")
+            for g in range(num_groups):
+                group_start = g * alignment
+                group_end = (g + 1) * alignment
+                expert_idx = expert_indices[group_start].item()
+
+                # Compute output for this group
+                out_fl[group_start:group_end] = (
+                    x[group_start:group_end] @ w[expert_idx].t()
+                )
+            torch.testing.assert_close(out_fl, torch.zeros_like(out_fl))
+
+            # _grouped_mm
             offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
-            h = torch._grouped_mm(x.bfloat16(), moe.experts.w1.bfloat16(), offs=offsets)
+            out_gm = torch._grouped_mm(x, w, offs=offsets)
+            torch.testing.assert_close(out_gm, torch.zeros_like(out_gm))
+
             # cg_grouped_gemm
-            n_experts = moe_cg.experts.w1.shape[0]
-            expert_indices = torch.arange(n_experts, dtype=torch.int32, device=x.device)
-            expert_indices = expert_indices.repeat_interleave(
+
+            # Create the expert indices in two ways to check correctness.
+
+            # https://github.com/gpu-mode/triton-tutorials/blob/dc1532fc128377fc108146e78b4b49439d4bef45/lesson_5/triton_contiguous_group_gemm/benchmark_grouped_gemm.py#L59
+
+            # cg_grouped_gemm
+
+            # First an alternative expert_indices computation:
+            expert_indices_alt = torch.arange(
+                n_experts, dtype=torch.int32, device=x.device
+            )
+            expert_indices_alt = expert_indices_alt.repeat_interleave(
                 num_tokens_per_expert, output_size=num_tokens_per_expert.sum()
             )
-            # NOTE: @goon -  need to pad out to the shape of the actual input tensor. Don't fully
-            # understand the padding that is going on in the @expert_parallel wrapper with the
-            # torch.vstack call.
-            n_padding = x.shape[0] - expert_indices.shape[0]
-            padding = torch.full(
-                (n_padding,),
-                n_experts - 1,
-                dtype=expert_indices.dtype,
-                device=expert_indices.device,
-            )
-            expert_indices = torch.cat([expert_indices, padding], dim=0)
 
-            h_cg = cg_grouped_gemm(
-                x.bfloat16(),
-                moe.experts.w1.swapdims(-1, -2).contiguous().bfloat16(),
+            # Check equivalence
+            torch.testing.assert_close(expert_indices_alt, expert_indices_alt)
+
+            # Then test the outputs
+            out_cg = cg_grouped_gemm(
+                x,
+                w.swapdims(-1, -2).contiguous(),
                 expert_indices=expert_indices,
-                group_size_m=ALIGN_SIZE_M,
+                group_size_m=alignment,
             )
-            h_non_zero = h[permuted_indices != -1]
-            h_cg_non_zero = h_cg[permuted_indices != -1]
-            diff = h_non_zero - h_cg_non_zero
-            diff
+            torch.testing.assert_close(out_cg, torch.zeros_like(out_cg))  # FAILS
