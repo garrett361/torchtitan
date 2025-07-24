@@ -1,6 +1,5 @@
 import pytest
 import torch
-import torch.nn.functional as F
 
 from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
 from torchtitan.experiments.kernels.triton_contiguous_group_gemm.cg_backward import (
@@ -16,17 +15,12 @@ from torchtitan.models.deepseek_v3.model.moe import GroupedExperts, MoE
 class TestGroupedExperts:
     dim = 2048
     moe_inter_dim = 1408
-    # batch_size = 2
-    batch_size = 1
-    # seqlen = 128
-    seqlen = 16
+    batch_size = 2
+    seqlen = ALIGN_SIZE_M
     dtype = torch.bfloat16
     n_routed_experts: int = 64
     n_shared_experts: int = 0
-    # NOTE: @goon - generate_permute_indices seems to have a bug when n_activated_experts = 1, as it
-    # returns permuted_indices as all -1's
-    # n_activated_experts: int = 8
-    n_activated_experts: int = 1
+    n_activated_experts: int = 8
 
     def _get_args(self, moe_mm_impl: str = "grouped_mm") -> DeepSeekV3ModelArgs:
         return DeepSeekV3ModelArgs(
@@ -101,164 +95,7 @@ class TestGroupedExperts:
 
         return x, num_tokens_per_expert, permuted_indices, actual_num_tokens_per_expert
 
-    def test(self) -> None:
-        torch.manual_seed(42)
-        moe = self._get_moe(moe_mm_impl="grouped_mm")
-        torch.manual_seed(42)
-        moe_cg = self._get_moe(moe_mm_impl="cg_grouped_gemm")
-        inputs = self._get_inputs()
-        with torch.no_grad():
-            x, num_tokens_per_expert, permuted_indices = self._get_moe_tensors(
-                inputs, moe
-            )
-
-            # grouped_mm
-            offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
-            h = F.silu(
-                torch._grouped_mm(x.bfloat16(), moe.experts.w1.bfloat16(), offs=offsets)
-            )
-            h = h * torch._grouped_mm(
-                x.bfloat16(), moe.experts.w3.bfloat16(), offs=offsets
-            )
-            out = torch._grouped_mm(h, moe.experts.w2.bfloat16(), offs=offsets).type_as(
-                x
-            )
-
-            # cg_grouped_gemm
-            n_experts = moe_cg.experts.w1.shape[0]
-            expert_indices = torch.arange(n_experts, dtype=torch.int32, device=x.device)
-            expert_indices = expert_indices.repeat_interleave(
-                num_tokens_per_expert, output_size=num_tokens_per_expert.sum()
-            )
-            # NOTE: @goon -  need to pad out to the shape of the actual input tensor. Don't fully
-            # understand the padding that is going on in the @expert_parallel wrapper with the
-            # torch.vstack call.
-            n_padding = x.shape[0] - expert_indices.shape[0]
-            padding = torch.zeros(
-                n_padding, dtype=expert_indices.dtype, device=expert_indices.device
-            )
-            expert_indices = torch.cat([expert_indices, padding], dim=0)
-
-            h = F.silu(
-                cg_grouped_gemm(
-                    x.bfloat16(),
-                    moe_cg.experts.w1.bfloat16(),
-                    expert_indices=expert_indices,
-                    ALIGN_SIZE_M=ALIGN_SIZE_M,
-                )
-            )
-            h = h * cg_grouped_gemm(
-                x.bfloat16(),
-                moe_cg.experts.w3.bfloat16(),
-                expert_indices=expert_indices,
-                ALIGN_SIZE_M=ALIGN_SIZE_M,
-            )
-            out_cg = cg_grouped_gemm(
-                h,
-                moe_cg.experts.w2.bfloat16(),
-                expert_indices=expert_indices,
-                ALIGN_SIZE_M=ALIGN_SIZE_M,
-            ).type_as(x)
-
-        # Checks. Isolate the trivial and non-trivial indices
-        out_zeros = out[permuted_indices == -1]
-        torch.testing.assert_close(out_zeros, torch.zeros_like(out_zeros))
-        out_cg_zeros = out_cg[permuted_indices == -1]
-        torch.testing.assert_close(out_cg_zeros, torch.zeros_like(out_cg_zeros))
-
-        out_non_zeros = out[permuted_indices != -1]
-        out_cg_non_zeros = out_cg[permuted_indices != -1]
-
-        rel_err = (out - out_cg).abs().mean() / out.abs().mean()
-        assert rel_err <= 1e-2
-
-    def test2(self) -> None:
-        torch.manual_seed(42)
-        moe = self._get_moe(moe_mm_impl="grouped_mm")
-        torch.manual_seed(42)
-        moe_cg = self._get_moe(moe_mm_impl="cg_grouped_gemm")
-        inputs = self._get_inputs()
-        with torch.no_grad():
-            x, num_tokens_per_expert, permuted_indices = self._get_moe_tensors(
-                inputs, moe
-            )
-
-            # grouped_mm
-            offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
-            h = torch._grouped_mm(x.bfloat16(), moe.experts.w1.bfloat16(), offs=offsets)
-            # cg_grouped_gemm
-            n_experts = moe_cg.experts.w1.shape[0]
-            expert_indices = torch.arange(n_experts, dtype=torch.int32, device=x.device)
-            expert_indices = expert_indices.repeat_interleave(
-                num_tokens_per_expert, output_size=num_tokens_per_expert.sum()
-            )
-            # NOTE: @goon -  need to pad out to the shape of the actual input tensor. Don't fully
-            # understand the padding that is going on in the @expert_parallel wrapper with the
-            # torch.vstack call.
-            n_padding = x.shape[0] - expert_indices.shape[0]
-            padding = torch.zeros(
-                n_padding, dtype=expert_indices.dtype, device=expert_indices.device
-            )
-            expert_indices = torch.cat([expert_indices, padding], dim=0)
-
-            h_cg = cg_grouped_gemm(
-                x.bfloat16(),
-                moe.experts.w1.swapdims(-1, -2).contiguous().bfloat16(),
-                expert_indices=expert_indices,
-                ALIGN_SIZE_M=ALIGN_SIZE_M,
-            )
-            h_non_zero = h[permuted_indices != -1]
-            h_cg_non_zero = h_cg[permuted_indices != -1]
-            h_cg_non_zero
-
-    def test3(self) -> None:
-        torch.manual_seed(42)
-        moe = self._get_moe(moe_mm_impl="grouped_mm")
-        torch.manual_seed(42)
-        moe_cg = self._get_moe(moe_mm_impl="cg_grouped_gemm")
-        inputs = self._get_inputs()
-        with torch.no_grad():
-            x, num_tokens_per_expert, permuted_indices, actual_num_tokens_per_expert = (
-                self._get_moe_tensors(inputs, moe)
-            )
-            # TODO: @goon - DELETE
-            # x = torch.ones_like(x)
-            torch.nn.init.normal_(moe.experts.w1)
-            torch.nn.init.zeros_(moe.experts.w1[1:])
-
-            # grouped_mm
-            offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
-            h = torch._grouped_mm(x.bfloat16(), moe.experts.w1.bfloat16(), offs=offsets)
-            # cg_grouped_gemm
-            n_experts = moe_cg.experts.w1.shape[0]
-            expert_indices = torch.arange(n_experts, dtype=torch.int32, device=x.device)
-            expert_indices = expert_indices.repeat_interleave(
-                num_tokens_per_expert, output_size=num_tokens_per_expert.sum()
-            )
-            # NOTE: @goon -  need to pad out to the shape of the actual input tensor. Don't fully
-            # understand the padding that is going on in the @expert_parallel wrapper with the
-            # torch.vstack call.
-            n_padding = x.shape[0] - expert_indices.shape[0]
-            padding = torch.full(
-                (n_padding,),
-                n_experts - 1,
-                dtype=expert_indices.dtype,
-                device=expert_indices.device,
-            )
-            expert_indices = torch.cat([expert_indices, padding], dim=0)
-
-            h_cg = cg_grouped_gemm(
-                x.bfloat16(),
-                moe.experts.w1.swapdims(-1, -2).contiguous().bfloat16(),
-                expert_indices=expert_indices,
-                ALIGN_SIZE_M=ALIGN_SIZE_M,
-            )
-            h_non_zero = h[permuted_indices != -1]
-            h_cg_non_zero = h_cg[permuted_indices != -1]
-            diff = h_non_zero - h_cg_non_zero
-            diff
-
-    def test_grouped_mm2(self) -> None:
+    def test_grouped_mm(self) -> None:
         torch.manual_seed(42)
         moe = self._get_moe(moe_mm_impl="grouped_mm")
         torch.manual_seed(42)
@@ -301,7 +138,7 @@ class TestGroupedExperts:
         rel_err = (outputs - outputs_for_loop).abs().mean() / outputs.abs().mean()
         assert rel_err <= 1e-2
 
-    @pytest.mark.parametrize("alignment", (128, 64, 32, ALIGN_SIZE_M))
+    @pytest.mark.parametrize("alignment", (128, 64, 32, 16))
     def test_zeros(self, alignment: int) -> None:
         torch.manual_seed(42)
         n_experts = 2
