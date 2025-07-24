@@ -221,23 +221,23 @@ class GroupedExperts(nn.Module):
         return out
 
     def init_weights(self, init_std: float):
-        # special cg_grouped_gemm handling
-        if self.moe_mm_impl == "cg_grouped_gemm":
-            with torch.no_grad():
-                self.w1.data = self.w1.data.swapdims(-1, -2).contiguous()
-                self.w2.data = self.w2.data.swapdims(-1, -2).contiguous()
-                self.w3.data = self.w3.data.swapdims(-1, -2).contiguous()
+        # # special cg_grouped_gemm handling
+        # if self.moe_mm_impl == "cg_grouped_gemm":
+        #     with torch.no_grad():
+        #         self.w1.data = self.w1.data.swapdims(-1, -2).contiguous()
+        #         self.w2.data = self.w2.data.swapdims(-1, -2).contiguous()
+        #         self.w3.data = self.w3.data.swapdims(-1, -2).contiguous()
 
         nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.w2, mean=0.0, std=init_std)
         nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std)
 
-        # special cg_grouped_gemm handling
-        if self.moe_mm_impl == "cg_grouped_gemm":
-            with torch.no_grad():
-                self.w1.data = self.w1.data.swapdims(-1, -2).contiguous()
-                self.w2.data = self.w2.data.swapdims(-1, -2).contiguous()
-                self.w3.data = self.w3.data.swapdims(-1, -2).contiguous()
+        # # special cg_grouped_gemm handling
+        # if self.moe_mm_impl == "cg_grouped_gemm":
+        #     with torch.no_grad():
+        #         self.w1.data = self.w1.data.swapdims(-1, -2).contiguous()
+        #         self.w2.data = self.w2.data.swapdims(-1, -2).contiguous()
+        #         self.w3.data = self.w3.data.swapdims(-1, -2).contiguous()
 
 
 class TokenChoiceTopKRouter(nn.Module):
