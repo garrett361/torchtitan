@@ -11,7 +11,6 @@ else
 WANDB_FLAG =
 endif
 
-# Common function to run training with different flavors
 define run_fsdp
 	export WANDB_RUN_ID=$(1)-fsdp-$(GIT_HASH) && \
 	export CONFIG_FILE=$(CONFIG_FILE) && \
