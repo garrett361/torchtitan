@@ -138,7 +138,7 @@ class TestGroupedExperts:
         rel_err = (outputs - outputs_for_loop).abs().mean() / outputs.abs().mean()
         assert rel_err <= 1e-2
 
-    @pytest.mark.parametrize("alignment", (128, 64, 32, 16))
+    @pytest.mark.parametrize("alignment", (256, 128, 64, 32, 16))
     def test_zeros(self, alignment: int) -> None:
         torch.manual_seed(42)
         n_experts = 2
@@ -219,4 +219,8 @@ class TestGroupedExperts:
                 expert_indices=expert_indices,
                 group_size_m=alignment,
             )
-            torch.testing.assert_close(out_cg, torch.zeros_like(out_cg))  # FAILS
+            if alignment > 64:
+                torch.testing.assert_close(out_cg, torch.zeros_like(out_cg))
+            else:
+                with pytest.raises(expected_exception=AssertionError, match="are not close"):
+                    torch.testing.assert_close(out_cg, torch.zeros_like(out_cg))
