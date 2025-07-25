@@ -194,6 +194,8 @@ class GroupedExperts(nn.Module):
                 n_padding, dtype=expert_indices.dtype, device=expert_indices.device
             )
             expert_indices = torch.cat([expert_indices, padding], dim=0)
+            # # TODO: @goon - DELETE
+            # print(f"{expert_indices.shape=}, {padding.shape=}")
 
             h = F.silu(
                 cg_grouped_gemm(

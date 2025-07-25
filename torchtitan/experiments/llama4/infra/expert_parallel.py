@@ -14,11 +14,11 @@ import torch.nn as nn
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 from torch.distributed.tensor import (
     DeviceMesh,
-    distribute_module,
-    distribute_tensor,
     DTensor,
     Replicate,
     Shard,
+    distribute_module,
+    distribute_tensor,
 )
 from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
@@ -27,6 +27,7 @@ from torch.distributed.tensor.placement_types import Placement
 # NOTE: @goon - bumping up ALIGN_SIZE_M because cg_grouped_gemm is silently wrong for ALIGN_SIZE_M =
 # 16 ( also 32).
 ALIGN_SIZE_M = 128
+
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE
 class TensorParallel(ParallelStyle):
@@ -269,6 +270,22 @@ def expert_parallel(func: Callable) -> Callable:
             num_ep_ranks = num_tokens_per_expert.shape[0] // experts_per_ep_rank
 
             with torch.no_grad():
+                # NOTE: @goon - the max_len arg of generate_permute_indices sets the size of
+                # permuted_indices. The worst case is that we need to use the maximum amount of
+                # padding for every expert on the present rank. Seems like this should be
+                # (ALIGN_SIZE_M-1) units of padding for each expert, beyond the amount needed for
+                # the number of actual inputs tokens, but the code below looks like ALIGN_SIZE_M.
+                # Might be an implementation detail?
+
+                # Original value for max_len:
+                # max_len = x.shape[0] + experts_per_ep_rank * ALIGN_SIZE_M,
+
+                max_len = x.shape[0] + experts_per_ep_rank * (ALIGN_SIZE_M - 1)
+                # NOTE: @goon - round up to multiple of ALIGN_SIZE_M so we can use cg_grouped_gemm
+                # NOTE: @goon - while this rounding let cg_grouped_gemm run, it is horribly slow for EP
+                # because it recompiles for every shape.
+                max_len = ((max_len + ALIGN_SIZE_M - 1) // ALIGN_SIZE_M) * ALIGN_SIZE_M
+
                 (
                     permuted_indices,
                     num_tokens_per_expert,
@@ -277,7 +294,8 @@ def expert_parallel(func: Callable) -> Callable:
                     num_tokens_per_expert,
                     experts_per_ep_rank,
                     num_ep_ranks,
-                    x.shape[0] + experts_per_ep_rank * ALIGN_SIZE_M,
+                    # x.shape[0] + experts_per_ep_rank * ALIGN_SIZE_M,
+                    max_len,
                     ALIGN_SIZE_M,
                 )
 
