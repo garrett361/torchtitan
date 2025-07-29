@@ -56,7 +56,8 @@ def _kernel_cg_persistent_forward(
     # Pointer to indices array
     indices_ptr,
     # Matrix dimensions
-    M_TOTAL: tl.constexpr,  # Total M dimension (sum of all groups)
+    # M_TOTAL: tl.constexpr,  # Total M dimension (sum of all groups)
+    M_TOTAL,  # Total M dimension (sum of all groups)
     N: tl.constexpr,  # N dimension
     K: tl.constexpr,  # K dimension
     # Number of experts

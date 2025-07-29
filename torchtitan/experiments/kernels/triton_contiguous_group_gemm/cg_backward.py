@@ -30,7 +30,8 @@ def _kernel_cg_backward_dx(
     # Pointer to indices array
     indices_ptr,  # [M_TOTAL]
     # Matrix dimensions
-    M_TOTAL: tl.constexpr,  # Total M dimension (sum of all groups)
+    # M_TOTAL: tl.constexpr,  # Total M dimension (sum of all groups)
+    M_TOTAL,  # Total M dimension (sum of all groups)
     N: tl.constexpr,  # N dimension
     K: tl.constexpr,  # K dimension
     # Number of experts
@@ -120,7 +121,8 @@ def _kernel_cg_backward_dw(
     grad_weights_ptr,  # [num_experts, N, K]
     indices_ptr,  # [M_total]
     # Matrix dimensions
-    M_TOTAL: tl.constexpr,  # Total M dimension
+    # M_TOTAL: tl.constexpr,  # Total M dimension
+    M_TOTAL,  # Total M dimension
     N: tl.constexpr,  # N dimension
     K: tl.constexpr,  # K dimension
     # Number of experts
