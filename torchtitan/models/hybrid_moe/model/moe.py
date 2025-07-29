@@ -35,6 +35,7 @@ class FeedForward(nn.Module):
         hidden_dim: int,
     ):
         super().__init__()
+        # TODO: @goon - consolidate w1, w3 into single weight
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
@@ -58,6 +59,7 @@ class GroupedExperts(nn.Module):
     ):
         super().__init__()
         self.num_experts = num_experts
+        # TODO: @goon - consolidate w1, w3 into single weight
         self.w1 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
         self.w2 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
         self.w3 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
