@@ -260,6 +260,8 @@ class HybridMoEModel(nn.Module, ModelProtocol):
         self.register_buffer(
             "freqs_cis", precompute_freqs_cis(model_args), persistent=True
         )
+        # TODO: @goon - set freqs_cis to None when using NoPE. Must be accompanied by a change in
+        # init_weights, replacing the call to self.freq_cis.device.
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
@@ -277,8 +279,9 @@ class HybridMoEModel(nn.Module, ModelProtocol):
 
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
         buffer_device = buffer_device or self.freqs_cis.device
-        with torch.device(buffer_device):
-            self.freqs_cis = precompute_freqs_cis(self.model_args)
+        if not self.model_args.nope:
+            with torch.device(buffer_device):
+                self.freqs_cis = precompute_freqs_cis(self.model_args)
         if self.tok_embeddings is not None:
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():

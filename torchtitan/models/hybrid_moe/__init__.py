@@ -45,6 +45,26 @@ hybrid_moe_configs = {
         v_head_dim=128,
         mscale=0.70,
     ),
+    "debugmodel_nope": HybridMoEModelArgs(
+        vocab_size=2000,
+        dim=256,
+        inter_dim=1024,
+        moe_inter_dim=256,
+        n_layers=3,
+        n_dense_layers=1,
+        n_heads=16,
+        n_routed_experts=8,
+        n_shared_experts=2,
+        n_activated_experts=3,
+        route_scale=1.0,
+        q_lora_rank=0,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        mscale=0.70,
+        nope=True,
+    ),
 }
 
 

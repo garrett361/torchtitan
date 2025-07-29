@@ -117,6 +117,7 @@ class HybridMoEModelArgs(BaseModelArgs):
     # Attention assignments:
     mha_layer_idxs: Optional[list[int]] = None
     # Use NoPE (all RoPE config) ignored
+    nope: bool = False
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len

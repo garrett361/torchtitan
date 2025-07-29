@@ -41,5 +41,8 @@ help:
 fsdp:
 	$(call run_fsdp,debug,debugmodel)
 
+fsdp_nope:
+	$(call run_fsdp,debug-nope,debugmodel_nope)
+
 ep:
 	$(call run_ep,debug,debugmodel)
