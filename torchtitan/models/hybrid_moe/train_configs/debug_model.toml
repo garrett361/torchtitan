@@ -2,7 +2,7 @@
 
 [job]
 dump_folder = "./outputs"
-description = "DeepSeek-V3 debug training"
+description = "HybridMoE debug training"
 print_args = false
 use_for_integration_test = true
 

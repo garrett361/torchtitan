@@ -20,7 +20,7 @@ from torchtitan.tools.utils import has_cuda_capability
 
 # Reference: https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py
 @dataclass
-class DeepSeekV3ModelArgs(BaseModelArgs):
+class HybridMoEModelArgs(BaseModelArgs):
     """
     Data class for defining model arguments and hyperparameters.
 

@@ -1,4 +1,4 @@
-# DeepSeek-V3 in TorchTitan
+# MoE Hybrid in TorchTitan
 
 DeepSeek-V3 is a Mixture-of-Experts (MoE) transformer model with Multi-head Latent Attention (MLA) architecture.
 
@@ -8,7 +8,7 @@ DeepSeek-V3 is a Mixture-of-Experts (MoE) transformer model with Multi-head Late
 
 ```bash
 # DeepSeek tokenizer (automatically downloads tokenizer.json and tokenizer_config.json)
-python scripts/download_tokenizer.py --repo_id deepseek-ai/DeepSeek-V3
+python scripts/download_tokenizer.py --repo_id ibm-granite/granite-4.0-tiny-preview
 ```
 
 ## Training
