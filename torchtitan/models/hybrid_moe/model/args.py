@@ -54,6 +54,7 @@ class HybridMoEModelArgs(BaseModelArgs):
         rope_factor (float): Scaling factor for extended sequence lengths.
         beta_fast (int): Fast beta correction factor.
         beta_slow (int): Slow beta correction factor.
+        # TODO: @goon - docs for mamba, NoPE
     """
 
     max_batch_size: int = 8
@@ -86,27 +87,25 @@ class HybridMoEModelArgs(BaseModelArgs):
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
     # Mamba
-    d_state: int = (128,)
-    d_conv: int = (4,)
-    conv_init = (None,)
-    expand: int = (2,)
-    headdim: int = (64,)
-    d_ssm = (
-        None,
-    )  # If not None, we only apply SSM on this many dimensions, the rest uses gated MLP
-    ngroups = (1,)
-    A_init_range = ((1, 16),)
-    D_has_hdim = (False,)
-    rmsnorm = (True,)
-    norm_before_gate = (False,)
-    dt_min = (0.001,)
-    dt_max = (0.1,)
-    dt_init_floor = (1e-4,)
-    dt_limit = ((0.0, float("inf")),)
-    bias = (False,)
-    conv_bias = (True,)
-    chunk_size = (256,)
-    use_mem_eff_path = (True,)
+    d_state: int = 128
+    d_conv: int = 4
+    conv_init = None
+    expand: int = 2
+    headdim: int = 64
+    d_ssm = None  # If not None, we only apply SSM on this many dimensions, the rest uses gated MLP
+    ngroups = 1
+    A_init_range = (1, 16)
+    D_has_hdim = False
+    rmsnorm = True
+    norm_before_gate = False
+    dt_min = 0.001
+    dt_max = 0.1
+    dt_init_floor = 1e-4
+    dt_limit = (0.0, float("inf"))
+    bias = False
+    conv_bias = True
+    chunk_size = 256
+    use_mem_eff_path = True
     # yarn
     original_seq_len: int = 4096
     rope_theta: float = 10000.0
