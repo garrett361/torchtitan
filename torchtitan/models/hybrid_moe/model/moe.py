@@ -7,9 +7,9 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torchtitan.experiments.llama4.infra.expert_parallel import expert_parallel
 
-from .args import DeepSeekV3ModelArgs
+from torchtitan.experiments.llama4.infra.expert_parallel import expert_parallel
+from torchtitan.models.hybrid_moe.model.args import HybridMoEModelArgs
 
 
 class FeedForward(nn.Module):
@@ -252,8 +252,7 @@ class TokenChoiceTopKRouter(nn.Module):
 
 
 class MoE(nn.Module):
-    def __init__(self, model_args: DeepSeekV3ModelArgs):
-
+    def __init__(self, model_args: HybridMoEModelArgs):
         super().__init__()
         dim = model_args.dim
 

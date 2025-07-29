@@ -24,7 +24,7 @@ from torchtitan.tools.logging import logger
 
 
 # Adapted from llama4/infra/parallelize.py
-def parallelize_deepseekv3(
+def parallelize_hybrid_moe(
     model: nn.Module,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
@@ -50,7 +50,7 @@ def parallelize_deepseekv3(
         if job_config.parallelism.enable_async_tensor_parallel:
             # TODO(jianiw): This branch needs to be tested and enabled
             raise NotImplementedError(
-                "Currently, async TP is not tested for deepseekv3. \
+                "Currently, async TP is not tested for hybrid_moe. \
                 torch.compile is not supported yet, which is required for async TP."
             )
 
@@ -64,7 +64,7 @@ def parallelize_deepseekv3(
         if enable_float8_tensorwise_tp:
             # TODO(jianiw): This branch needs to be tested and enabled
             raise NotImplementedError(
-                "Currently, float8 tensorwise TP is not tested for deepseekv3"
+                "Currently, float8 tensorwise TP is not tested for hybrid_moe"
             )
 
         apply_non_moe_tp(
@@ -91,7 +91,7 @@ def parallelize_deepseekv3(
         apply_ac(model, job_config.activation_checkpoint)
 
     if job_config.training.compile:
-        raise NotImplementedError("torch.compile is not supported yet for deepseekv3")
+        raise NotImplementedError("torch.compile is not supported yet for hybrid_moe")
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:

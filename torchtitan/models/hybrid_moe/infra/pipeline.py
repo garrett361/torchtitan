@@ -13,20 +13,19 @@ import torch.nn as nn
 from torch.distributed import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import (
-    _PipelineSchedule,
-    get_schedule_class,
     PipelineScheduleSingle,
     ScheduleZBVZeroBubble,
+    _PipelineSchedule,
+    get_schedule_class,
 )
 
 from torchtitan.components.loss import LossFunction
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline import build_pipeline_schedule, stage_ids_this_rank
+from torchtitan.models.hybrid_moe.model.args import HybridMoEModelArgs
 from torchtitan.protocols.train_spec import ParallelizeFunction
 from torchtitan.tools.logging import logger
-
-from ..model.args import DeepSeekV3ModelArgs
 
 
 def generate_module_names_per_stage(
@@ -126,12 +125,12 @@ def generate_module_names_per_stage(
     return module_names_per_stage
 
 
-def pipeline_deepseekv3(
+def pipeline_hybrid_moe(
     model: nn.Module,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
     device: torch.device,
-    model_config: DeepSeekV3ModelArgs,
+    model_config: HybridMoEModelArgs,
     parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:

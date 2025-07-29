@@ -9,20 +9,20 @@ from typing import Tuple
 
 import torch
 from torch import nn
-from torchtitan.models.attention import build_attention, init_attention_mask
-from torchtitan.protocols.train_spec import ModelProtocol
 
-from .args import DeepSeekV3ModelArgs
-from .moe import FeedForward, MoE
+from torchtitan.models.attention import build_attention, init_attention_mask
+from torchtitan.models.hybrid_moe.model.args import HybridMoEModelArgs
+from torchtitan.models.hybrid_moe.model.moe import FeedForward, MoE
+from torchtitan.protocols.train_spec import ModelProtocol
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
-def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
+def precompute_freqs_cis(args: HybridMoEModelArgs) -> torch.Tensor:
     """
     Precomputes frequency-based complex exponential values for rotary positional embeddings.
 
     Args:
-        args (DeepSeekV3ModelArgs): Model arguments containing positional embedding parameters.
+        args (HybridMoEModelArgs): Model arguments containing positional embedding parameters.
 
     Returns:
         torch.Tensor: Precomputed complex exponential values for positional embeddings.
@@ -139,7 +139,7 @@ class Attention(nn.Module):
     Multi-head attention (MLA) module.
     """
 
-    def __init__(self, model_args: DeepSeekV3ModelArgs):
+    def __init__(self, model_args: HybridMoEModelArgs):
         super().__init__()
         self.dim = model_args.dim
         self.n_heads = model_args.n_heads
@@ -261,8 +261,7 @@ class TransformerBlock(nn.Module):
     Transformer block with attention and feed-forward layers.
     """
 
-    def __init__(self, layer_id: int, model_args: DeepSeekV3ModelArgs):
-
+    def __init__(self, layer_id: int, model_args: HybridMoEModelArgs):
         super().__init__()
         self.attention = Attention(model_args)
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
@@ -305,12 +304,12 @@ class TransformerBlock(nn.Module):
             self.feed_forward.init_weights(self.weight_init_std)
 
 
-class DeepSeekV3Model(nn.Module, ModelProtocol):
+class HybridMoEModel(nn.Module, ModelProtocol):
     """
-    DeepSeek-V3 Transformer model with attention and feed-forward layers.
+    Hybrid MoE Transformer model with mamba, attention and feed-forward layers.
     """
 
-    def __init__(self, model_args: DeepSeekV3ModelArgs):
+    def __init__(self, model_args: HybridMoEModelArgs):
         super().__init__()
         self.max_seq_len = model_args.max_seq_len
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
