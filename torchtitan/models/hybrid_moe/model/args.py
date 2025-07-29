@@ -8,7 +8,7 @@
 
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Optional
 
 from torch import nn
 
@@ -85,6 +85,28 @@ class HybridMoEModelArgs(BaseModelArgs):
     v_head_dim: int = 128
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
+    # Mamba
+    d_state: int = (128,)
+    d_conv: int = (4,)
+    conv_init = (None,)
+    expand: int = (2,)
+    headdim: int = (64,)
+    d_ssm = (
+        None,
+    )  # If not None, we only apply SSM on this many dimensions, the rest uses gated MLP
+    ngroups = (1,)
+    A_init_range = ((1, 16),)
+    D_has_hdim = (False,)
+    rmsnorm = (True,)
+    norm_before_gate = (False,)
+    dt_min = (0.001,)
+    dt_max = (0.1,)
+    dt_init_floor = (1e-4,)
+    dt_limit = ((0.0, float("inf")),)
+    bias = (False,)
+    conv_bias = (True,)
+    chunk_size = (256,)
+    use_mem_eff_path = (True,)
     # yarn
     original_seq_len: int = 4096
     rope_theta: float = 10000.0
@@ -92,6 +114,9 @@ class HybridMoEModelArgs(BaseModelArgs):
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.0
+    # Attention assignments:
+    mha_layer_idxs: Optional[list[int]] = None
+    # Use NoPE (all RoPE config) ignored
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
@@ -175,3 +200,7 @@ class HybridMoEModelArgs(BaseModelArgs):
         )
 
         return nparams, num_flops_per_token
+
+    def __post_init__(self) -> None:
+        if self.mha_layer_idxs is None:
+            self.mha_layer_idxs = list(range(self.n_layers))
