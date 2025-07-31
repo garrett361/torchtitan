@@ -8,7 +8,7 @@
 
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
 
 from torch import nn
 
@@ -60,7 +60,9 @@ class HybridMoEModelArgs(BaseModelArgs):
     max_batch_size: int = 8
     max_seq_len: int = 4096 * 4
     dtype: Literal["bf16", "fp8"] = "bf16"
-    vocab_size: int = 102400
+    vocab_size: int = (
+        49160  # TODO: @goon - this is the granite 4 tiny preview value, should update.
+    )
     dim: int = 2048
     inter_dim: int = 10944
     moe_inter_dim: int = 1408
@@ -114,7 +116,7 @@ class HybridMoEModelArgs(BaseModelArgs):
     beta_slow: int = 1
     mscale: float = 1.0
     # Attention assignments:
-    mha_layer_idxs: Optional[list[int]] = None
+    mha_layer_interval: int | None = None
     # Use NoPE (all RoPE config) ignored
     nope: bool = False
 
@@ -185,25 +187,27 @@ class HybridMoEModelArgs(BaseModelArgs):
             f"sparse {nparams_sparse:,}, active {nparams_dense + nparams_sparse_active:,}"
         )
 
-        l, h, q, t = (
-            self.n_layers,
-            self.n_heads,
-            self.dim // self.n_heads,
-            seq_len,
+        # FLOPs computations
+
+        flops_per_token_ffn = 6 * (
+            nparams_dense - nparams_embedding + nparams_sparse_active
         )
+
         # Reasoning behind the factor of 12 for the self-attention part of the formula:
         # 1. each self-attention has 2 matmul in the forward and 4 in the backward (6)
         # 2. the flash attention does 1 more matmul recomputation in the backward
         #    but recomputation should not be counted in calculating MFU           (+0)
         # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
         # 4. we follow the convention and do not account for sparsity in causal attention
-        num_flops_per_token = (
-            6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
-            + 12 * l * h * q * t
-        )
+        #
+        # TODO: @goon - MLA accounting
+        n_mha_layers = len(range(0, self.n_layers, self.mha_layer_interval))
+        flops_per_token_mha = 12 * n_mha_layers * self.dim * seq_len
 
-        return nparams, num_flops_per_token
+        # [Mamba2 FLOPs]
+        # Mamba2 layers have FLOPs which are linear in the total sequence length. Their contribution
+        # to the total flops is already partly accounted for in flops_per_token_ffn. The accounting
+        # is not exact, but it's good enough for now. TODO: @goon - precise accounting.
 
-    def __post_init__(self) -> None:
-        if self.mha_layer_idxs is None:
-            self.mha_layer_idxs = list(range(self.n_layers))
+        flops_per_token = flops_per_token_ffn + flops_per_token_mha
+        return nparams, flops_per_token
