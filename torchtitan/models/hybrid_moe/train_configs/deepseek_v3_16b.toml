@@ -1,4 +1,7 @@
 # torchtitan Config.toml
+# We define a custom JobConfig class with an addition catch-all custom_args field
+[experimental]
+custom_args_module = "torchtitan.models.hybrid_moe.custom_args"
 
 [job]
 dump_folder = "./outputs"
