@@ -4,6 +4,7 @@ CONFIG_FILE=./torchtitan/models/hybrid_moe/train_configs/debug_model.toml
 # ENABLE_WANDB=True
 ENABLE_WANDB=False
 GIT_HASH := $(shell git rev-parse --short HEAD)
+LOAD_BALANCE_COEFF=1e-2
 
 # Conditional wandb flag
 ifeq ($(ENABLE_WANDB),True)
@@ -20,6 +21,7 @@ define run_fsdp
 		--training.local_batch_size $(LOCAL_BATCH_SIZE) \
 		--training.steps $(STEPS) \
 		--model.flavor $(2) \
+		--custom-args.load-balance-coeff $(LOAD_BALANCE_COEFF) \
 		$(WANDB_FLAG)
 endef
 
@@ -34,6 +36,7 @@ define run_ep
 		--model.flavor $(2) \
 		--parallelism.expert_parallel_degree $$NGPU \
 		--parallelism.fsdp_reshard_after_forward never \
+		--custom-args.load-balance-coeff $(LOAD_BALANCE_COEFF) \
 		$(WANDB_FLAG)
 endef
 
@@ -52,6 +55,7 @@ define run_ep_pp
 		--parallelism.expert_parallel_degree $$EP \
 		--parallelism.pipeline_parallel_degree $$PP \
 		--parallelism.fsdp_reshard_after_forward never \
+		--custom-args.load-balance-coeff $(LOAD_BALANCE_COEFF) \
 		$(WANDB_FLAG)
 endef
 

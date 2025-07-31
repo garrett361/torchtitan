@@ -126,6 +126,9 @@ class HybridMoEModelArgs(BaseModelArgs):
             )
         self.max_seq_len = seq_len
 
+        if job_config.custom_args.load_balance_coeff is not None:
+            self.load_balance_coeff = job_config.custom_args.load_balance_coeff
+
         if self.use_grouped_mm and not has_cuda_capability(9, 0):
             logger.warning(
                 "Failed to use grouped mm, which is only supported on SM90 or later",

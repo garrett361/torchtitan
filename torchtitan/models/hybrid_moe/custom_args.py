@@ -5,8 +5,7 @@ from torchtitan.config.job_config import JobConfig
 
 @dataclass
 class CustomArgs:
-    how_is_your_day: str = "good"
-    """Just an example."""
+    load_balance_coeff: float | None = None
 
 
 @dataclass
