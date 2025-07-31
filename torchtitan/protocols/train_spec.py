@@ -68,8 +68,6 @@ def register_train_spec(train_spec: TrainSpec) -> None:
 
 def get_train_spec(name: str) -> TrainSpec:
     global _train_specs
-    # TODO: @goon - DELETE
-    print(f"{list(_train_specs)=}")
     if name not in _train_specs:
         raise ValueError(f"Model {name} is not registered.")
     return _train_specs[name]
