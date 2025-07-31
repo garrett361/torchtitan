@@ -13,6 +13,7 @@ WANDB_FLAG =
 endif
 
 define run_fsdp
+	export NGPU=$$(nvidia-smi --list-gpus | wc -l) && \
 	export WANDB_RUN_ID=$(1)-$(LOCAL_BATCH_SIZE)bs-$(STEPS)step-fsdp-$(GIT_HASH) && \
 	export CONFIG_FILE=$(CONFIG_FILE) && \
 	./run_train.sh \
@@ -24,13 +25,14 @@ endef
 
 
 define run_ep
+	export NGPU=$$(nvidia-smi --list-gpus | wc -l) && \
 	export WANDB_RUN_ID=$(1)-$(LOCAL_BATCH_SIZE)bs-$(STEPS)step-ep-$(GIT_HASH) && \
 	export CONFIG_FILE=$(CONFIG_FILE) && \
 	./run_train.sh \
 		--training.local_batch_size $(LOCAL_BATCH_SIZE) \
 		--training.steps $(STEPS) \
 		--model.flavor $(2) \
-		--parallelism.expert_parallel_degree 8 \
+		--parallelism.expert_parallel_degree $$NGPU \
 		--parallelism.fsdp_reshard_after_forward never \
 		$(WANDB_FLAG)
 endef

@@ -23,7 +23,7 @@ from torchtitan.protocols.train_spec import ModelProtocol
 
 class Attention(nn.Module):
     """
-    Multi-head attention (MLA) module.
+    Multi-head attention (MLA) module. Can handle NoPE.
     """
 
     def __init__(self, model_args: HybridMoEModelArgs):
