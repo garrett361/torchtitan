@@ -60,7 +60,7 @@ class HybridMoEModelArgs(BaseModelArgs):
     max_batch_size: int = 8
     max_seq_len: int = 4096 * 4
     dtype: Literal["bf16", "fp8"] = "bf16"
-    vocab_size: int = 102400
+    vocab_size: int = 49160 # TODO: @goon - this is the granite 4 tiny preview value, should update.
     dim: int = 2048
     inter_dim: int = 10944
     moe_inter_dim: int = 1408

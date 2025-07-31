@@ -65,6 +65,9 @@ help:
 fsdp:
 	$(call run_fsdp,debug,debugmodel)
 
+fsdp-dev:
+	$(call run_fsdp,dev,"n_layers=2|n_routed_experts=8")
+
 fsdp_nope:
 	$(call run_fsdp,debug-nope,debugmodel_nope)
 
