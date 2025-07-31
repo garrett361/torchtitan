@@ -174,26 +174,40 @@ class LinearAttention(Mamba2):
             chunk_size=model_args.chunk_size,
             use_mem_eff_path=model_args.use_mem_eff_path,
         )
+        # Some init args aren't saved as attrs but are needed for init, so safe a ref to model_args
+        self.model_args = model_args
 
     def init_weights(self, init_std: float):
-        return
-        # TODO: @goon -
-        linear_list = [
-            self.wkv_a,
-            self.wkv_b,
-        ]
-        if self.q_lora_rank > 0:
-            linear_list.extend([self.wq_a, self.wq_b])
-        else:
-            linear_list.append(self.wq)
+        if self.conv_init is not None:
+            nn.init.uniform_(self.conv1d.weight, -self.conv_init, self.conv_init)
+        if self.conv1d.bias is not None:
+            nn.init.zeros_(self.conv1d.bias)
 
-        for linear in linear_list:
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+        with torch.no_grad():
+            nn.init.uniform_(self.dt_bias.data, b=self.nheads)
+            self.dt_bias.data *= math.log(self.model_args.dt_max) - math.log(
+                self.model_args.dt_min
+            )
+            self.dt_bias.data += math.log(self.model_args.dt_min)
+            self.dt_bias.data.exp_()
+            self.dt_bias.data.clamp_(min=self.model_args.dt_init_floor)
+            self.dt_bias.data = self.dt_bias.data + torch.log(
+                -torch.expm1(-self.dt_bias.data)
+            )
 
-        self.kv_norm.reset_parameters()
-        if self.q_lora_rank > 0:
-            self.q_norm.reset_parameters()
+            self.A_log.data = self.A_log.data.to(torch.float32)
+            self.A_log.data.uniform_(*self.model_args.A_init_range)
+            # NOTE: @goon -  mamba.ssm has a self.A_log.data.to(dtype) here after the log, but I'm not
+            # sure what dtype to use?
+            self.A_log.data = torch.log(self.A_log.data)
+
+        nn.init.ones_(self.D)
+        if self.rmsnorm:
+            self.norm.reset_parameters()
+
+        # NOTE: @goon do we really want this hard-coded init for the in-weights?
+        nn.init.trunc_normal_(self.in_proj.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.out_proj.weight, mean=0.0, std=init_std)
 
 
 class TransformerBlock(nn.Module):
