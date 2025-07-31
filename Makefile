@@ -37,6 +37,24 @@ define run_ep
 		$(WANDB_FLAG)
 endef
 
+
+define run_ep_pp
+	export LOG_RANK=0,1,2,3 && \
+	export NGPU=$$(nvidia-smi --list-gpus | wc -l) && \
+	export PP=2 && \
+	export EP=$$((NGPU/2)) && \
+	export WANDB_RUN_ID=$(1)-$(LOCAL_BATCH_SIZE)bs-$(STEPS)step-$${PP}pp-${EP}ep-$(GIT_HASH) && \
+	export CONFIG_FILE=$(CONFIG_FILE) && \
+	./run_train.sh \
+		--training.local_batch_size $(LOCAL_BATCH_SIZE) \
+		--training.steps $(STEPS) \
+		--model.flavor $(2) \
+		--parallelism.expert_parallel_degree $$EP \
+		--parallelism.pipeline_parallel_degree $$PP \
+		--parallelism.fsdp_reshard_after_forward never \
+		$(WANDB_FLAG)
+endef
+
 help:
 	@echo "Choose another target"
 
@@ -48,3 +66,6 @@ fsdp_nope:
 
 ep:
 	$(call run_ep,debug,debugmodel)
+
+ep_pp:
+	$(call run_ep_pp,debug,debugmodel)
