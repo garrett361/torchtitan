@@ -645,6 +645,8 @@ if __name__ == "__main__":
     config = config_manager.parse_args()
     trainer: Optional[Trainer] = None
 
+    # TODO: @goon - DELETE
+    print(f"{config=}")
     try:
         trainer = Trainer(config)
 
