@@ -116,7 +116,7 @@ class HybridMoEModelArgs(BaseModelArgs):
     beta_slow: int = 1
     mscale: float = 1.0
     # Attention assignments:
-    mha_layer_freq: int | None = None
+    mha_layer_interval: int | None = None
     # Use NoPE (all RoPE config) ignored
     nope: bool = False
 
@@ -201,7 +201,7 @@ class HybridMoEModelArgs(BaseModelArgs):
         # 4. we follow the convention and do not account for sparsity in causal attention
         #
         # TODO: @goon - MLA accounting
-        n_mha_layers = len(range(0, self.n_layers, self.mha_layer_freq))
+        n_mha_layers = len(range(0, self.n_layers, self.mha_layer_interval))
         flops_per_token_mha = 12 * n_mha_layers * self.dim * seq_len
 
         # [Mamba2 FLOPs]

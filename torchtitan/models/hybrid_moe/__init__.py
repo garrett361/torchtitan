@@ -85,7 +85,7 @@ hybrid_moe_configs = devdict(
         qk_rope_head_dim=64,
         v_head_dim=128,
         mscale=0.70,
-        mha_layer_freq=3,
+        mha_layer_interval=3,
     )
 )
 

@@ -219,8 +219,8 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.attention = (
             Attention(model_args)
-            if model_args.mha_layer_freq is not None
-            and (layer_id + 1) % model_args.mha_layer_freq == 0
+            if model_args.mha_layer_interval is not None
+            and (layer_id + 1) % model_args.mha_layer_interval == 0
             else LinearAttention(model_args)
         )
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
@@ -346,8 +346,8 @@ class HybridMoEModel(nn.Module, ModelProtocol):
 
         for layer_idx, layer in self.layers.items():
             if (
-                self.model_args.mha_layer_freq is not None
-                and (int(layer_idx) + 1) % self.model_args.mha_layer_freq == 0
+                self.model_args.mha_layer_interval is not None
+                and (int(layer_idx) + 1) % self.model_args.mha_layer_interval == 0
             ):
                 h = layer(h, self.freqs_cis)
             else:
