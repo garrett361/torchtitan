@@ -55,14 +55,14 @@ class devdict(dict):
         # Just supporting (str, int | float) pairs for now
         kwargs = deepcopy(DEV_KWARG_DEFAULTS)
         for pair in key.split("|"):
-            if pair:
-                if "=" not in pair:
-                    raise ValueError(
-                        f"Invalid {key=} does not exist is not a dev key of the form k0=v0|k1=v1|..."
-                    )
-                key, value = pair.split("=")
-                value = eval(value)
-                kwargs[key] = value
+            split_pair = pair.split("=")
+            if len(split_pair) != 2:
+                raise ValueError(
+                    f"Invalid {key=} does not exist is not a dev key of the form k0=v0|k1=v1|..."
+                )
+            key, value = pair.split("=")
+            value = eval(value)
+            kwargs[key] = value
         return HybridMoEModelArgs(**kwargs)
 
 
@@ -85,68 +85,8 @@ hybrid_moe_configs = devdict(
         qk_rope_head_dim=64,
         v_head_dim=128,
         mscale=0.70,
-        mha_layer_idxs=[2],
-    ),
-    debugmodel_nope=HybridMoEModelArgs(
-        vocab_size=2000,
-        dim=256,
-        inter_dim=1024,
-        moe_inter_dim=256,
-        n_layers=3,
-        n_dense_layers=1,
-        n_heads=16,
-        n_routed_experts=8,
-        n_shared_experts=2,
-        n_activated_experts=3,
-        route_scale=1.0,
-        q_lora_rank=0,
-        kv_lora_rank=512,
-        qk_nope_head_dim=128,
-        qk_rope_head_dim=64,
-        v_head_dim=128,
-        mscale=0.70,
-        nope=True,
-        mha_layer_idxs=[2],
-    ),
-    debugmodel_full_attn=HybridMoEModelArgs(
-        vocab_size=2000,
-        dim=256,
-        inter_dim=1024,
-        moe_inter_dim=256,
-        n_layers=3,
-        n_dense_layers=1,
-        n_heads=16,
-        n_routed_experts=8,
-        n_shared_experts=2,
-        n_activated_experts=3,
-        route_scale=1.0,
-        q_lora_rank=0,
-        kv_lora_rank=512,
-        qk_nope_head_dim=128,
-        qk_rope_head_dim=64,
-        v_head_dim=128,
-        mscale=0.70,
-    ),
-    debugmodel_full_attn_nope=HybridMoEModelArgs(
-        vocab_size=2000,
-        dim=256,
-        inter_dim=1024,
-        moe_inter_dim=256,
-        n_layers=3,
-        n_dense_layers=1,
-        n_heads=16,
-        n_routed_experts=8,
-        n_shared_experts=2,
-        n_activated_experts=3,
-        route_scale=1.0,
-        q_lora_rank=0,
-        kv_lora_rank=512,
-        qk_nope_head_dim=128,
-        qk_rope_head_dim=64,
-        v_head_dim=128,
-        mscale=0.70,
-        nope=True,
-    ),
+        mha_layer_freq=3,
+    )
 )
 
 register_train_spec(

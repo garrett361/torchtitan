@@ -8,7 +8,7 @@
 
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
 
 from torch import nn
 
@@ -60,7 +60,9 @@ class HybridMoEModelArgs(BaseModelArgs):
     max_batch_size: int = 8
     max_seq_len: int = 4096 * 4
     dtype: Literal["bf16", "fp8"] = "bf16"
-    vocab_size: int = 49160 # TODO: @goon - this is the granite 4 tiny preview value, should update.
+    vocab_size: int = (
+        49160  # TODO: @goon - this is the granite 4 tiny preview value, should update.
+    )
     dim: int = 2048
     inter_dim: int = 10944
     moe_inter_dim: int = 1408
@@ -114,7 +116,7 @@ class HybridMoEModelArgs(BaseModelArgs):
     beta_slow: int = 1
     mscale: float = 1.0
     # Attention assignments:
-    mha_layer_idxs: Optional[list[int]] = None
+    mha_layer_freq: int | None = None
     # Use NoPE (all RoPE config) ignored
     nope: bool = False
 
@@ -203,7 +205,3 @@ class HybridMoEModelArgs(BaseModelArgs):
         )
 
         return nparams, num_flops_per_token
-
-    def __post_init__(self) -> None:
-        if self.mha_layer_idxs is None:
-            self.mha_layer_idxs = list(range(self.n_layers))
