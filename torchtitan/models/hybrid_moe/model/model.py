@@ -184,7 +184,7 @@ class LinearAttention(Mamba2):
             nn.init.zeros_(self.conv1d.bias)
 
         with torch.no_grad():
-            nn.init.uniform_(self.dt_bias.data, b=self.nheads)
+            nn.init.uniform_(self.dt_bias.data)
             self.dt_bias.data *= math.log(self.model_args.dt_max) - math.log(
                 self.model_args.dt_min
             )
