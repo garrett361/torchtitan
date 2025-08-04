@@ -117,7 +117,7 @@ class HybridMoEModelArgs(BaseModelArgs):
     mscale: float = 1.0
     # Attention assignments:
     mha_layer_interval: int | None = None
-    # Use NoPE (all RoPE config) ignored
+    # Use NoPE (all RoPE config ignored)
     nope: bool = False
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
