@@ -6,6 +6,7 @@ GIT_HASH := $(shell git rev-parse --short HEAD)
 NGPU := $(shell nvidia-smi --list-gpus | wc -l)
 LOAD_BALANCE_COEFF=1e-2
 FLAVOR ?= debugmodel
+ARGS ?=
 
 # NOTE: @goon - Usage: to run a dev-model with, say, n_layers=2 and  n_routed_experts=32 with EP,
 # do make ep FLAVOR=n_layers=2|n_routed_experts=32.
@@ -27,12 +28,14 @@ define run_fsdp
 		--training.steps $(STEPS) \
 		--model.flavor $(2) \
 		--custom-args.load-balance-coeff $(LOAD_BALANCE_COEFF) \
-		$(WANDB_FLAG)
+		$(WANDB_FLAG) \
+		$(ARGS)
 endef
 
 
 define run_ep
 	export NGPU=$(NGPU) && \
+	export LOG_RANK=$$(seq -s, 0 $$((NGPU-1))) && \
 	export WANDB_RUN_ID=$(1)-$(LOCAL_BATCH_SIZE)bs-$(STEPS)step-ep-$(GIT_HASH) && \
 	export CONFIG_FILE=$(CONFIG_FILE) && \
 	./run_train.sh \
@@ -42,7 +45,8 @@ define run_ep
 		--parallelism.expert_parallel_degree $$NGPU \
 		--parallelism.fsdp_reshard_after_forward never \
 		--custom-args.load-balance-coeff $(LOAD_BALANCE_COEFF) \
-		$(WANDB_FLAG)
+		$(WANDB_FLAG) \
+		$(ARGS)
 endef
 
 
@@ -61,7 +65,8 @@ define run_ep_pp
 		--parallelism.pipeline_parallel_degree $$PP \
 		--parallelism.fsdp_reshard_after_forward never \
 		--custom-args.load-balance-coeff $(LOAD_BALANCE_COEFF) \
-		$(WANDB_FLAG)
+		$(WANDB_FLAG) \
+		$(ARGS)
 endef
 
 help:
