@@ -35,7 +35,8 @@ class FeedForward(nn.Module):
         hidden_dim: int,
     ):
         super().__init__()
-        # TODO: @goon - consolidate w1, w3 into single weight
+        # TODO: @goon - consolidate w1, w3 into single weight.
+        # Also see https://github.com/pytorch/torchtitan/commit/ed288bc9f28700b992cb7e50465648cc21aced28
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
