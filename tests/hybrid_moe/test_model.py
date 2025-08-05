@@ -8,7 +8,6 @@ from torchtitan.models.hybrid_moe.model.model import (
     precompute_freqs_cis,
 )
 
-
 class TestLayers:
     vocab_size = 49160
     dim = 256

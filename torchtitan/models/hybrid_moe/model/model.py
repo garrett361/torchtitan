@@ -92,8 +92,7 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.attention = (
             Attention(model_args)
-            if model_args.mha_layer_interval is not None
-            and (layer_id + 1) % model_args.mha_layer_interval == 0
+            if (layer_id + 1) % model_args.mha_layer_interval == 0
             else LinearAttention(model_args)
         )
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)

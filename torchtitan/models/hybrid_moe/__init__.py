@@ -10,9 +10,11 @@ from copy import deepcopy
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
+from torchtitan.components.metrics import build_metrics_processor
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.experiments.llama4.optimizer import build_llama4_optimizers
+from torchtitan.models.hybrid_moe._metrics import HybridMoEMetricsProcessor, build_hybrid_moe_metrics_processor
 from torchtitan.models.hybrid_moe.infra.parallelize import parallelize_hybrid_moe
 from torchtitan.models.hybrid_moe.infra.pipeline import pipeline_hybrid_moe
 from torchtitan.models.hybrid_moe.model.args import HybridMoEModelArgs
@@ -29,24 +31,48 @@ __all__ = [
 # HACK: create a dict subclass which we can use to easily generate configs based on a given key.
 # Dev keys must be in the form dev.key=value|key=value|
 
+# # Default are from DSv3 16B
+# DEV_KWARG_DEFAULTS = dict(
+#     dim=2048,
+#     inter_dim=10944,
+#     moe_inter_dim=1408,
+#     n_layers=27,
+#     n_dense_layers=1,
+#     n_heads=16,
+#     n_routed_experts=64,
+#     n_shared_experts=2,
+#     n_activated_experts=6,
+#     route_scale=1.0,
+#     q_lora_rank=0,
+#     kv_lora_rank=512,
+#     qk_nope_head_dim=128,
+#     qk_rope_head_dim=64,
+#     v_head_dim=128,
+#     mscale=0.70,
+# )
+
+
 # Default are from DSv3 16B
 DEV_KWARG_DEFAULTS = dict(
-    dim=2048,
-    inter_dim=10944,
-    moe_inter_dim=1408,
-    n_layers=27,
-    n_dense_layers=1,
-    n_heads=16,
-    n_routed_experts=64,
-    n_shared_experts=2,
-    n_activated_experts=6,
-    route_scale=1.0,
-    q_lora_rank=0,
+    dim=7168,
+    inter_dim=18432,
+    moe_inter_dim=2048,
+    n_layers=61,
+    n_dense_layers=3,
+    n_heads=128,
+    n_routed_experts=256,
+    n_shared_experts=1,
+    n_activated_experts=8,
+    n_expert_groups=8,
+    n_limited_groups=4,
+    route_scale=2.5,
+    score_func="sigmoid",
+    q_lora_rank=1536,
     kv_lora_rank=512,
     qk_nope_head_dim=128,
     qk_rope_head_dim=64,
     v_head_dim=128,
-    mscale=0.70,
+    # dtype="fp8",
 )
 
 
@@ -86,7 +112,29 @@ hybrid_moe_configs = devdict(
         v_head_dim=128,
         mscale=0.70,
         mha_layer_interval=3,
-    )
+    ),
+    dsv3=HybridMoEModelArgs(
+        vocab_size=129280,
+        dim=7168,
+        inter_dim=18432,
+        moe_inter_dim=2048,
+        n_layers=61,
+        n_dense_layers=3,
+        n_heads=128,
+        n_routed_experts=256,
+        n_shared_experts=1,
+        n_activated_experts=8,
+        n_expert_groups=8,
+        n_limited_groups=4,
+        route_scale=2.5,
+        score_func="sigmoid",
+        q_lora_rank=1536,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        dtype="fp8",
+    ),
 )
 
 register_train_spec(
@@ -101,5 +149,6 @@ register_train_spec(
         build_dataloader_fn=build_hf_dataloader,
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
+        build_metrics_processor_fn=build_hybrid_moe_metrics_processor,
     )
 )

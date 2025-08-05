@@ -17,7 +17,8 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from torchtitan.config import Comm as CommConfig, TORCH_DTYPE_MAP
+from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.config import Comm as CommConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
@@ -423,7 +424,6 @@ def _clip_grad_norm_with_ep(
     # This can occur in PP + EP setups where certain PP ranks only own non-EP layers, for instance.
     if isinstance(ep_grads_total_norm, DTensor):
         ep_grads_total_norm = ep_grads_total_norm.full_tensor()
-
     non_ep_grads_total_norm = torch.nn.utils.get_total_norm(
         non_ep_grads, norm_type, error_if_nonfinite, foreach
     ).full_tensor()
@@ -431,9 +431,7 @@ def _clip_grad_norm_with_ep(
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
     else:
-        total_norm = (
-            ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
-        )
+        total_norm = ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
         total_norm **= 1.0 / norm_type
 
     if pp_mesh is not None:

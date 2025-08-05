@@ -54,7 +54,7 @@ class HybridMoEModelArgs(BaseModelArgs):
         rope_factor (float): Scaling factor for extended sequence lengths.
         beta_fast (int): Fast beta correction factor.
         beta_slow (int): Slow beta correction factor.
-        # TODO: @goon - docs for mamba, NoPE
+        # TODO: @goon - docs for mamba
     """
 
     max_batch_size: int = 8
@@ -116,7 +116,7 @@ class HybridMoEModelArgs(BaseModelArgs):
     beta_slow: int = 1
     mscale: float = 1.0
     # Attention assignments:
-    mha_layer_interval: int | None = None
+    mha_layer_interval: int = 8
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
