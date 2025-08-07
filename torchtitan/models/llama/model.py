@@ -35,7 +35,7 @@ class ModelArgs:
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
     norm_type: str = "rmsnorm"
-    # yarn
+    # yarn: https://arxiv.org/pdf/2309.00071
     original_seq_len: int = 4096
     rope_factor: float = 40
     beta_fast: int = 32
