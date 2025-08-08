@@ -88,9 +88,11 @@ class ModelWrapper(Stateful):
         self.model = [model] if isinstance(model, nn.Module) else model
 
     def state_dict(self) -> Dict[str, Any]:
-        return {
+        state_dict = {
             k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
         }
+        state_dict.pop("freqs_cis", None)
+        return state_dict
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         func = functools.partial(
