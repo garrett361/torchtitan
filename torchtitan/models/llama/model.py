@@ -36,7 +36,7 @@ class ModelArgs:
     depth_init: bool = True
     norm_type: str = "rmsnorm"
     # yarn: https://arxiv.org/pdf/2309.00071
-    original_seq_len: int = 2048
+    original_seq_len: int = 8192
     rope_factor: float = 40 # s in 2309.00071 (I believe); see eq (25)
     beta_fast: int = 32 # \alpha in 2309.00071; see around eq (23)
     beta_slow: int = 1 # \beta in 2309.00071; see around eq (23)
