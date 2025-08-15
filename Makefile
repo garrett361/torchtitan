@@ -8,8 +8,8 @@ LOAD_BALANCE_COEFF=1e-2
 FLAVOR ?= debugmodel
 ARGS ?=
 
-# NOTE: @goon - Usage: to run a dev-model with, say, n_layers=2 and  n_routed_experts=32 with EP,
-# do make ep FLAVOR=n_layers=2|n_routed_experts=32.
+# NOTE: @goon - Usage: to run a dev-model with, say, n_layers=2 and  num_experts=32 with EP,
+# do make ep FLAVOR=n_layers=2|num_experts=32.
 
 # Conditional wandb flag
 ifeq ($(ENABLE_WANDB),True)

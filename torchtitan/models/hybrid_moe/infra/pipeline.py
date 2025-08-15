@@ -22,7 +22,10 @@ from torch.distributed.pipelining.schedules import (
 from torchtitan.components.loss import LossFunction
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.pipeline import build_pipeline_schedule, stage_ids_this_rank
+from torchtitan.distributed.pipeline_parallel import (
+    build_pipeline_schedule,
+    stage_ids_this_rank,
+)
 from torchtitan.models.hybrid_moe.model.args import HybridMoEModelArgs
 from torchtitan.protocols.train_spec import ParallelizeFunction
 from torchtitan.tools.logging import logger

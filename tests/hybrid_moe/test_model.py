@@ -16,9 +16,9 @@ class TestLayers:
     n_layers = 8  # 3
     n_dense_layers = 1
     n_heads = 16
-    n_routed_experts = 8
-    n_shared_experts = 2
-    n_activated_experts = 3
+    num_experts = 8
+    num_shared_experts = 2
+    top_k = 3
     route_scale = 1.0
     q_lora_rank = 0
     kv_lora_rank = 512
@@ -75,9 +75,9 @@ class TestLayers:
             n_layers=self.n_layers,
             n_dense_layers=self.n_dense_layers,
             n_heads=self.n_heads,
-            n_routed_experts=self.n_routed_experts,
-            n_shared_experts=self.n_shared_experts,
-            n_activated_experts=self.n_activated_experts,
+            num_experts=self.num_experts,
+            num_shared_experts=self.num_shared_experts,
+            top_k=self.top_k,
             route_scale=self.route_scale,
             q_lora_rank=self.q_lora_rank,
             kv_lora_rank=self.kv_lora_rank,

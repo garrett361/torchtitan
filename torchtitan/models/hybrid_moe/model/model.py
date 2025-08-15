@@ -12,9 +12,13 @@ from mamba_ssm.modules.mamba2 import Mamba2
 from torch import nn
 
 from torchtitan.models.attention import init_attention_mask
-from torchtitan.models.deepseek_v3.model.model import Attention, precompute_freqs_cis
+from torchtitan.models.deepseek_v3.model.model import (
+    Attention,
+    FeedForward,
+    precompute_freqs_cis,
+)
 from torchtitan.models.hybrid_moe.model.args import HybridMoEModelArgs
-from torchtitan.models.hybrid_moe.model.moe import FeedForward, MoE
+from torchtitan.models.moe import MoE
 from torchtitan.protocols.train_spec import ModelProtocol
 
 
@@ -100,7 +104,11 @@ class TransformerBlock(nn.Module):
         self.moe_enabled = layer_id >= model_args.n_dense_layers
 
         if self.moe_enabled:
-            self.moe = MoE(model_args)
+            self.moe = MoE(
+                model_args.moe_args,
+                dim=model_args.dim,
+                hidden_dim=model_args.moe_inter_dim,
+            )
         else:
             self.feed_forward = FeedForward(model_args.dim, model_args.inter_dim)
 

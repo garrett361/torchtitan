@@ -7,12 +7,13 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from torch import nn
 
 from torchtitan.config import JobConfig
+from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import BaseModelArgs
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
@@ -35,15 +36,14 @@ class HybridMoEModelArgs(BaseModelArgs):
         n_layers (int): Number of transformer layers.
         n_dense_layers (int): Number of dense layers in the model.
         n_heads (int): Number of attention heads.
-        n_routed_experts (int): Number of routed experts for MoE layers.
-        n_shared_experts (int): Number of shared experts for MoE layers.
-        n_activated_experts (int): Number of activated experts in MoE layers.
+        num_experts (int): Number of routed experts for MoE layers.
+        num_shared_experts (int): Number of shared experts for MoE layers.
+        top_k (int): Number of activated experts in MoE layers.
         n_expert_groups (int): Number of expert groups.
         n_limited_groups (int): Number of limited groups for MoE routing.
         score_func (Literal["softmax", "sigmoid"]): Scoring function for MoE routing.
         route_scale (float): Scaling factor for routing scores.
         use_grouped_mm (bool): Whether to use grouped matrix multiplication for MoE layers.
-        load_balance_coeff (float | None): Auxiliary-Loss-Free Load balancing coefficient for MoE layers.
         q_lora_rank (int): LoRA rank for query projections.
         kv_lora_rank (int): LoRA rank for key-value projections.
         qk_nope_head_dim (int): Dimension for query-key projections without positional embeddings.
@@ -71,15 +71,15 @@ class HybridMoEModelArgs(BaseModelArgs):
     n_heads: int = 16
     norm_eps: float = 1e-5  # eps used for RMSNorm
     # MoE
-    n_routed_experts: int = 64
-    n_shared_experts: int = 2
-    n_activated_experts: int = 6
+    num_experts: int = 64
+    num_shared_experts: int = 2
+    top_k: int = 6
+    moe_args: MoEArgs = field(default_factory=MoEArgs)
+
     n_expert_groups: int = 1
     n_limited_groups: int = 1
     score_func: Literal["softmax", "sigmoid"] = "softmax"
     route_scale: float = 1.0
-    use_grouped_mm: bool = True
-    load_balance_coeff: float = 1e-3
     # Multi-Head Latent Attention (MLA)
     q_lora_rank: int = 0
     kv_lora_rank: int = 512
@@ -127,13 +127,13 @@ class HybridMoEModelArgs(BaseModelArgs):
         self.max_seq_len = seq_len
 
         if job_config.custom_args.load_balance_coeff is not None:
-            self.load_balance_coeff = job_config.custom_args.load_balance_coeff
+            self.moe_args.load_balance_coeff = job_config.custom_args.load_balance_coeff
 
-        if self.use_grouped_mm and not has_cuda_capability(9, 0):
+        if self.moe_args.use_grouped_mm and not has_cuda_capability(9, 0):
             logger.warning(
                 "Failed to use grouped mm, which is only supported on SM90 or later",
             )
-            self.use_grouped_mm = False
+            self.moe_args.use_grouped_mm = False
 
         if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
             raise NotImplementedError(
@@ -177,7 +177,7 @@ class HybridMoEModelArgs(BaseModelArgs):
         nparams_sparse_active = (
             nparams_moe_router
             + nparams_shared_expert
-            + nparams_experts * self.n_activated_experts // self.n_routed_experts
+            + nparams_experts * self.moe_args.top_k // self.moe_args.num_experts
         )
 
         logger.info(
