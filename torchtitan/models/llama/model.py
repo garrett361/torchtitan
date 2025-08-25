@@ -37,9 +37,9 @@ class ModelArgs:
     norm_type: str = "rmsnorm"
     # yarn: https://arxiv.org/pdf/2309.00071
     original_seq_len: int = 8192
-    rope_factor: float = 16 # s in 2309.00071 (I believe); see eq (25)
-    beta_fast: int = 32 # \alpha in 2309.00071; see around eq (23)
-    beta_slow: int = 1 # \beta in 2309.00071; see around eq (23)
+    rope_factor: float = 16  # s in 2309.00071 (I believe); see eq (25)
+    beta_fast: int = 32  # \alpha in 2309.00071; see around eq (23)
+    beta_slow: int = 1  # \beta in 2309.00071; see around eq (23)
 
 
 def _precompute_freqs_cis_original_llama(
@@ -68,12 +68,18 @@ def _precompute_freqs_cis_original_llama(
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
+def get_mscale(scale):
+    if scale <= 1:
+        return 1.0
+    return 0.1 * math.log(scale) + 1.0
+
+
 def precompute_freqs_cis(
     dim: int,
     seq_len: int,
     original_seq_len: int,
     rope_theta: float = 10000.0,
-    rope_factor: float = 16,
+    rope_factor: float = 16.0,
     beta_fast: int = 32,
     beta_slow: int = 1,
 ) -> torch.Tensor:
@@ -100,7 +106,6 @@ def precompute_freqs_cis(
     beta_fast: int = 32
     beta_slow: int = 1
 
-    NOTE: @goon -  I omitted mscale which doesn't do anything when left at its default 1.0 value.
     """
 
     def find_correction_dim(
@@ -181,7 +186,7 @@ def precompute_freqs_cis(
     freqs = torch.outer(t, freqs)
 
     # Convert to complex exponentials: e^(i*freq*pos)
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs) * get_mscale(rope_factor)
     return freqs_cis
 
 
