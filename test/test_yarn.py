@@ -21,8 +21,6 @@ from torchtitan.models.llama.model import (
 )
 
 ORIG_SEQ_LEN = 8192
-TRANSFORMERS_VERSION = "4.53.3"
-VLLM_VERSION = "0.9.2"
 
 
 def rotate_half(x):
