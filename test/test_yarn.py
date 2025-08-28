@@ -52,7 +52,7 @@ class TestYaRN:
     dtype = torch.float32
     factory_kwargs = {"device": device, "dtype": dtype}
     config_dir = pathlib.Path(__file__).parent / "configs"
-    tol=1e-4
+    tol = 1e-4
 
     def setup_method(self, method):
         torch.manual_seed(42)
@@ -185,7 +185,9 @@ class TestYaRN:
         with torch.inference_mode():
             hf_cfg = self.get_hf_cfg(seq_len=seq_len)
             position_ids = torch.arange(seq_len, device=self.device)[None]
-            llama_rotary_emb = LlamaRotaryEmbedding(self.get_hf_cfg(seq_len=seq_len)).cuda()
+            llama_rotary_emb = LlamaRotaryEmbedding(
+                self.get_hf_cfg(seq_len=seq_len)
+            ).cuda()
             q_hf, k_hf, q_titan, k_titan = self.get_q_ks(seq_len, hf_cfg)
 
             q_hf, k_hf = apply_rotary_pos_emb(
