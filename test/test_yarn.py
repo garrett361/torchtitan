@@ -1,23 +1,29 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import pathlib
 
 import pytest
 import torch
 import transformers
 import vllm
-from transformers.models.llama.configuration_llama import LlamaConfig
-from transformers.models.llama.modeling_llama import (
-    LlamaRotaryEmbedding,
-    apply_rotary_pos_emb,
-)
-from vllm.model_executor.layers.rotary_embedding import (
-    YaRNScalingRotaryEmbedding,
-    get_rope,
-)
 
 from torchtitan.models.llama.model import (
     apply_rotary_emb,
     get_mscale,
     precompute_freqs_cis,
+)
+from transformers.models.llama.configuration_llama import LlamaConfig
+from transformers.models.llama.modeling_llama import (
+    apply_rotary_pos_emb,
+    LlamaRotaryEmbedding,
+)
+from vllm.model_executor.layers.rotary_embedding import (
+    get_rope,
+    YaRNScalingRotaryEmbedding,
 )
 
 ORIG_SEQ_LEN = 8192
