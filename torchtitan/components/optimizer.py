@@ -11,9 +11,9 @@ import torch
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
     get_optimizer_state_dict,
     set_optimizer_state_dict,
-    StateDictOptions,
 )
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
@@ -344,6 +344,16 @@ def build_optimizers_with_moe_load_balancing(
     def _is_recomputation_enabled(module):
         return getattr(module, "checkpoint_impl", None) is CheckpointImpl.NO_REENTRANT
 
+    def _should_register_hook(model_parts: list[nn.Module]) -> bool:
+        for model_part in model_parts:
+            for transformer_block in model_part.layers.values():
+                if (
+                    transformer_block.moe_enabled
+                    and transformer_block.moe.load_balance_coeff
+                ):
+                    return True
+        return False
+
     def _update_expert_bias(
         model_parts: list[nn.Module],
         parallel_dims: ParallelDims,
@@ -400,10 +410,11 @@ def build_optimizers_with_moe_load_balancing(
                     moe.expert_bias.add_(expert_bias_delta)
                     moe.tokens_per_expert.zero_()
 
-    optimizers.register_step_pre_hook(
-        lambda *args, **kwargs: _update_expert_bias(
-            model_parts, parallel_dims=parallel_dims
+    if _should_register_hook(model_parts):
+        optimizers.register_step_pre_hook(
+            lambda *args, **kwargs: _update_expert_bias(
+                model_parts, parallel_dims=parallel_dims
+            )
         )
-    )
 
     return optimizers
