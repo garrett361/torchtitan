@@ -58,8 +58,10 @@ class HybridMoEMetricsProcessor(MetricsProcessor):
                 moe_metrics[f"moe/layer_{block_idx} moe normalized entropy"] = (
                     entropy / self.max_entropy
                 )
-                for exp_idx, tok in enumerate(tokens_per_expert_cumulative.tolist()):
-                    moe_metrics[f"moe/layer_{block_idx}:exp_{exp_idx} tokens"] = tok
+                # NOTE: @goon - per-expert stats are pretty noisy, just the entropy seems to
+                # give a good view.
+                # for exp_idx, tok in enumerate(tokens_per_expert_cumulative.tolist()):
+                #     moe_metrics[f"moe/layer_{block_idx}:exp_{exp_idx} tokens"] = tok
 
                 transformer_block.moe.tokens_per_expert_cumulative.zero_()
         return moe_metrics
