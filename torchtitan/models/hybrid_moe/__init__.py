@@ -59,8 +59,7 @@ DEV_KWARG_DEFAULTS = dict(
     v_head_dim=128,
     mscale=0.70,
     # TODO: @goon - DELETE - temp no mamba layers
-    mha_layer_interval=1,
-
+    mha_layer_interval=2,
 )
 
 

@@ -358,6 +358,11 @@ class MoE(nn.Module):
             torch.zeros(num_experts, dtype=torch.float32),
             persistent=False,
         )
+        self.register_buffer(
+            "tokens_per_expert_cumulative",
+            torch.zeros(num_experts, dtype=torch.float32),
+            persistent=False,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
