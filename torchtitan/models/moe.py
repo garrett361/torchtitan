@@ -451,9 +451,8 @@ class MoE(nn.Module):
             self.shared_experts.init_weights(init_std)
 
         with torch.device(buffer_device):
-            self.tokens_per_expert = torch.zeros(
-                self.experts.num_experts, dtype=torch.float32
-            )
+            self.tokens_per_expert.zero_()
+            self.tokens_per_expert_cumulative.zero_()
             if self.load_balance_coeff is not None:
                 self.expert_bias = torch.zeros(
                     self.experts.num_experts, dtype=torch.float32
