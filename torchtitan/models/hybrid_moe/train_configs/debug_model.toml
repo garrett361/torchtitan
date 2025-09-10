@@ -27,7 +27,7 @@ enable_wandb = false
 name = "hybrid_moe"
 flavor = "debugmodel"
 # test tokenizer, for debug purpose only
-hf_assets_path = "./tests/assets/tokenizer"
+hf_assets_path = "./assets/hf/granite-4.0-tiny-preview"
 # converters = ["float8"]
 
 [optimizer]
