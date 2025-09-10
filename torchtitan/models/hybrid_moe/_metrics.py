@@ -99,8 +99,17 @@ class HybridMoEMetricsProcessor(MetricsProcessor):
         return None
 
     def get_moe_balancing_metrics(self) -> dict[str, Any]:
+        pp_ranks = (
+            self.parallel_dims.world_mesh["pp"].mesh.tolist()
+            if self.parallel_dims.pp_enabled
+            else []
+        )
+        # Early return for irrelevant ranks.
+        if self.rank != self.metrics_rank and self.metrics_rank not in pp_ranks:
+            return {}
+
         moe_metrics = {}
-        # Get locally-available MoE stats
+        # Get locally-available MoE stats on relevant ranks
         for model_part in self.model_parts:
             for block_idx, transformer_block in model_part.layers.items():
                 if not transformer_block.moe_enabled:
@@ -129,30 +138,27 @@ class HybridMoEMetricsProcessor(MetricsProcessor):
 
                 transformer_block.moe.tokens_per_expert_cumulative.zero_()
 
-        if self.parallel_dims.pp_enabled:
-            # If using PP, need to also gather stats from other PP ranks.
-            pp_ranks = self.parallel_dims.world_mesh["pp"].mesh.tolist()
-            # Only other members of the metrics rank's PP group need to send info.
-            if self.metrics_rank in pp_ranks:
-                for send_rank in pp_ranks:
-                    if send_rank == self.metrics_rank:
-                        continue
-                    # Send/get cached moe idxs from send_rank
-                    send_rank_idxs = self.send_moe_layer_idxs_to_metrics_rank(send_rank)
-                    # Send results
-                    results = (
-                        torch.stack(list(moe_metrics.values()), dim=-1)
-                        if send_rank == self.rank
-                        else torch.empty(
-                            len(send_rank_idxs),
-                            device=self.device,
-                        )
+        # If using PP, need to also gather stats from other PP ranks.
+        for send_rank in pp_ranks:
+            if send_rank == self.metrics_rank:
+                continue
+            if self.rank in (send_rank, self.metrics_rank):
+                # Send/get cached moe idxs from send_rank
+                send_rank_idxs = self.send_moe_layer_idxs_to_metrics_rank(send_rank)
+                # Send results
+                results = (
+                    torch.stack(list(moe_metrics.values()), dim=-1)
+                    if send_rank == self.rank
+                    else torch.empty(
+                        len(send_rank_idxs),
+                        device=self.device,
                     )
-                    results = self.send_tensor_to_metrics_rank(send_rank, results)
+                )
+                results = self.send_tensor_to_metrics_rank(send_rank, results)
 
-                    if self.rank == self.metrics_rank:
-                        for idx, res in zip(send_rank_idxs, results, strict=True):
-                            moe_metrics[idx] = res
+                if self.rank == self.metrics_rank:
+                    for idx, res in zip(send_rank_idxs, results, strict=True):
+                        moe_metrics[idx] = res
 
         if self.rank != self.metrics_rank:
             return {}
@@ -208,28 +214,29 @@ class HybridMoEMetricsProcessor(MetricsProcessor):
 
         pp_ranks = self.parallel_dims.world_mesh["pp"].mesh.tolist()
         # Only other members of the metrics rank's PP group need to send info.
-        # Use the enumerated idx of the rank as the PP stage. TODO: @goon - this doesn't necessarily
-        # correspond to the actual PP stage, can improve.
+        # Use the enumerated idx of the rank as the PP rank (e.g. we use the mesh-local-rank)
         pp_mem_metrics_t = {}
         if self.metrics_rank in pp_ranks:
-            for stage_idx, send_rank in enumerate(pp_ranks):
+            for pp_mesh_rank, send_rank in enumerate(pp_ranks):
                 if send_rank == self.metrics_rank:
-                    pp_mem_metrics_t[stage_idx] = mem_stats_t
+                    pp_mem_metrics_t[pp_mesh_rank] = mem_stats_t
                     continue
                 recv_mem_stats_t = self.send_tensor_to_metrics_rank(
                     send_rank,
                     mem_stats_t if self.rank == send_rank else recv_mem_stats_buffer_t,
                 )
-                pp_mem_metrics_t[stage_idx] = recv_mem_stats_t
+                pp_mem_metrics_t[pp_mesh_rank] = recv_mem_stats_t
         if self.rank != self.metrics_rank:
             return {}
         # Turn the tensorial mem metrics into nicely formatted ones
         pp_mem_metrics = {}
-        for stage_idx, mem_t in pp_mem_metrics_t.items():
+        for pp_mesh_rank, mem_t in pp_mem_metrics_t.items():
             for metric_name, metric_val in zip(
                 mem_stat_prefixes, mem_t.tolist(), strict=True
             ):
-                pp_mem_metrics[metric_name + f" pp stage {stage_idx}"] = metric_val
+                pp_mem_metrics[metric_name + f" pp mesh rank {pp_mesh_rank}"] = (
+                    metric_val
+                )
         return pp_mem_metrics
 
     def log(
