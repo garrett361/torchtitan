@@ -213,14 +213,18 @@ class HybridMoEMetricsProcessor(MetricsProcessor):
             )
 
         pp_ranks = self.parallel_dims.world_mesh["pp"].mesh.tolist()
-        # Only other members of the metrics rank's PP group need to send info.
+        # Only other members of the metrics rank's PP group need to send info. Early return for
+        # irrelevant ranks.
+        if self.metrics_rank not in pp_ranks:
+            return {}
+
         # Use the enumerated idx of the rank as the PP rank (e.g. we use the mesh-local-rank)
         pp_mem_metrics_t = {}
-        if self.metrics_rank in pp_ranks:
-            for pp_mesh_rank, send_rank in enumerate(pp_ranks):
-                if send_rank == self.metrics_rank:
-                    pp_mem_metrics_t[pp_mesh_rank] = mem_stats_t
-                    continue
+        for pp_mesh_rank, send_rank in enumerate(pp_ranks):
+            if send_rank == self.metrics_rank:
+                pp_mem_metrics_t[pp_mesh_rank] = mem_stats_t
+                continue
+            if self.rank in (send_rank, self.metrics_rank):
                 recv_mem_stats_t = self.send_tensor_to_metrics_rank(
                     send_rank,
                     mem_stats_t if self.rank == send_rank else recv_mem_stats_buffer_t,
