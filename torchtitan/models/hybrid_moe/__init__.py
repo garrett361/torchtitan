@@ -36,30 +36,31 @@ __all__ = [
 # Dev keys must be in the form dev.key=value|key=value|
 
 
-# Default modified from from DSv3 16B
+# Default modified from DSv3 236B
 DEV_KWARG_DEFAULTS = dict(
-    dim=2048,
-    inter_dim=10944,
-    moe_inter_dim=1408,
-    n_layers=27,
+    dim=5120,
+    inter_dim=12288,
+    moe_inter_dim=1536,
+    n_layers=60,
     n_dense_layers=1,
-    n_heads=16,
+    n_heads=128,
     moe_args=MoEArgs(
-        num_experts=64,
+        num_experts=160,
         num_shared_experts=2,
         top_k=6,
         score_func="softmax",
         route_norm=True,
+        route_scale=16.0,
         score_before_experts=False,
     ),
-    q_lora_rank=0,
+    n_expert_groups=8,
+    n_limited_groups=3,
+    q_lora_rank=1536,
     kv_lora_rank=512,
     qk_nope_head_dim=128,
     qk_rope_head_dim=64,
     v_head_dim=128,
-    mscale=0.70,
-    # TODO: @goon - DELETE - temp no mamba layers
-    mha_layer_interval=2,
+    mha_layer_interval=4,
 )
 
 
