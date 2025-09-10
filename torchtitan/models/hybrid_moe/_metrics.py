@@ -37,6 +37,28 @@ class HybridMoEMetricsProcessor(MetricsProcessor):
                     moe_layer_idxs.append(int(block_idx))
         return moe_layer_idxs
 
+    def send_tensor_to_metrics_rank(
+        self, rank: int, tensor: torch.Tensor
+    ) -> torch.Tensor | None:
+        """
+        Send the given tensor from rank to the metrics_rank process. The metrics rank passes in its
+        receive buffer.
+        """
+        if self.rank not in (rank, self.metrics_rank):
+            return None
+
+        ops = []
+        if rank == self.rank:
+            ops.append(dist.P2POp(dist.isend, tensor, self.metrics_rank))
+        else:
+            ops.append(dist.P2POp(dist.irecv, tensor, rank))
+        for op in dist.batch_isend_irecv(ops):
+            op.wait()
+
+        if self.rank == self.metrics_rank:
+            return tensor
+        return None
+
     @cache
     def send_moe_layer_idxs_to_metrics_rank(self, rank: int) -> list[int] | None:
         """
@@ -52,32 +74,20 @@ class HybridMoEMetricsProcessor(MetricsProcessor):
 
         ops = []
         # Send num idxs to expect
-        if rank == self.rank:
-            num_results = torch.tensor(
-                [len(self.moe_layer_idxs)], device="cuda", dtype=torch.int32
-            )
-            ops.append(dist.P2POp(dist.isend, num_results, self.metrics_rank))
-        else:
-            num_results = torch.empty(1, device="cuda", dtype=torch.int32)
-            ops.append(dist.P2POp(dist.irecv, num_results, rank))
-        if ops:
-            for op in dist.batch_isend_irecv(ops):
-                op.wait()
+        num_results = (
+            torch.tensor([len(self.moe_layer_idxs)], device="cuda", dtype=torch.int32)
+            if rank == self.rank
+            else torch.empty(1, device="cuda", dtype=torch.int32)
+        )
+        num_results = self.send_tensor_to_metrics_rank(rank, num_results)
 
         # Send idxs
-        if rank == self.rank:
-            layer_idxs = torch.tensor(
-                self.moe_layer_idxs, device="cuda", dtype=torch.int32
-            )
-            ops.append(dist.P2POp(dist.isend, layer_idxs, self.metrics_rank))
-        else:
-            num_results_cpu = int(num_results.item())
-            layer_idxs = torch.empty(num_results_cpu, device="cuda", dtype=torch.int32)
-            ops.append(dist.P2POp(dist.irecv, layer_idxs, rank))
-        if ops:
-            for op in dist.batch_isend_irecv(ops):
-                op.wait()
-
+        layer_idxs = (
+            torch.tensor(self.moe_layer_idxs, device="cuda", dtype=torch.int32)
+            if rank == self.rank
+            else torch.empty(int(num_results.item()), device="cuda", dtype=torch.int32)
+        )
+        layer_idxs = self.send_tensor_to_metrics_rank(rank, layer_idxs)
         if self.rank == self.metrics_rank:
             return layer_idxs.tolist()
         return None
