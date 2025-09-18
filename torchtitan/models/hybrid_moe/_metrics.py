@@ -104,7 +104,8 @@ class HybridMoEMetricsProcessor(MetricsProcessor):
             if self.parallel_dims.pp_enabled
             else []
         )
-        # Early return for irrelevant ranks.
+        # Early return for irrelevant ranks. MoE optimizer code has already reduced tok counts
+        # across the dp_cp dim.
         if self.rank != self.metrics_rank and self.metrics_rank not in pp_ranks:
             return {}
 
