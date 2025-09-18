@@ -9,6 +9,7 @@ FLAVOR ?= debugmodel
 ARGS ?=
 LR ?= 8e-4
 WARMUP_STEPS ?= 200
+SEQ_LEN ?= 2048
 LOG_FREQ ?= 5
 DATE := $(shell date "+%Y-%m-%d-%H-%M")
 
@@ -30,6 +31,7 @@ define run_fsdp
 	./run_train.sh \
 		--training.local_batch_size $(LOCAL_BATCH_SIZE) \
 		--training.steps $(STEPS) \
+		--training.seq_len $(SEQ_LEN) \
 		--optimizer.lr $(LR) \
 		--metrics.log_freq $(LOG_FREQ) \
 		--lr-scheduler.warmup-steps $(WARMUP_STEPS) \
@@ -48,6 +50,7 @@ define run_ep
 	./run_train.sh \
 		--training.local_batch_size $(LOCAL_BATCH_SIZE) \
 		--training.steps $(STEPS) \
+		--training.seq_len $(SEQ_LEN) \
 		--optimizer.lr $(LR) \
 		--metrics.log_freq $(LOG_FREQ) \
 		--lr-scheduler.warmup-steps $(WARMUP_STEPS) \
@@ -70,6 +73,7 @@ define run_ep_pp
 	./run_train.sh \
 		--training.local_batch_size $(LOCAL_BATCH_SIZE) \
 		--training.steps $(STEPS) \
+		--training.seq_len $(SEQ_LEN) \
 		--optimizer.lr $(LR) \
 		--metrics.log_freq $(LOG_FREQ) \
 		--lr-scheduler.warmup-steps $(WARMUP_STEPS) \
