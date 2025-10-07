@@ -298,15 +298,16 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
+
         h = x + self.attention(self.attention_norm(x), freqs_cis)
         out = h + self.moe(self.ffn_norm(h))
         return out
 
-    def init_weights(self):
+    def init_weights(self, buffer_device: torch.device | None = None):
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
-        self.feed_forward.init_weights(self.weight_init_std)
+        self.moe.init_weights(self.weight_init_std, buffer_device)
 
 
 class Transformer(nn.Module, ModelProtocol):
@@ -373,7 +374,7 @@ class Transformer(nn.Module, ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
-                layer.init_weights()
+                layer.init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
         final_out_std = self.model_args.dim**-0.5

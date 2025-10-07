@@ -16,7 +16,7 @@ from torchtitan.distributed.expert_parallel import expert_parallel
 
 @dataclass
 class MoEArgs:
-    num_experts: int = 8
+    num_experts: int = 2
     num_shared_experts: int = 1
 
     # router

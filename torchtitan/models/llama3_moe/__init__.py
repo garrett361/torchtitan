@@ -27,21 +27,18 @@ __all__ = [
 ]
 
 
-llama3_configs = {
+llama3_moe_configs = {
     "debugmodel": TransformerModelArgs(
-        dim=256, n_layers=6, n_heads=16, vocab_size=2048, rope_theta=500000
-    ),
-    "debugmodel_flex_attn": TransformerModelArgs(
         dim=256,
+        moe_inter_dim=1024,
         n_layers=6,
         n_heads=16,
         vocab_size=2048,
         rope_theta=500000,
-        use_flex_attn=True,
-        attn_mask_type="block_causal",
     ),
     "8B": TransformerModelArgs(
         dim=4096,
+        moe_inter_dim=14336,
         n_layers=32,
         n_heads=32,
         n_kv_heads=8,
@@ -49,32 +46,15 @@ llama3_configs = {
         multiple_of=1024,
         rope_theta=500000,
     ),
-    "70B": TransformerModelArgs(
-        dim=8192,
-        n_layers=80,
-        n_heads=64,
-        n_kv_heads=8,
-        ffn_dim_multiplier=1.3,
-        multiple_of=4096,
-        rope_theta=500000,
-    ),
-    "405B": TransformerModelArgs(
-        dim=16384,
-        n_layers=126,
-        n_heads=128,
-        n_kv_heads=8,
-        ffn_dim_multiplier=1.2,
-        multiple_of=4096,
-        rope_theta=500000,
-    ),
+    # can add other version from torchtitan/models/llama3/__init__.py
 }
 
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        name="llama3",
+        name="llama3_moe",
         model_cls=Transformer,
-        model_args=llama3_configs,
+        model_args=llama3_moe_configs,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llama,
         build_optimizers_fn=build_optimizers,
