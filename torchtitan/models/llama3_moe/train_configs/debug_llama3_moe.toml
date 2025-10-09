@@ -1,6 +1,6 @@
 [job]
 dump_folder = "./outputs"
-description = "Llama 3 8B training"
+description = "Llama-3-MoE debug model"
 
 [profiling]
 enable_profiling = false
@@ -14,8 +14,9 @@ save_tb_folder = "tb"
 
 [model]
 name = "llama3_moe"
-flavor = "debugmodel"
-hf_assets_path = "./assets/hf/Llama-3.1-8B"
+flavor = "debugmodel_1exp"
+tokenizer_path = "./assets/hf/Llama-3.1-8B"
+# hf_assets_path = "./assets/hf/Llama-3.1-8B"
 # converters = ["float8"]
 
 [optimizer]
@@ -49,7 +50,7 @@ enable = false
 folder = "checkpoint"
 interval = 500
 last_save_model_only = true
-export_dtype = "float32"
+export_dtype = "bfloat16"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 exclude_from_loading = [""]
 
@@ -58,7 +59,7 @@ enable=false
 components = ["model", "loss"]
 
 [activation_checkpoint]
-mode = "selective"  # ["none", "selective", "full"]
+mode = "none"  # ["none", "selective", "full"]
 selective_ac_option = "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
 
 [quantize.linear.float8]

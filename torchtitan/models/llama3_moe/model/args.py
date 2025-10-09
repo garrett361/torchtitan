@@ -22,6 +22,7 @@ from torchtitan.tools.logging import logger
 class TransformerModelArgs(BaseModelArgs):
     dim: int = 4096
     moe_inter_dim: int = 14336
+    num_experts: int = 1
     n_layers: int = 32
     n_heads: int = 32
     n_kv_heads: int | None = None

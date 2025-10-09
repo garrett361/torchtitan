@@ -269,10 +269,11 @@ class TransformerBlock(nn.Module):
         self.dim = model_args.dim
         self.attention = Attention(model_args)
         self.moe = MoE(
-            model_args.moe_args,  # !!! add moe arguments
+            model_args.moe_args,
             dim=model_args.dim,
             hidden_dim=model_args.moe_inter_dim,
         )
+        self.moe_enabled = True  # Llama-3-MoE always enables MoE
 
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
@@ -332,6 +333,8 @@ class Transformer(nn.Module, ModelProtocol):
     def __init__(self, model_args: TransformerModelArgs):
         super().__init__()
         self.model_args = model_args
+        model_args.moe_args.num_experts = model_args.num_experts  # !!! enforce value from config
+
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
 

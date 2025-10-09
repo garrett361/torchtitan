@@ -107,6 +107,7 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+        breakpoint()
         n_heads = self.model_args.n_heads
         n_kv_heads = (
             self.model_args.n_kv_heads

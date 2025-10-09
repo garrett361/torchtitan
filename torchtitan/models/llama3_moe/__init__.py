@@ -12,14 +12,14 @@ from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.protocols.train_spec import TrainSpec
 
-from .infra.parallelize import parallelize_llama
+from .infra.parallelize import parallelize_llama_moe
 from .infra.pipeline import pipeline_llama
 from .model.args import TransformerModelArgs
 from .model.model import Transformer
 from .model.state_dict_adapter import Llama3MoEStateDictAdapter
 
 __all__ = [
-    "parallelize_llama",
+    "parallelize_llama_moe",
     "pipeline_llama",
     "TransformerModelArgs",
     "Transformer",
@@ -28,9 +28,28 @@ __all__ = [
 
 
 llama3_moe_configs = {
-    "debugmodel": TransformerModelArgs(
+    "debugmodel_1exp": TransformerModelArgs(
         dim=256,
         moe_inter_dim=1024,
+        num_experts=1,
+        n_layers=6,
+        n_heads=16,
+        vocab_size=2048,
+        rope_theta=500000,
+    ),
+    "debugmodel_2exp": TransformerModelArgs(
+        dim=256,
+        moe_inter_dim=1024,
+        num_experts=2,
+        n_layers=6,
+        n_heads=16,
+        vocab_size=2048,
+        rope_theta=500000,
+    ),
+    "debugmodel_4exp": TransformerModelArgs(
+        dim=256,
+        moe_inter_dim=1024,
+        num_experts=4,
         n_layers=6,
         n_heads=16,
         vocab_size=2048,
@@ -39,6 +58,7 @@ llama3_moe_configs = {
     "8B": TransformerModelArgs(
         dim=4096,
         moe_inter_dim=14336,
+        num_experts=2,
         n_layers=32,
         n_heads=32,
         n_kv_heads=8,
@@ -55,7 +75,7 @@ def get_train_spec() -> TrainSpec:
         name="llama3_moe",
         model_cls=Transformer,
         model_args=llama3_moe_configs,
-        parallelize_fn=parallelize_llama,
+        parallelize_fn=parallelize_llama_moe,
         pipelining_fn=pipeline_llama,
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,

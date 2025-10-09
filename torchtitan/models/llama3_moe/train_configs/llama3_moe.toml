@@ -1,6 +1,6 @@
 [job]
 dump_folder = "./outputs"
-description = "Llama 3 8B training"
+description = "Llama 3 MoE training"
 
 [profiling]
 enable_profiling = false
@@ -15,7 +15,8 @@ save_tb_folder = "tb"
 [model]
 name = "llama3_moe"
 flavor = "8B"
-hf_assets_path = "./assets/hf/Llama-3.1-8B"
+tokenizer_path = "./assets/hf/Llama-3.1-8B"
+# hf_assets_path = "./assets/hf/Llama-3.1-8B"
 # converters = ["float8"]
 
 [optimizer]
@@ -28,7 +29,7 @@ warmup_steps = 10  # lr scheduler warm up
 
 [training]
 local_batch_size = 1
-seq_len = 8192
+seq_len = 2048  # 8192
 max_norm = 1.0  # grad norm clipping
 steps = 100
 dataset = "c4_test"  # for full training use "c4"
@@ -38,7 +39,7 @@ enable_cpu_offload = false
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 fsdp_reshard_after_forward = "default" # default / never / always
-tensor_parallel_degree = 1
+tensor_parallel_degree = 4
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 1
 pipeline_parallel_schedule = "Interleaved1F1B"
@@ -50,7 +51,7 @@ enable = false
 folder = "checkpoint"
 interval = 500
 last_save_model_only = true
-export_dtype = "float32"
+export_dtype = "bfloat16"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 exclude_from_loading = [""]
 
@@ -59,7 +60,7 @@ enable=false
 components = ["model", "loss"]
 
 [activation_checkpoint]
-mode = "selective"  # ["none", "selective", "full"]
+mode = "none"  # ["none", "selective", "full"]
 selective_ac_option = "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
 
 [quantize.linear.float8]
