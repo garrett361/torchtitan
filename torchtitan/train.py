@@ -657,9 +657,9 @@ if __name__ == "__main__":
     config = config_manager.parse_args()
     trainer: Optional[Trainer] = None
 
-    print("="*60)
-    print("\n".join(f"{k:30} {v}" for k,v in config.to_dict().items()))
-    print("="*60)
+    print("=" * 60)
+    print("\n".join(f"{k:30} {v}" for k, v in config.to_dict().items()))
+    print("=" * 60)
 
     try:
         trainer = Trainer(config)

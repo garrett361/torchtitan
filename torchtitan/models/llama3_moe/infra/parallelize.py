@@ -17,7 +17,7 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.llama4.infra.parallelize import (
@@ -251,4 +251,4 @@ def apply_non_moe_tp(
             parallelize_plan=layer_plan,
         )
 
-    logger.info(f"Applied Tensor Parallelism to the model")
+    logger.info("Applied Tensor Parallelism to the model")
