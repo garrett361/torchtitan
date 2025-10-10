@@ -234,7 +234,6 @@ def apply_non_moe_tp(
             "attention.wv": colwise_parallel(),
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
-
             # llama-3-moe does not have FFN, only MOE
             # "feed_forward": prepare_module_input(
             #     input_layouts=(Shard(1),),

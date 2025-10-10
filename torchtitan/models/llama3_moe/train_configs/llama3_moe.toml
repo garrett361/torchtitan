@@ -14,8 +14,8 @@ save_tb_folder = "tb"
 
 [model]
 name = "llama3_moe"
-flavor = "8B"
-tokenizer_path = "./assets/hf/Llama-3.1-8B"
+flavor = "8B_2exp"
+tokenizer_path = "./assets/hf/llama-3.1-8b"
 # hf_assets_path = "./assets/hf/Llama-3.1-8B"
 # converters = ["float8"]
 
@@ -37,9 +37,9 @@ enable_cpu_offload = false
 
 [parallelism]
 data_parallel_replicate_degree = 1
-data_parallel_shard_degree = -1
+data_parallel_shard_degree = 2
 fsdp_reshard_after_forward = "default" # default / never / always
-tensor_parallel_degree = 4
+tensor_parallel_degree = 2
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 1
 pipeline_parallel_schedule = "Interleaved1F1B"

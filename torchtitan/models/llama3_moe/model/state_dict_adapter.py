@@ -17,6 +17,7 @@ from .args import TransformerModelArgs
 
 class Llama3MoEStateDictAdapter(StateDictAdapter):
     """Convert a TorchTriton state dict into an HF one."""
+
     # !!! There is no Llama3MoE in HF, so this class should be adapted, not called, or throw an error.
     # !!! Currently, it is called by TrainSpec in __init__.py
 
