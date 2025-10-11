@@ -14,9 +14,9 @@ save_tb_folder = "tb"
 
 [model]
 name = "llama3_moe"
-flavor = "8B_2exp"
-tokenizer_path = "./assets/hf/llama-3.1-8b"
-# hf_assets_path = "./assets/hf/Llama-3.1-8B"
+flavor = "1B_8exp"
+# tokenizer_path = "./assets/hf/llama-3.1-8b"
+hf_assets_path = "./assets/hf/llama-3.1-1b"
 # converters = ["float8"]
 
 [optimizer]
@@ -47,13 +47,17 @@ expert_parallel_degree = 1
 context_parallel_degree = 1
 
 [checkpoint]
-enable = false
-folder = "checkpoint"
+enable = true
+load_only = true  # for debugging, never save trained ckpts
+folder = "checkpoint"  # takes precedence for load & save
 interval = 500
 last_save_model_only = true
 export_dtype = "bfloat16"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 exclude_from_loading = [""]
+initial_load_model_only = true  # required to load HF ckpt (only loads params, not optimizer)
+initial_load_in_hf = true
+
 
 [compile]
 enable=false
