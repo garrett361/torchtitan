@@ -34,12 +34,12 @@ from torchtitan.tools.profiling import (
     maybe_enable_profiling,
 )
 
-def rank_zero_print(msg:str)->None:
+
+def rank_zero_print(msg: str) -> None:
     dist.barrier()
     if dist.get_rank() == 0:
         print(msg)
     dist.barrier()
-
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
