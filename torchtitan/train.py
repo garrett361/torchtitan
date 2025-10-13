@@ -477,14 +477,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-
-                    # !!! must limit max if embedding is smaller than vocab size
-                    inputs = inputs.clamp(0, model_parts[0].model_args.vocab_size - 1)
-                    labels = labels.clamp(0, model_parts[0].model_args.vocab_size - 1)
-
-                    pred = model_parts[0](inputs, **extra_inputs)
+                    pred = model_parts[0](inputs)
                     loss = self.loss_fn(pred, labels)
-                # need to free pred before bwd to avoid peaking memory
+                # need to free to before bwd to avoid peaking memory
                 del pred
                 loss.backward()
 
