@@ -34,6 +34,13 @@ from torchtitan.tools.profiling import (
     maybe_enable_profiling,
 )
 
+def rank_zero_print(msg:str)->None:
+    dist.barrier()
+    if dist.get_rank() == 0:
+        print(msg)
+    dist.barrier()
+
+
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # core configs
@@ -161,10 +168,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         ):
             model = self.train_spec.model_cls(model_args)
             # TODO: @goon - DELETE
-            dist.barrier()
-            if dist.get_rank() == 0:
-                print(f"Post meta-init: {model=}")
-            dist.barrier()
+            rank_zero_print(f"Post meta-init: {model=}")
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -276,10 +280,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.model_parts = [model]
 
         # TODO: @goon - DELETE
-        dist.barrier()
-        if dist.get_rank() == 0:
-            print(f"Post Parallelization Init: {self.model_parts=}")
-        dist.barrier()
+        rank_zero_print(f"Post Parallelization Init: {self.model_parts=}")
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
         # initialize device memory monitor and get peak flops for MFU calculation
