@@ -15,8 +15,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama3_moe"
 flavor = "debugmodel_1exp"
-tokenizer_path = "./assets/hf/Llama-3.1-8B"
-# hf_assets_path = "./assets/hf/Llama-3.1-8B"
+hf_assets_path = "./assets/hf/Llama-3.1-8B"
 # converters = ["float8"]
 
 [optimizer]

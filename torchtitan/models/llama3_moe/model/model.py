@@ -333,10 +333,6 @@ class Transformer(nn.Module, ModelProtocol):
     def __init__(self, model_args: TransformerModelArgs):
         super().__init__()
         self.model_args = model_args
-        model_args.moe_args.num_experts = (
-            model_args.num_experts
-        )  # !!! enforce value from config
-
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
 
