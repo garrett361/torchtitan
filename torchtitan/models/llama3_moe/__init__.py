@@ -10,11 +10,11 @@ from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
+from torchtitan.models.llama3 import pipeline_llama
 from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import TrainSpec
 
 from .infra.parallelize import parallelize_llama_moe
-from .infra.pipeline import pipeline_llama
 from .model.args import TransformerModelArgs
 from .model.model import Transformer
 from .model.state_dict_adapter import Llama3MoEStateDictAdapter
@@ -70,6 +70,18 @@ llama3_moe_configs = {
         moe_inter_dim=1024,
         n_layers=6,
         n_heads=16,
+        vocab_size=2048,
+        rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=8,
+            num_shared_experts=0,
+        ),
+    ),
+    "debugmodel_8exp_small": TransformerModelArgs(
+        dim=64,
+        moe_inter_dim=128,
+        n_layers=8,
+        n_heads=4,
         vocab_size=2048,
         rope_theta=500000,
         moe_args=MoEArgs(

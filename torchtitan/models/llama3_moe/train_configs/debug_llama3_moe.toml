@@ -14,24 +14,25 @@ save_tb_folder = "tb"
 
 [model]
 name = "llama3_moe"
-flavor = "debugmodel_1exp"
-hf_assets_path = "./assets/hf/Llama-3.1-8B"
+flavor = "debugmodel_8exp_small"
+hf_assets_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
 
 [optimizer]
 name = "AdamW"
-lr = 3e-4
+lr = 1e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 200  # lr scheduler warm up
+warmup_steps = 10  # lr scheduler warm up
 
 [training]
 local_batch_size = 1
-seq_len = 8192
+seq_len = 2048
 max_norm = 1.0  # grad norm clipping
-steps = 1000
+steps = 100
 dataset = "c4_test"  # for full training use "c4"
+enable_cpu_offload = false
 
 [parallelism]
 data_parallel_replicate_degree = 1

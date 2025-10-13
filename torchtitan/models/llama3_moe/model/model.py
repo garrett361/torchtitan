@@ -19,6 +19,7 @@ from .args import TransformerModelArgs
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
+    # TODO: @goon - get the yarn impl from dsv3
     """
     Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
 
