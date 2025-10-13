@@ -65,6 +65,10 @@ class TransformerModelArgs(BaseModelArgs):
                 "CP support for FlexAttention is still in progress."
             )
 
+        # NOTE: @goon - custom args we've added are processed here
+        if job_config.custom_args.load_balance_coeff is not None:
+            self.moe_args.load_balance_coeff = job_config.custom_args.load_balance_coeff
+
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:
