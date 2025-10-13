@@ -11,6 +11,7 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
+import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
@@ -159,6 +160,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             utils.set_default_dtype(TORCH_DTYPE_MAP[job_config.training.dtype]),
         ):
             model = self.train_spec.model_cls(model_args)
+            # TODO: @goon - DELETE
+            dist.barrier()
+            if dist.get_rank() == 0:
+                print(f"Post meta-init: {model=}")
+            dist.barrier()
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -269,6 +275,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             self.model_parts = [model]
 
+        # TODO: @goon - DELETE
+        dist.barrier()
+        if dist.get_rank() == 0:
+            print(f"Post Parallelization Init: {self.model_parts=}")
+        dist.barrier()
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
         # initialize device memory monitor and get peak flops for MFU calculation
