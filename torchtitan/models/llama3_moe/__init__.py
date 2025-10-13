@@ -10,11 +10,11 @@ from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
+from torchtitan.models.llama3 import pipeline_llama
 from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import TrainSpec
 
 from .infra.parallelize import parallelize_llama_moe
-from .infra.pipeline import pipeline_llama
 from .model.args import TransformerModelArgs
 from .model.model import Transformer
 from .model.state_dict_adapter import Llama3MoEStateDictAdapter
