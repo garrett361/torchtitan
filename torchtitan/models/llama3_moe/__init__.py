@@ -77,6 +77,18 @@ llama3_moe_configs = {
             num_shared_experts=0,
         ),
     ),
+    "debugmodel_8exp_small": TransformerModelArgs(
+        dim=64,
+        moe_inter_dim=128,
+        n_layers=8,
+        n_heads=4,
+        vocab_size=2048,
+        rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=8,
+            num_shared_experts=0,
+        ),
+    ),
     "8B_2exp": TransformerModelArgs(
         dim=4096,
         moe_inter_dim=14336,
