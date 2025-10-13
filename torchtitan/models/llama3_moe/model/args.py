@@ -46,6 +46,12 @@ class TransformerModelArgs(BaseModelArgs):
     attn_mask_type: str = "causal"
     eos_id: int = 0
 
+    # yarn: https://arxiv.org/pdf/2309.00071
+    original_seq_len: int = 8192
+    rope_factor: float = 20  # s in 2309.00071 (I believe); see eq (25)
+    beta_fast: int = 32  # \alpha in 2309.00071; see around eq (23)
+    beta_slow: int = 1  # \beta in 2309.00071; see around eq (23)
+
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
         if seq_len > self.max_seq_len:
