@@ -5,7 +5,7 @@ ENABLE_WANDB ?= False
 GIT_HASH := $(shell git rev-parse --short HEAD)
 NGPU := $(shell nvidia-smi --list-gpus | wc -l)
 # LOAD_BALANCE_COEFF ?= 1e-2
-FLAVOR ?= debugmodel_1exp
+FLAVOR ?= debugmodel_8exp
 ARGS ?=
 LR ?= 1e-4
 WARMUP_STEPS ?= 100
@@ -30,6 +30,9 @@ define run_fsdp
 		--training.local_batch_size $(LOCAL_BATCH_SIZE) \
 		--training.steps $(STEPS) \
 		--training.seq_len $(SEQ_LEN) \
+		--parallelism.data_parallel_shard_degree -1 \
+		--parallelism.tensor_parallel_degree 1 \
+		--parallelism.expert_parallel_degree 1 \
 		--optimizer.lr $(LR) \
 		--metrics.log_freq $(LOG_FREQ) \
 		--lr-scheduler.warmup-steps $(WARMUP_STEPS) \
@@ -52,9 +55,10 @@ define run_ep
 		--metrics.log_freq $(LOG_FREQ) \
 		--lr-scheduler.warmup-steps $(WARMUP_STEPS) \
 		--model.flavor $(2) \
+		--parallelism.data_parallel_shard_degree -1 \
+		--parallelism.tensor_parallel_degree 1 \
 		--parallelism.expert_parallel_degree $$NGPU \
 		--parallelism.fsdp_reshard_after_forward never \
-		--custom-args.load-balance-coeff $(LOAD_BALANCE_COEFF) \
 		$(WANDB_FLAG) \
 		$(ARGS)
 endef
@@ -75,10 +79,11 @@ define run_ep_pp
 		--metrics.log_freq $(LOG_FREQ) \
 		--lr-scheduler.warmup-steps $(WARMUP_STEPS) \
 		--model.flavor $(2) \
+		--parallelism.data_parallel_shard_degree -1 \
+		--parallelism.tensor_parallel_degree 1 \
 		--parallelism.expert_parallel_degree $$EP \
 		--parallelism.pipeline_parallel_degree $$PP \
 		--parallelism.fsdp_reshard_after_forward never \
-		--custom-args.load-balance-coeff $(LOAD_BALANCE_COEFF) \
 		$(WANDB_FLAG) \
 		$(ARGS)
 endef
