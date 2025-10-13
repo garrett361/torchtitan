@@ -10,6 +10,7 @@ from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
+from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import TrainSpec
 
 from .infra.parallelize import parallelize_llama_moe
@@ -36,6 +37,7 @@ llama3_moe_configs = {
         n_heads=16,
         vocab_size=2048,
         rope_theta=500000,
+        moe_args=MoEArgs(num_shared_experts=0),
     ),
     "debugmodel_2exp": TransformerModelArgs(
         dim=256,
@@ -45,6 +47,7 @@ llama3_moe_configs = {
         n_heads=16,
         vocab_size=2048,
         rope_theta=500000,
+        moe_args=MoEArgs(num_shared_experts=0),
     ),
     "debugmodel_4exp": TransformerModelArgs(
         dim=256,
@@ -54,6 +57,7 @@ llama3_moe_configs = {
         n_heads=16,
         vocab_size=2048,
         rope_theta=500000,
+        moe_args=MoEArgs(num_shared_experts=0),
     ),
     "debugmodel_8exp": TransformerModelArgs(
         dim=256,
@@ -63,6 +67,7 @@ llama3_moe_configs = {
         n_heads=16,
         vocab_size=2048,
         rope_theta=500000,
+        moe_args=MoEArgs(num_shared_experts=0),
     ),
     "8B_2exp": TransformerModelArgs(
         dim=4096,
@@ -74,6 +79,7 @@ llama3_moe_configs = {
         ffn_dim_multiplier=1.3,
         multiple_of=1024,
         rope_theta=500000,
+        moe_args=MoEArgs(num_shared_experts=0),
     ),
     "8B_4exp": TransformerModelArgs(
         dim=4096,
@@ -85,6 +91,19 @@ llama3_moe_configs = {
         ffn_dim_multiplier=1.3,
         multiple_of=1024,
         rope_theta=500000,
+        moe_args=MoEArgs(num_shared_experts=0),
+    ),
+    "8B_8exp": TransformerModelArgs(
+        dim=4096,
+        moe_inter_dim=14336,
+        num_experts=8,
+        n_layers=32,
+        n_heads=32,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.3,
+        multiple_of=1024,
+        rope_theta=500000,
+        moe_args=MoEArgs(num_shared_experts=0),
     ),
     # can add other version from torchtitan/models/llama3/__init__.py
 }
