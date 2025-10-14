@@ -124,7 +124,7 @@ llama3_moe_configs = {
             num_experts=8,
             num_shared_experts=0,
         ),
-        is_moe_list=[n < 1 for n in range(2)],
+        is_moe_list=[False, True],
     ),
     "8B": TransformerModelArgs(
         dim=4096,
