@@ -89,6 +89,54 @@ llama3_moe_configs = {
         ),
         is_moe_list=[True if n == 0 else False for n in range(6)],
     ),
+    # https://huggingface.co/meta-llama/Llama-3.2-3B/blob/main/config.json
+    "3B": TransformerModelArgs(
+        dim=3072,
+        n_layers=28,
+        n_heads=24,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.0, # Correct?
+        multiple_of=256,
+        rope_theta=500000,
+        is_moe_list=None
+    ),
+    "3B_8layer": TransformerModelArgs(
+        dim=3072,
+        moe_inter_dim=8192,
+        n_layers=8,
+        n_heads=24,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.0, # Correct?
+        multiple_of=256,
+        rope_theta=500000,
+        is_moe_list=None
+    ),
+    "3B_8layer_halfmoe": TransformerModelArgs(
+        dim=3072,
+        moe_inter_dim=8192,
+        n_layers=8,
+        n_heads=24,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.0, # Correct?
+        multiple_of=256,
+        rope_theta=500000,
+        is_moe_list=None
+    ),
+    "8B": TransformerModelArgs(
+        dim=4096,
+        moe_inter_dim=14336,
+        n_layers=32,
+        n_heads=32,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.3,
+        multiple_of=1024,
+        rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=2,
+            num_shared_experts=0,
+        ),
+        is_moe_list=None
+    ),
     "8B_2exp": TransformerModelArgs(
         dim=4096,
         moe_inter_dim=14336,

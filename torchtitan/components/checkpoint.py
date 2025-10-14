@@ -28,9 +28,9 @@ from torch.distributed.checkpoint._consolidate_hf_safetensors import (
 )
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
     get_model_state_dict,
     set_model_state_dict,
-    StateDictOptions,
 )
 from torch.distributed.checkpoint.state_dict_saver import AsyncCheckpointerType
 from torch.distributed.checkpoint.stateful import Stateful
@@ -39,11 +39,12 @@ from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.ft import FTManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config import Checkpoint as CheckpointConfig, TORCH_DTYPE_MAP
+from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.config import Checkpoint as CheckpointConfig
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.protocols import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
-
 
 MODEL = "model"
 OPTIMIZER = "optimizer"
@@ -252,9 +253,9 @@ class CheckpointManager:
         self.last_save_model_only = checkpoint_config.last_save_model_only
         self.last_save_in_hf = checkpoint_config.last_save_in_hf
         if self.last_save_in_hf:
-            assert (
-                sd_adapter is not None
-            ), "job_config.checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
+            assert sd_adapter is not None, (
+                "job_config.checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
+            )
         self.sd_adapter = sd_adapter
         self.export_dtype = TORCH_DTYPE_MAP[checkpoint_config.export_dtype]
         self.exclude_from_loading = checkpoint_config.exclude_from_loading
@@ -350,9 +351,9 @@ class CheckpointManager:
         storage_writer: HuggingFaceStorageWriter | None = None
         checkpoint_save_id: str | None = None
         if to_hf:
-            assert (
-                self.sd_adapter is not None
-            ), "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
+            assert self.sd_adapter is not None, (
+                "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
+            )
             state_dict = self.sd_adapter.to_hf(state_dict)
 
             fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping
@@ -428,17 +429,29 @@ class CheckpointManager:
         """
 
         if from_hf:
-            assert (
-                self.sd_adapter is not None
-            ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
+            assert self.sd_adapter is not None, (
+                "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
+            )
             hf_state_dict = self.sd_adapter.to_hf(state_dict)
+            dist_utils.rank_zero_print(
+                f"{hf_state_dict['lm_head.weight']=}"
+            )
 
+            # TODO: @goon - DELETE
+            dist_utils.rank_zero_print(
+                f"About to dcp.load with {list(hf_state_dict)=}\n{list(state_dict)=}\n{checkpoint_id=}"
+            )
             dcp.load(
                 hf_state_dict,
                 storage_reader=HuggingFaceStorageReader(path=checkpoint_id),
             )
+            dist_utils.rank_zero_print("Done dcp.load")
 
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
+            # TODO: @goon - DELETE
+            dist_utils.rank_zero_print(
+                f"Loading {list(state_dict)=} into {self.states[MODEL]=}"
+            )
             self.states[MODEL].load_state_dict(state_dict)
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
@@ -548,9 +561,9 @@ class CheckpointManager:
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf
             if from_hf:
-                assert (
-                    model_only
-                ), "Only model can be loaded when loading from HF's safetensors checkpoint."
+                assert model_only, (
+                    "Only model can be loaded when loading from HF's safetensors checkpoint."
+                )
             if self.initial_load_path:
                 checkpoint_id = self.initial_load_path
                 if not os.path.isdir(checkpoint_id):
@@ -749,9 +762,9 @@ class CheckpointManager:
             states = self._flattened_model_states_sd()
 
         if self.last_save_in_hf:
-            assert (
-                self.last_save_model_only
-            ), "Only model can be saved when saving in HF safetensors format."
+            assert self.last_save_model_only, (
+                "Only model can be saved when saving in HF safetensors format."
+            )
 
         self.dcp_save(
             states,

@@ -7,26 +7,21 @@
 import logging
 import re
 from typing import Any
+from warnings import warn
+
+from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
+from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 logger = logging.getLogger()
 
-from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
-from .args import TransformerModelArgs
-
-
+# Modified from Llama3StateDictAdapter
 class Llama3MoEStateDictAdapter(StateDictAdapter):
-    """Convert a TorchTriton state dict into an HF one."""
-
-    # !!! There is no Llama3MoE in HF, so this class should be adapted, not called, or throw an error.
-    # !!! Currently, it is called by TrainSpec in __init__.py
-
     def __init__(
         self,
         model_args: TransformerModelArgs,
         hf_assets_path: str | None,
     ):
-
         super().__init__(model_args, hf_assets_path)
 
         self.model_args = model_args
@@ -88,7 +83,11 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
             if "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 layer_num = re.search(r"\d+", key).group(0)
-                new_key = to_hf_map[abstract_key]
+                if abstract_key not in to_hf_map:
+                    warn(f"{abstract_key=} not found in {list(to_hf_map)=}. Skipping.")
+                    continue
+                else:
+                    new_key = to_hf_map[abstract_key]
                 # We need to permute the weights in wq and wk layer in order to account for the difference between
                 # the native Llama and huggingface RoPE implementation.
                 if abstract_key == "layers.{}.attention.wq.weight":
@@ -108,7 +107,6 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
-        breakpoint()
         n_heads = self.model_args.n_heads
         n_kv_heads = (
             self.model_args.n_kv_heads
