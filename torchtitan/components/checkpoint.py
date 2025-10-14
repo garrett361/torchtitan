@@ -450,6 +450,9 @@ class CheckpointManager:
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
             # TODO: @goon - DELETE
             dist_utils.rank_zero_print(
+                f"{state_dict['output.weight']=}"
+            )
+            dist_utils.rank_zero_print(
                 f"Loading {list(state_dict)=} into {self.states[MODEL]=}"
             )
             self.states[MODEL].load_state_dict(state_dict)
