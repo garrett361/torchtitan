@@ -19,8 +19,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama3_moe"
 flavor = "debugmodel_8exp_small"
-hf_assets_path = "./tests/assets/tokenizer"
-# converters = ["float8"]
+hf_assets_path = "/gpfs/goon/models/Llama-3.1-8B"
 
 [optimizer]
 name = "AdamW"
