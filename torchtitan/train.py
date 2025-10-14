@@ -11,6 +11,7 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
+import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
@@ -32,6 +33,13 @@ from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
 )
+
+
+def rank_zero_print(msg: str) -> None:
+    dist.barrier()
+    if dist.get_rank() == 0:
+        print(msg)
+    dist.barrier()
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
@@ -159,6 +167,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             utils.set_default_dtype(TORCH_DTYPE_MAP[job_config.training.dtype]),
         ):
             model = self.train_spec.model_cls(model_args)
+            # TODO: @goon - DELETE
+            rank_zero_print(f"Post meta-init: {model=}")
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -269,6 +279,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             self.model_parts = [model]
 
+        # TODO: @goon - DELETE
+        rank_zero_print(f"Post Parallelization Init: {self.model_parts=}")
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
         # initialize device memory monitor and get peak flops for MFU calculation
@@ -466,14 +478,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-
-                    # !!! must limit max if embedding is smaller than vocab size
-                    inputs = inputs.clamp(0, model_parts[0].model_args.vocab_size - 1)
-                    labels = labels.clamp(0, model_parts[0].model_args.vocab_size - 1)
-
-                    pred = model_parts[0](inputs, **extra_inputs)
+                    pred = model_parts[0](inputs)
                     loss = self.loss_fn(pred, labels)
-                # need to free pred before bwd to avoid peaking memory
+                # need to free to before bwd to avoid peaking memory
                 del pred
                 loss.backward()
 

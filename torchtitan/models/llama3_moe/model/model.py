@@ -18,26 +18,121 @@ from torchtitan.protocols.train_spec import ModelProtocol
 from .args import TransformerModelArgs
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
+# Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
+def precompute_freqs_cis(
+    dim: int,
+    seq_len: int,
+    original_seq_len: int,
+    rope_theta: float = 10000.0,
+    rope_factor: float = 20,
+    beta_fast: int = 32,
+    beta_slow: int = 1,
+) -> torch.Tensor:
     """
-    Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
-
-    This function calculates a frequency tensor with complex exponentials using the given dimension 'dim'
-    and the end index 'end'. The 'theta' parameter scales the frequencies.
-    The returned tensor contains complex values in complex64 data type.
+    Precomputes frequency-based complex exponential values for rotary positional embeddings.
 
     Args:
         dim (int): Dimension of the frequency tensor.
-        end (int): End index for precomputing frequencies.
-        theta (float | None): Scaling factor for frequency computation. Defaults to 10000.0.
+        seqlen (int): the seqlen being trained on.
+        original_seq_len (int): the original training seqlen, if using YaRN to extend.
+        rope_theta (float, optional): Scaling factor for frequency computation. Defaults to 10000.0.
+        rope_factor (float): YaRN
+        beta_fast (int): YaRN
+        beta_slow (int): YaRN
 
     Returns:
-        torch.Tensor: Precomputed frequency tensor with complex exponentials.
+        torch.Tensor: Precomputed complex exponential values for positional embeddings.
+
+    NOTE: DSv3 arg defaults:
+    # yarn
+    original_seq_len: int = 4096
+    rope_theta: float = 10000.0
+    rope_factor: float = 40
+    beta_fast: int = 32
+    beta_slow: int = 1
+
+    NOTE: @goon -  I omitted mscale which doesn't do anything when left at its default 1.0 value.
     """
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device)
-    freqs = torch.outer(t, freqs).float()
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+
+    def find_correction_dim(
+        num_rotations: float, dim: int, base: float, max_seq_len: int
+    ) -> float:
+        """
+        Computes the correction dimension for a given number of rotations in the rotary positional embedding.
+
+        Args:
+            num_rotations (float): Number of rotations to compute the correction for.
+            dim (int): Dimensionality of the embedding space.
+            base (float): Base value for the exponential computation.
+            max_seq_len (int): Maximum sequence length.
+
+        Returns:
+            float: The correction dimension based on the input parameters.
+        """
+        return (
+            dim
+            * math.log(max_seq_len / (num_rotations * 2 * math.pi))
+            / (2 * math.log(base))
+        )
+
+    def find_correction_range(
+        low_rot: float, high_rot: float, dim: int, base: float, max_seq_len: int
+    ) -> tuple[int, int]:
+        """
+        Computes the range of correction dimensions for rotary positional embeddings.
+
+        Args:
+            low_rot (float): Lower bound for the number of rotations.
+            high_rot (float): Upper bound for the number of rotations.
+            dim (int): Dimensionality of the embedding space.
+            base (float): Base value for the exponential computation.
+            max_seq_len (int): Maximum sequence length.
+
+        Returns:
+            Tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
+        """
+        low = math.floor(find_correction_dim(low_rot, dim, base, max_seq_len))
+        high = math.ceil(find_correction_dim(high_rot, dim, base, max_seq_len))
+        return max(low, 0), min(high, dim - 1)
+
+    def linear_ramp_factor(min: float, max: float, dim: int) -> torch.Tensor:
+        """
+        Computes a linear ramp function used to smooth values between a minimum and maximum range.
+
+        Args:
+            min (float): Minimum value for the ramp function.
+            max (float): Maximum value for the ramp function.
+            dim (int): Dimensionality of the ramp tensor.
+
+        Returns:
+            torch.Tensor: A tensor of shape (dim,) with values linearly interpolated between 0 and 1,
+                clamped to the range [0, 1].
+        """
+        if min == max:
+            max += 0.001
+        linear_func = (torch.arange(dim, dtype=torch.float32) - min) / (max - min)
+        ramp_func = torch.clamp(linear_func, 0, 1)
+        return ramp_func
+
+    # Basic RoPE frequency calculation
+    freqs = 1.0 / (rope_theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+
+    # YaRN scaling for extended context. YaRN is used to extend the context length after pre-training.
+    if seq_len > original_seq_len:
+        low, high = find_correction_range(
+            beta_fast, beta_slow, dim, rope_theta, original_seq_len
+        )
+        smooth = 1 - linear_ramp_factor(low, high, dim // 2)
+        freqs = freqs / rope_factor * (1 - smooth) + freqs * smooth
+
+    # Create position indices
+    t = torch.arange(seq_len)
+
+    # Outer product: [positions] × [frequencies]
+    freqs = torch.outer(t, freqs)
+
+    # Convert to complex exponentials: e^(i*freq*pos)
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
     return freqs_cis
 
 
@@ -333,10 +428,6 @@ class Transformer(nn.Module, ModelProtocol):
     def __init__(self, model_args: TransformerModelArgs):
         super().__init__()
         self.model_args = model_args
-        model_args.moe_args.num_experts = (
-            model_args.num_experts
-        )  # !!! enforce value from config
-
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
 
@@ -395,12 +486,13 @@ class Transformer(nn.Module, ModelProtocol):
 
     def _precompute_freqs_cis(self) -> torch.Tensor:
         return precompute_freqs_cis(
-            self.model_args.dim // self.model_args.n_heads,
-            # Need to compute until at least the max token limit for generation
-            # TODO: explain in docs/composability.md why we removed the 2x
-            # relaxing in our CP enablement PR
-            self.model_args.max_seq_len,
-            self.model_args.rope_theta,
+            dim=self.model_args.dim // self.model_args.n_heads,
+            seq_len=self.model_args.max_seq_len,
+            original_seq_len=self.model_args.original_seq_len,
+            rope_theta=self.model_args.rope_theta,
+            rope_factor=self.model_args.rope_factor,
+            beta_fast=self.model_args.beta_fast,
+            beta_slow=self.model_args.beta_slow,
         )
 
     def forward(

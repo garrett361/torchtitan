@@ -10,10 +10,11 @@ from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
+from torchtitan.models.llama3 import pipeline_llama
+from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import TrainSpec
 
 from .infra.parallelize import parallelize_llama_moe
-from .infra.pipeline import pipeline_llama
 from .model.args import TransformerModelArgs
 from .model.model import Transformer
 from .model.state_dict_adapter import Llama3MoEStateDictAdapter
@@ -31,82 +32,104 @@ llama3_moe_configs = {
     "debugmodel_1exp": TransformerModelArgs(
         dim=256,
         moe_inter_dim=1024,
-        num_experts=1,
         n_layers=6,
         n_heads=16,
         vocab_size=2048,
         rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=1,
+            num_shared_experts=0,
+        ),
     ),
     "debugmodel_2exp": TransformerModelArgs(
         dim=256,
         moe_inter_dim=1024,
-        num_experts=2,
         n_layers=6,
         n_heads=16,
         vocab_size=2048,
         rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=2,
+            num_shared_experts=0,
+        ),
     ),
     "debugmodel_4exp": TransformerModelArgs(
         dim=256,
         moe_inter_dim=1024,
-        num_experts=4,
         n_layers=6,
         n_heads=16,
         vocab_size=2048,
         rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=4,
+            num_shared_experts=0,
+        ),
     ),
     "debugmodel_8exp": TransformerModelArgs(
         dim=256,
         moe_inter_dim=1024,
-        num_experts=8,
         n_layers=6,
         n_heads=16,
         vocab_size=2048,
         rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=8,
+            num_shared_experts=0,
+        ),
     ),
-    "1B_4exp": TransformerModelArgs(
-        dim=2048,
-        moe_inter_dim=8192,
-        num_experts=8,
-        n_layers=16,
-        n_heads=32,
-        n_kv_heads=8,
-        ffn_dim_multiplier=1.3,
-        multiple_of=512,
+    "debugmodel_8exp_small": TransformerModelArgs(
+        dim=64,
+        moe_inter_dim=128,
+        n_layers=8,
+        n_heads=4,
+        vocab_size=2048,
         rope_theta=500000,
-    ),
-    "1B_8exp": TransformerModelArgs(
-        dim=2048,
-        moe_inter_dim=8192,
-        num_experts=8,
-        n_layers=16,
-        n_heads=32,
-        n_kv_heads=8,
-        ffn_dim_multiplier=1.3,
-        multiple_of=512,
-        rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=8,
+            num_shared_experts=0,
+        ),
     ),
     "8B_2exp": TransformerModelArgs(
         dim=4096,
         moe_inter_dim=14336,
-        num_experts=2,
         n_layers=32,
         n_heads=32,
         n_kv_heads=8,
         ffn_dim_multiplier=1.3,
         multiple_of=1024,
         rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=2,
+            num_shared_experts=0,
+        ),
     ),
     "8B_4exp": TransformerModelArgs(
         dim=4096,
         moe_inter_dim=14336,
-        num_experts=4,
         n_layers=32,
         n_heads=32,
         n_kv_heads=8,
         ffn_dim_multiplier=1.3,
         multiple_of=1024,
         rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=4,
+            num_shared_experts=0,
+        ),
+    ),
+    "8B_8exp": TransformerModelArgs(
+        dim=4096,
+        moe_inter_dim=14336,
+        n_layers=32,
+        n_heads=32,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.3,
+        multiple_of=1024,
+        rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=8,
+            num_shared_experts=0,
+        ),
     ),
     # can add other version from torchtitan/models/llama3/__init__.py
 }

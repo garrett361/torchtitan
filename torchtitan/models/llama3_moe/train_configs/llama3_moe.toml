@@ -1,3 +1,7 @@
+# We define a custom JobConfig class with an addition catch-all custom_args field
+[experimental]
+custom_args_module = "torchtitan.models.llama3_moe.custom_args"
+
 [job]
 dump_folder = "./outputs"
 description = "Llama 3 MoE training"
@@ -14,14 +18,13 @@ save_tb_folder = "tb"
 
 [model]
 name = "llama3_moe"
-flavor = "1B_8exp"
-# tokenizer_path = "./assets/hf/llama-3.1-8b"
-hf_assets_path = "./assets/hf/llama-3.1-1b"
+flavor = "8B_2exp"
+hf_assets_path = "./assets/hf/Llama-3.1-8B"
 # converters = ["float8"]
 
 [optimizer]
 name = "AdamW"
-lr = 3e-4
+lr = 1e-4
 eps = 1e-8
 
 [lr_scheduler]
@@ -37,9 +40,9 @@ enable_cpu_offload = false
 
 [parallelism]
 data_parallel_replicate_degree = 1
-data_parallel_shard_degree = 2
+data_parallel_shard_degree = -1
 fsdp_reshard_after_forward = "default" # default / never / always
-tensor_parallel_degree = 2
+tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 1
 pipeline_parallel_schedule = "Interleaved1F1B"
