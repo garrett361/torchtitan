@@ -70,7 +70,7 @@ class TransformerModelArgs(BaseModelArgs):
         if job_config.custom_args.load_balance_coeff is not None:
             self.moe_args.load_balance_coeff = job_config.custom_args.load_balance_coeff
 
-        if self.is_moe_list is not None and len(is_moe_list) != self.n_layers:
+        if self.is_moe_list is not None and len(self.is_moe_list) != self.n_layers:
             raise ValueError(
                 f"{self.is_moe_list=} must be None or have {self.n_layers=} elements."
             )
