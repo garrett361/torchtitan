@@ -236,15 +236,20 @@ def apply_non_moe_tp(
             "attention.wv": colwise_parallel(),
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
-            # llama-3-moe does not have FFN, only MOE
-            # "feed_forward": prepare_module_input(
-            #     input_layouts=(Shard(1),),
-            #     desired_input_layouts=(Replicate(),),
-            # ),
-            # "feed_forward.w1": colwise_parallel(),
-            # "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
-            # "feed_forward.w3": colwise_parallel(),
         }
+
+        if not transformer_block.moe_enabled:
+            layer_plan.update(
+                {
+                    "feed_forward": prepare_module_input(
+                        input_layouts=(Shard(1),),
+                        desired_input_layouts=(Replicate(),),
+                    ),
+                    "feed_forward.w1": colwise_parallel(),
+                    "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
+                    "feed_forward.w3": colwise_parallel(),
+                }
+            )
 
         parallelize_module(
             module=transformer_block,
