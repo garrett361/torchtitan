@@ -52,10 +52,9 @@ context_parallel_degree = 1
 enable = false
 folder = "checkpoint"
 interval = 9999999999999999999
-last_save_model_only = true
+last_save_model_only = false # Set to false so we can test continued training.
 export_dtype = "bfloat16"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
-exclude_from_loading = [""]
 
 
 [compile]
