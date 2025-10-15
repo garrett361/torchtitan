@@ -12,5 +12,7 @@ In `CheckpointManager.dcp_load` with `from_hf=True`
 5. Load the `torchtitan` state dict into the sharded model.
 
 
-With the `DefaultPlanner`, the `ReadItem` instances carry the state dict fqn corresponding to the
-given tensor via `read_item.storage_index.fqn`.
+Other notes:
+
+- With the `DefaultPlanner`, the `ReadItem` instances carry the state dict fqn corresponding to the
+  given tensor via `read_item.storage_index.fqn`.
