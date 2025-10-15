@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-import re
 from typing import Any
 from warnings import warn
 
@@ -27,22 +26,6 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
 
         self.model_args = model_args
         self.hf_assets_path = hf_assets_path
-        # Map from the all serialized HF llama keys to
-        self.from_hf_map_vanilla_llama = {
-            "model.embed_tokens.weight": "tok_embeddings.weight",
-            "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
-            "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.wk.weight",
-            "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.wv.weight",
-            "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
-            "model.layers.{}.self_attn.rotary_emb.inv_freq": None,
-            "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
-            "model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
-            "model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
-            "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
-            "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
-            "model.norm.weight": "norm.weight",
-            "lm_head.weight": "output.weight",
-        }
 
         # Map from the actual hf names to the actual model weights used for this model.
         self.from_hf_map: dict[str, str | None] = {
@@ -53,19 +36,23 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
         is_moe_list = model_args.is_moe_list or [
             False for _ in range(model_args.n_layers)
         ]
+        attn_name_weight_map = {
+            "q_proj": "wq",
+            "k_proj": "wk",
+            "v_proj": "wv",
+            "o_proj": "wo",
+        }
+        moe_name_weight_map = {
+            "mlp.gate_proj": "moe.experts.w1",
+            "mlp.up_proj": "moe.experts.w3",
+            "mlp.down_proj": "moe.experts.w2",
+        }
+        ffn_name_weight_map = {
+            "mlp.gate_proj": "feed_forward.w1",
+            "mlp.up_proj": "feed_forward.w3",
+            "mlp.down_proj": "feed_forward.w2",
+        }
         for layer_idx, is_moe in enumerate(is_moe_list):
-            self.from_hf_map[f"model.layers.{layer_idx}.self_attn.q_proj.weight"] = (
-                f"layers.{layer_idx}.attention.wq.weight"
-            )
-            self.from_hf_map[f"model.layers.{layer_idx}.self_attn.k_proj.weight"] = (
-                f"layers.{layer_idx}.attention.wk.weight"
-            )
-            self.from_hf_map[f"model.layers.{layer_idx}.self_attn.v_proj.weight"] = (
-                f"layers.{layer_idx}.attention.wv.weight"
-            )
-            self.from_hf_map[f"model.layers.{layer_idx}.self_attn.o_proj.weight"] = (
-                f"layers.{layer_idx}.attention.wo.weight"
-            )
             self.from_hf_map[
                 f"model.layers.{layer_idx}.self_attn.rotary_emb.inv_freq"
             ] = None
@@ -75,26 +62,20 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
             self.from_hf_map[
                 f"model.layers.{layer_idx}.post_attention_layernorm.weight"
             ] = f"layers.{layer_idx}.ffn_norm.weight"
+            for hf_name, titan_name in attn_name_weight_map.items():
+                self.from_hf_map[
+                    f"model.layers.{layer_idx}.self_attn.{hf_name}.weight"
+                ] = f"layers.{layer_idx}.attention.{titan_name}.weight"
             if is_moe:
-                self.from_hf_map[f"model.layers.{layer_idx}.mlp.gate_proj.weight"] = (
-                    f"layers.{layer_idx}.moe.experts.w1.weight"
-                )
-                self.from_hf_map[f"model.layers.{layer_idx}.mlp.up_proj.weight"] = (
-                    f"layers.{layer_idx}.moe.experts.w3.weight"
-                )
-                self.from_hf_map[f"model.layers.{layer_idx}.mlp.down_proj.weight"] = (
-                    f"layers.{layer_idx}.moe.experts.w2.weight"
-                )
+                for hf_name, titan_name in moe_name_weight_map.items():
+                    self.from_hf_map[f"model.layers.{layer_idx}.{hf_name}.weight"] = (
+                        f"layers.{layer_idx}.{titan_name}"
+                    )
             else:
-                self.from_hf_map[f"model.layers.{layer_idx}.mlp.gate_proj.weight"] = (
-                    f"layers.{layer_idx}.feed_forward.w1.weight"
-                )
-                self.from_hf_map[f"model.layers.{layer_idx}.mlp.up_proj.weight"] = (
-                    f"layers.{layer_idx}.feed_forward.w3.weight"
-                )
-                self.from_hf_map[f"model.layers.{layer_idx}.mlp.down_proj.weight"] = (
-                    f"layers.{layer_idx}.feed_forward.w2.weight"
-                )
+                for hf_name, titan_name in ffn_name_weight_map.items():
+                    self.from_hf_map[f"model.layers.{layer_idx}.{hf_name}.weight"] = (
+                        f"layers.{layer_idx}.{titan_name}.weight"
+                    )
             dist_utils.rank_zero_print(f"{self.from_hf_map=}")
 
     # HuggingFace permutation function (exact copy from their conversion script)
@@ -129,7 +110,7 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
         Only used when loading from or saving to an HF ckpt (dcp_load,{save}) and in a conversion
         utility script.
         """
-        to_hf_map = {v: k for k, v in self.from_hf_map_vanilla_llama.items()}
+        to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
         n_heads = self.model_args.n_heads
         n_kv_heads = (
@@ -143,74 +124,24 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
 
         for key, value in state_dict.items():
             if "layers" in key:
-                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                layer_num = re.search(r"\d+", key).group(0)
                 # NOTE: @goon - added the ability here to only load a portion of the serialized HF
                 # model's weights, e.g. if testing out with fewer layers than actually exist in the
                 # real model.
-                if abstract_key not in to_hf_map:
-                    warn(f"{abstract_key=} not found in {list(to_hf_map)=}. Skipping.")
+                if key not in to_hf_map:
+                    warn(f"{key=} not found in {list(to_hf_map)=}. Skipping.")
                     continue
                 else:
-                    new_key = to_hf_map[abstract_key]
+                    new_key = to_hf_map[key]
                 # We need to permute the weights in wq and wk layer in order to account for the difference between
                 # the native Llama and huggingface RoPE implementation.
-                if abstract_key == "layers.{}.attention.wq.weight":
+                if "attention.wq.weight" in key:
                     value = self._permute(value, n_heads)
-                if abstract_key == "layers.{}.attention.wk.weight":
+                if "attention.wk.weight" in key:
                     key_value_dim = head_dim * n_kv_heads
                     value = self._permute(value, n_kv_heads, key_value_dim, dim)
 
                 if new_key is None:
                     continue
-                new_key = new_key.format(layer_num)
-            else:
-                new_key = to_hf_map[key]
-
-            hf_state_dict[new_key] = value
-
-        return hf_state_dict
-
-    def _to_hf_orig(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """
-        Take the (probably sharded) torchtitan model's state dict and re-key it to match HF
-        conventions, possibly also changing tensor layouts, if necessary.
-        """
-        to_hf_map = {v: k for k, v in self.from_hf_map_vanilla_llama.items()}
-
-        n_heads = self.model_args.n_heads
-        n_kv_heads = (
-            self.model_args.n_kv_heads
-            if self.model_args.n_kv_heads is not None
-            else n_heads
-        )
-        dim = self.model_args.dim
-        head_dim = dim // n_heads
-        hf_state_dict = {}
-
-        for key, value in state_dict.items():
-            if "layers" in key:
-                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                layer_num = re.search(r"\d+", key).group(0)
-                # NOTE: @goon - added the ability here to only load a portion of the serialized HF
-                # model's weights, e.g. if testing out with fewer layers than actually exist in the
-                # real model.
-                if abstract_key not in to_hf_map:
-                    warn(f"{abstract_key=} not found in {list(to_hf_map)=}. Skipping.")
-                    continue
-                else:
-                    new_key = to_hf_map[abstract_key]
-                # We need to permute the weights in wq and wk layer in order to account for the difference between
-                # the native Llama and huggingface RoPE implementation.
-                if abstract_key == "layers.{}.attention.wq.weight":
-                    value = self._permute(value, n_heads)
-                if abstract_key == "layers.{}.attention.wk.weight":
-                    key_value_dim = head_dim * n_kv_heads
-                    value = self._permute(value, n_kv_heads, key_value_dim, dim)
-
-                if new_key is None:
-                    continue
-                new_key = new_key.format(layer_num)
             else:
                 new_key = to_hf_map[key]
 
@@ -237,23 +168,20 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
 
         for key, value in hf_state_dict.items():
             if "layers" in key:
-                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                layer_num = re.search(r"\d+", key).group(0)
-                new_key = self.from_hf_map_vanilla_llama[abstract_key]
+                new_key = self.from_hf_map[key]
 
                 # We need to permute the weights in wq and wk layer in order to account for the difference between
                 # the native Llama and huggingface RoPE implementation.
-                if abstract_key == "model.layers.{}.self_attn.q_proj.weight":
+                if "self_attn.q_proj.weight" in key:
                     value = self._reverse_permute(value, n_heads)
-                if abstract_key == "model.layers.{}.self_attn.k_proj.weight":
+                if "self_attn.k_proj.weight" in key:
                     key_value_dim = head_dim * n_kv_heads
                     value = self._reverse_permute(value, n_kv_heads, key_value_dim, dim)
 
                 if new_key is None:
                     continue
-                new_key = new_key.format(layer_num)
             else:
-                new_key = self.from_hf_map_vanilla_llama[key]
+                new_key = self.from_hf_map[key]
 
             state_dict[new_key] = value
         return state_dict
