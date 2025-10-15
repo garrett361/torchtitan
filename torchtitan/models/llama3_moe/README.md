@@ -10,3 +10,7 @@ In `CheckpointManager.dcp_load` with `from_hf=True`
 3. Stream serialized weights into HF state dict via `dcp.load`.
 4. Convert back to a `torchtitan` state dict with `StateDictAdapter.from_hf`
 5. Load the `torchtitan` state dict into the sharded model.
+
+
+With the `DefaultPlanner`, the `ReadItem` instances carry the state dict fqn corresponding to the
+given tensor via `read_item.storage_index.fqn`.

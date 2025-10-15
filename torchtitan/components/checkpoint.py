@@ -13,7 +13,7 @@ import shutil
 import threading
 import time
 from concurrent.futures import Future
-from typing import Any
+from typing import Any, Type
 
 import torch
 import torch.distributed as dist
@@ -28,9 +28,9 @@ from torch.distributed.checkpoint._consolidate_hf_safetensors import (
 )
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict import (
-    StateDictOptions,
     get_model_state_dict,
     set_model_state_dict,
+    StateDictOptions,
 )
 from torch.distributed.checkpoint.state_dict_saver import AsyncCheckpointerType
 from torch.distributed.checkpoint.stateful import Stateful
@@ -39,12 +39,12 @@ from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.ft import FTManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.config import Checkpoint as CheckpointConfig
+from torchtitan.config import Checkpoint as CheckpointConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.protocols import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
+
 
 MODEL = "model"
 OPTIMIZER = "optimizer"
@@ -253,9 +253,9 @@ class CheckpointManager:
         self.last_save_model_only = checkpoint_config.last_save_model_only
         self.last_save_in_hf = checkpoint_config.last_save_in_hf
         if self.last_save_in_hf:
-            assert sd_adapter is not None, (
-                "job_config.checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
-            )
+            assert (
+                sd_adapter is not None
+            ), "job_config.checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
         self.sd_adapter = sd_adapter
         self.export_dtype = TORCH_DTYPE_MAP[checkpoint_config.export_dtype]
         self.exclude_from_loading = checkpoint_config.exclude_from_loading
@@ -351,9 +351,9 @@ class CheckpointManager:
         storage_writer: HuggingFaceStorageWriter | None = None
         checkpoint_save_id: str | None = None
         if to_hf:
-            assert self.sd_adapter is not None, (
-                "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
-            )
+            assert (
+                self.sd_adapter is not None
+            ), "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
             state_dict = self.sd_adapter.to_hf(state_dict)
 
             fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping
@@ -429,13 +429,13 @@ class CheckpointManager:
         """
 
         if from_hf:
-            assert self.sd_adapter is not None, (
-                "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
-            )
+            assert (
+                self.sd_adapter is not None
+            ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
             hf_state_dict = self.sd_adapter.to_hf(state_dict)
-            dist_utils.rank_zero_print(
-                f"{hf_state_dict['lm_head.weight']=}"
-            )
+            # TODO: @goon - DELETE
+            for k, v in hf_state_dict.items():
+                dist_utils.rank_zero_print(f"{k=}: {v.shape=}")
 
             # TODO: @goon - DELETE
             dist_utils.rank_zero_print(
@@ -445,13 +445,11 @@ class CheckpointManager:
                 hf_state_dict,
                 storage_reader=HuggingFaceStorageReader(path=checkpoint_id),
             )
+            # TODO: @goon - DELETE
             dist_utils.rank_zero_print("Done dcp.load")
 
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
             # TODO: @goon - DELETE
-            dist_utils.rank_zero_print(
-                f"{state_dict['output.weight']=}"
-            )
             dist_utils.rank_zero_print(
                 f"Loading {list(state_dict)=} into {self.states[MODEL]=}"
             )
@@ -566,9 +564,9 @@ class CheckpointManager:
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf
             if from_hf:
-                assert model_only, (
-                    "Only model can be loaded when loading from HF's safetensors checkpoint."
-                )
+                assert (
+                    model_only
+                ), "Only model can be loaded when loading from HF's safetensors checkpoint."
             if self.initial_load_path:
                 checkpoint_id = self.initial_load_path
                 if not os.path.isdir(checkpoint_id):
@@ -767,9 +765,9 @@ class CheckpointManager:
             states = self._flattened_model_states_sd()
 
         if self.last_save_in_hf:
-            assert self.last_save_model_only, (
-                "Only model can be saved when saving in HF safetensors format."
-            )
+            assert (
+                self.last_save_model_only
+            ), "Only model can be saved when saving in HF safetensors format."
 
         self.dcp_save(
             states,
@@ -828,3 +826,70 @@ class CheckpointManager:
             for _, path in to_delete:
                 assert self.purge_thread is not None
                 self.purge_queue.put(path)
+
+
+class CustomCheckpointManager(CheckpointManager):
+    def __init__(
+        self,
+        hf_storage_reader: Type[HuggingFaceStorageReader] = HuggingFaceStorageReader,
+        hf_storage_reader_kwargs: dict[str, Any] | None = None,
+        *args,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.hf_storage_reader = hf_storage_reader
+        self.hf_storage_reader_kwargs = hf_storage_reader_kwargs or {}
+
+    def dcp_load(
+        self,
+        state_dict: dict[str, Any],
+        checkpoint_id: str,
+        from_hf: bool,
+    ) -> None:
+        """Load the checkpoint with dcp.
+        Args:
+            state_dict (dict): The state dict to load.
+            checkpoint_id (str): The checkpoint id to load.
+            from_hf (bool): Whether to load from HuggingFace checkpoint with
+                its own model definition and safetensors format.
+
+        # NOTE: @goon - this is a direct copy of CustomCheckpointManager.dcp_load, just with the HF
+        # reader modified.
+        """
+
+        if from_hf:
+            assert self.sd_adapter is not None, (
+                "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
+            )
+            hf_state_dict = self.sd_adapter.to_hf(state_dict)
+            for k, v in hf_state_dict.items():
+                dist_utils.rank_zero_print(f"{k=}: {v.shape=}")
+
+            # TODO: @goon - DELETE
+            dist_utils.rank_zero_print(
+                f"About to dcp.load with {list(hf_state_dict)=}\n{list(state_dict)=}\n{checkpoint_id=}"
+            )
+            dcp.load(
+                hf_state_dict,
+                storage_reader=self.hf_storage_reader(
+                    path=checkpoint_id, **self.hf_storage_reader_kwargs
+                ),
+            )
+            # TODO: @goon - DELETE
+            dist_utils.rank_zero_print("Done dcp.load")
+
+            state_dict = self.sd_adapter.from_hf(hf_state_dict)
+            # TODO: @goon - DELETE
+            dist_utils.rank_zero_print(
+                f"Loading {list(state_dict)=} into {self.states[MODEL]=}"
+            )
+            # NOTE: @goon - question: is this not erroring out if all keys don't match?
+            # Apparently strict = False https://github.com/garrett361/torchtitan/blob/a1c0715c8ef33862d6ec9bdcb302ceedc56a1069/torchtitan/components/checkpoint.py?plain=1#L80
+            self.states[MODEL].load_state_dict(state_dict)
+        else:
+            dcp.load(state_dict, checkpoint_id=checkpoint_id)
+
+            # TODO: Since we flatten the model states in state_dict, we need to
+            # manually call load_state_dict() for the model. Need to fix this.
+            if MODEL in self.states:
+                self.states[MODEL].load_state_dict(state_dict)
