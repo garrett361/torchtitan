@@ -14,7 +14,11 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
-from torchtitan.components.checkpoint import CheckpointManager, CustomCheckpointManager
+from torchtitan.components.checkpoint import (
+    CheckpointManager,
+    CustomCheckpointManager,
+    ModelWrapper,
+)
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
 from torchtitan.components.loss import rescale_accumulated_loss
@@ -319,22 +323,27 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 print(f"Leaving {fqn=} alone")
             return t
 
+        sd_adapter = (
+            self.train_spec.state_dict_adapter(
+                model_args, job_config.model.hf_assets_path
+            )
+            if self.train_spec.state_dict_adapter
+            else None
+        )
         self.checkpointer = CustomCheckpointManager(
             hf_storage_reader=TransformingHuggingFaceStorageReader,
-            hf_storage_reader_kwargs={"transform_fn": transform_fn},
+            hf_storage_reader_kwargs={
+                "transform_fn": transform_fn,
+                "state_dict": ModelWrapper(self.model_parts).state_dict(),
+                "sd_adapter": sd_adapter,
+            },
             dataloader=self.dataloader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
             checkpoint_config=job_config.checkpoint,
-            sd_adapter=(
-                self.train_spec.state_dict_adapter(
-                    model_args, job_config.model.hf_assets_path
-                )
-                if self.train_spec.state_dict_adapter
-                else None
-            ),
+            sd_adapter=sd_adapter,
             base_folder=job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
