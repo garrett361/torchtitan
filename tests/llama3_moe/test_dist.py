@@ -249,5 +249,4 @@ class TestHFReader(DTest):
                         == w_moe.shape
                     ), f"{w.shape=}, {w_moe.shape=}"
                     for w_moe_expert_shard in w_moe:
-                        print(f"{w=}\n{w_moe=}\n{w_moe_expert_shard=}")
                         torch.testing.assert_close(w, w_moe_expert_shard)
