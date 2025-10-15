@@ -12,7 +12,10 @@ from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.models.llama3 import pipeline_llama
 from torchtitan.models.llama3_moe.checkpoint import CustomCheckpointManager
-from torchtitan.models.llama3_moe.hf_reader import TransformingHuggingFaceStorageReader, ReplicateMoETransform
+from torchtitan.models.llama3_moe.hf_reader import (
+    ReplicateMoETransform,
+    TransformingHuggingFaceStorageReader,
+)
 from torchtitan.models.llama3_moe.infra.parallelize import parallelize_llama_moe
 from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
 from torchtitan.models.llama3_moe.model.model import Transformer
@@ -28,6 +31,10 @@ __all__ = [
     "TransformerModelArgs",
     "Transformer",
     "llama3_configs",
+    "Llama3MoEStateDictAdapter",
+    "CustomCheckpointManager",
+    "ReplicateMoETransform",
+    "TransformingHuggingFaceStorageReader",
 ]
 
 

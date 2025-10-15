@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 from copy import deepcopy
 
 import torch
@@ -5,17 +11,15 @@ import torch.distributed as dist
 from dtest import DTest
 
 from torchtitan.components.checkpoint import CheckpointManager, ModelWrapper
-from torchtitan.config import JobConfig
-from torchtitan.distributed import ParallelDims
-from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.models.llama3_moe import (
     CustomCheckpointManager,
+    llama3_moe_configs,
     Llama3MoEStateDictAdapter,
+    parallelize_llama_moe,
     ReplicateMoETransform,
     Transformer,
     TransformingHuggingFaceStorageReader,
-    llama3_moe_configs,
-    parallelize_llama_moe,
 )
 from torchtitan.models.llama3_moe.custom_args import JobConfig
 

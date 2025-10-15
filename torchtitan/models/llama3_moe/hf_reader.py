@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -6,10 +12,10 @@ from typing import Any
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.checkpoint._hf_utils import (
+    _HFStorageInfo,
     CUSTOM_METADATA_KEY,
     SAVED_OFFSETS_KEY,
     SUFFIX,
-    _HFStorageInfo,
 )
 from torch.distributed.checkpoint.metadata import (
     ChunkStorageMetadata,
@@ -173,7 +179,8 @@ class WeightTransform(ABC):
         return self.transform(titan_fqn, t)
 
     @abstractmethod
-    def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor: ...
+    def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor:
+        ...
 
 
 class ReplicateMoETransform(WeightTransform):
@@ -181,5 +188,19 @@ class ReplicateMoETransform(WeightTransform):
         # TODO: @goon - should add explicit shape checks here.
         if "moe.experts.w" in titan_fqn:
             num_experts = self.model_args.moe_args.num_experts
+            moe_inter_dim = self.model_args.moe_inter_dim
+            dim = self.model_args.dim
+            if titan_fqn.endswith("w1"):
+                expected_shape = torch.Size((moe_inter_dim, dim))
+            elif titan_fqn.endswith("w2"):
+                expected_shape = torch.Size((dim, moe_inter_dim))
+            elif titan_fqn.endswith("w3"):
+                expected_shape = torch.Size((moe_inter_dim, dim))
+            else:
+                raise ValueError(f"{titan_fqn=} does not end with any of (w1, w2, w3)")
+            if expected_shape != t.shape:
+                raise RuntimeError(
+                    f"Shape mismatch: {expected_shape=} differs from {t.shape=} for {titan_fqn=}"
+                )
             t = torch.stack([t for _ in range(num_experts)], dim=0).contiguous()
         return t

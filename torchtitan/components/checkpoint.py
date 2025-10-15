@@ -40,7 +40,6 @@ from torchtitan.components.ft import FTManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Checkpoint as CheckpointConfig, TORCH_DTYPE_MAP
-from torchtitan.distributed import utils as dist_utils
 from torchtitan.protocols import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
@@ -433,28 +432,13 @@ class CheckpointManager:
                 self.sd_adapter is not None
             ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
             hf_state_dict = self.sd_adapter.to_hf(state_dict)
-            # TODO: @goon - DELETE
-            for k, v in hf_state_dict.items():
-                dist_utils.rank_zero_print(f"{k=}: {v.shape=}")
 
-            # TODO: @goon - DELETE
-            dist_utils.rank_zero_print(
-                f"About to dcp.load with {list(hf_state_dict)=}\n{list(state_dict)=}\n{checkpoint_id=}"
-            )
             dcp.load(
                 hf_state_dict,
                 storage_reader=HuggingFaceStorageReader(path=checkpoint_id),
             )
-            # TODO: @goon - DELETE
-            dist_utils.rank_zero_print("Done dcp.load")
 
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
-            # TODO: @goon - DELETE
-            dist_utils.rank_zero_print(
-                f"Loading {list(state_dict)=} into {self.states[MODEL]=}"
-            )
-            # NOTE: @goon - question: is this not erroring out if all keys don't match?
-            # Apparently strict = False https://github.com/garrett361/torchtitan/blob/a1c0715c8ef33862d6ec9bdcb302ceedc56a1069/torchtitan/components/checkpoint.py?plain=1#L80
             self.states[MODEL].load_state_dict(state_dict)
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
