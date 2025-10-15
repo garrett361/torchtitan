@@ -14,11 +14,7 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
-from torchtitan.components.checkpoint import (
-    CheckpointManager,
-    CustomCheckpointManager,
-    ModelWrapper,
-)
+from torchtitan.components.checkpoint import CheckpointManager, ModelWrapper
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
 from torchtitan.components.loss import rescale_accumulated_loss
@@ -30,6 +26,7 @@ from torchtitan.config import TORCH_DTYPE_MAP, ConfigManager, JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.attention import init_attention_mask
+from torchtitan.models.llama3_moe.checkpoint import CustomCheckpointManager
 from torchtitan.models.llama3_moe.hf_reader import TransformingHuggingFaceStorageReader
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
