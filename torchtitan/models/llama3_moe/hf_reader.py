@@ -97,10 +97,6 @@ class TransformingHuggingFaceStorageReader(HuggingFaceStorageReader):
                         target_tensor = self.state_dict[key]
                         target_shape = list(target_tensor.shape)
                         target_dtype = target_tensor.dtype
-
-                        print(
-                            f"Metadata for {key}: storage_shape={storage_shape} -> target_shape={target_shape}"
-                        )
                     else:
                         raise ValueError(f"{key=} not in {list(self.state_dict)=}")
 
