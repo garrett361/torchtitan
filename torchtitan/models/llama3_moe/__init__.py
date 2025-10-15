@@ -103,6 +103,9 @@ llama3_moe_configs = {
         rope_theta=500000,
         is_moe_list=None,
     ),
+    # NOTE: @goon - the 3B_2layer and 3B_2layer_halfmoe models are used in
+    # torchtitan/tests/llama3_moe/test_dist.py, do not delete!
+    #
     "3B_2layer": TransformerModelArgs(
         dim=3072,
         moe_inter_dim=8192,
@@ -116,7 +119,7 @@ llama3_moe_configs = {
     ),
     "3B_2layer_halfmoe": TransformerModelArgs(
         dim=3072,
-        moe_inter_dim=1024,
+        moe_inter_dim=8192,
         n_layers=2,
         n_heads=24,
         n_kv_heads=8,

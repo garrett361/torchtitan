@@ -169,7 +169,6 @@ class WeightTransform(ABC):
         self.model_args = model_args
 
     def __call__(self, hf_fqn: str, t: torch.Tensor) -> torch.Tensor:
-        print(f"Processing {hf_fqn=}")
         titan_fqn = self.hf_to_titan_fqn_map[hf_fqn]
         return self.transform(titan_fqn, t)
 
@@ -179,10 +178,8 @@ class WeightTransform(ABC):
 
 class ReplicateMoETransform(WeightTransform):
     def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor:
-        print(f"Processing {titan_fqn=}")
+        # TODO: @goon - should add explicit shape checks here.
         if "moe.experts.w" in titan_fqn:
             num_experts = self.model_args.moe_args.num_experts
             t = torch.stack([t for _ in range(num_experts)], dim=0).contiguous()
-            # TODO: @goon - DELETE
-            t.zero_()
         return t
