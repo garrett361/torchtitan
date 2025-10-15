@@ -59,6 +59,8 @@ class TransformingHuggingFaceStorageReader(HuggingFaceStorageReader):
 
         assert target_tensor.size() == tensor.size(), (
             f"req {req.storage_index} mismatch sizes {target_tensor.size()} vs {tensor.size()}"
+            f" Shapes: {target_tensor.shape=} vs {tensor.shape=} ({slices=}). "
+            f" fqn: {req.storage_index.fqn=}."
         )
 
         target_tensor.copy_(tensor)
