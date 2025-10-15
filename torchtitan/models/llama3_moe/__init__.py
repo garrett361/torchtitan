@@ -11,13 +11,19 @@ from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.models.llama3 import pipeline_llama
+from torchtitan.models.llama3_moe.checkpoint import CustomCheckpointManager
+from torchtitan.models.llama3_moe.hf_reader import (
+    ReplicateMoETransform,
+    TransformingHuggingFaceStorageReader,
+)
+from torchtitan.models.llama3_moe.infra.parallelize import parallelize_llama_moe
+from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
+from torchtitan.models.llama3_moe.model.model import Transformer
+from torchtitan.models.llama3_moe.model.state_dict_adapter import (
+    Llama3MoEStateDictAdapter,
+)
 from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import TrainSpec
-
-from .infra.parallelize import parallelize_llama_moe
-from .model.args import TransformerModelArgs
-from .model.model import Transformer
-from .model.state_dict_adapter import Llama3MoEStateDictAdapter
 
 __all__ = [
     "parallelize_llama_moe",
@@ -25,6 +31,10 @@ __all__ = [
     "TransformerModelArgs",
     "Transformer",
     "llama3_configs",
+    "Llama3MoEStateDictAdapter",
+    "CustomCheckpointManager",
+    "ReplicateMoETransform",
+    "TransformingHuggingFaceStorageReader",
 ]
 
 
@@ -88,6 +98,61 @@ llama3_moe_configs = {
             num_shared_experts=0,
         ),
         is_moe_list=[True if n == 0 else False for n in range(6)],
+    ),
+    # https://huggingface.co/meta-llama/Llama-3.2-3B/blob/main/config.json
+    "3B": TransformerModelArgs(
+        dim=3072,
+        n_layers=28,
+        n_heads=24,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.0,  # Correct?
+        multiple_of=256,
+        rope_theta=500000,
+        is_moe_list=None,
+    ),
+    # NOTE: @goon - the 3B_2layer and 3B_2layer_halfmoe models are used in
+    # torchtitan/tests/llama3_moe/test_dist.py, do not delete!
+    #
+    "3B_2layer": TransformerModelArgs(
+        dim=3072,
+        moe_inter_dim=8192,
+        n_layers=2,
+        n_heads=24,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.0,  # Correct?
+        multiple_of=256,
+        rope_theta=500000,
+        is_moe_list=None,
+    ),
+    "3B_2layer_halfmoe": TransformerModelArgs(
+        dim=3072,
+        moe_inter_dim=8192,
+        n_layers=2,
+        n_heads=24,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.0,  # Correct?
+        multiple_of=256,
+        rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=8,
+            num_shared_experts=0,
+        ),
+        is_moe_list=[False, True],
+    ),
+    "8B": TransformerModelArgs(
+        dim=4096,
+        moe_inter_dim=14336,
+        n_layers=32,
+        n_heads=32,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.3,
+        multiple_of=1024,
+        rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=2,
+            num_shared_experts=0,
+        ),
+        is_moe_list=None,
     ),
     "8B_2exp": TransformerModelArgs(
         dim=4096,

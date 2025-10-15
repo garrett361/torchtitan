@@ -18,8 +18,8 @@ save_tb_folder = "tb"
 
 [model]
 name = "llama3_moe"
-flavor = "debugmodel_8exp_small"
-hf_assets_path = "/gpfs/goon/models/Llama-3.1-8B"
+flavor = "3B"
+hf_assets_path = "/gpfs/goon/models/Llama-3.2-3B-no-tied-weights"
 
 [optimizer]
 name = "AdamW"
@@ -51,11 +51,12 @@ context_parallel_degree = 1
 [checkpoint]
 enable = false
 folder = "checkpoint"
-interval = 500
+interval = 9999999999999999999
 last_save_model_only = true
 export_dtype = "bfloat16"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 exclude_from_loading = [""]
+
 
 [compile]
 enable=false
