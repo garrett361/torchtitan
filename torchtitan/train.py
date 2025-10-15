@@ -28,7 +28,7 @@ from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.attention import init_attention_mask
 from torchtitan.models.llama3_moe import (
     CustomCheckpointManager,
-    TransformingHuggingFaceStorageReader,
+    TransformingHuggingFaceStorageReader, ReplicateMoETransform
 )
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
@@ -333,7 +333,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.checkpointer = CustomCheckpointManager(
             hf_storage_reader=TransformingHuggingFaceStorageReader,
             hf_storage_reader_kwargs={
-                "transform_fn": transform_fn,
+                "transform_fn": ReplicateMoETransform(
+                    model_args=self.model_args,
+                    hf_to_titan_fqn_map=sd_adapter.from_hf_map,
+                ),
                 "state_dict": ModelWrapper(self.model_parts).state_dict(),
                 "sd_adapter": sd_adapter,
             },

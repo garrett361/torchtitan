@@ -1,4 +1,5 @@
 import json
+from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any
 
@@ -20,6 +21,7 @@ from torch.distributed.checkpoint.metadata import (
 )
 from torch.distributed.checkpoint.planner import LoadPlanner, ReadItem
 
+from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 
@@ -161,3 +163,30 @@ class TransformingHuggingFaceStorageReader(HuggingFaceStorageReader):
         metadata.storage_meta.load_id = self.load_id  # type: ignore[union-attr]
 
         return metadata
+
+
+class WeightTransform(ABC):
+    def __init__(
+        self, model_args: TransformerModelArgs, hf_to_titan_fqn_map: dict[str, str]
+    ) -> None:
+        self.hf_to_titan_fqn_map = hf_to_titan_fqn_map
+        self.model_args = model_args
+
+    def __call__(self, hf_fqn: str, t: torch.Tensor) -> torch.Tensor:
+        print(f"Processing {hf_fqn=}")
+        titan_fqn = self.hf_to_titan_fqn_map[hf_fqn]
+        return self.transform(titan_fqn, t)
+
+    @abstractmethod
+    def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor: ...
+
+
+class ReplicateMoETransform(WeightTransform):
+    def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor:
+        print(f"Processing {titan_fqn=}")
+        if "moe.experts.w" in titan_fqn:
+            num_experts = self.model_args.moe_args.num_experts
+            t = torch.stack([t for _ in range(num_experts)], dim=0).contiguous()
+            # TODO: @goon - DELETE
+            t.zero_()
+        return t
