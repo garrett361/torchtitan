@@ -576,9 +576,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.checkpointer.load(step=job_config.checkpoint.load_step)
         # TODO: @goon - DELETE
         for fqn, t in self.model_parts[0].state_dict().items():
-            dist_utils.rank_zero_print(f"{fqn=}: {t.shape=}\n\t{t=}")
+            dist_utils.rank_zero_print(f"{fqn=}: {t.shape=}\n\t{t=}\n")
 
-        print(f"{self.model_parts[0].state_dict()=}")
         logger.info(f"Training starts at step {self.step + 1}")
 
         leaf_folder = (
