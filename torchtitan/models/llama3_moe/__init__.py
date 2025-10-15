@@ -11,13 +11,16 @@ from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.models.llama3 import pipeline_llama
+from torchtitan.models.llama3_moe.checkpoint import CustomCheckpointManager
+from torchtitan.models.llama3_moe.hf_reader import TransformingHuggingFaceStorageReader
+from torchtitan.models.llama3_moe.infra.parallelize import parallelize_llama_moe
+from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
+from torchtitan.models.llama3_moe.model.model import Transformer
+from torchtitan.models.llama3_moe.model.state_dict_adapter import (
+    Llama3MoEStateDictAdapter,
+)
 from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import TrainSpec
-
-from .infra.parallelize import parallelize_llama_moe
-from .model.args import TransformerModelArgs
-from .model.model import Transformer
-from .model.state_dict_adapter import Llama3MoEStateDictAdapter
 
 __all__ = [
     "parallelize_llama_moe",

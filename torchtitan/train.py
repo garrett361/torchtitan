@@ -26,8 +26,10 @@ from torchtitan.config import TORCH_DTYPE_MAP, ConfigManager, JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.attention import init_attention_mask
-from torchtitan.models.llama3_moe.checkpoint import CustomCheckpointManager
-from torchtitan.models.llama3_moe.hf_reader import TransformingHuggingFaceStorageReader
+from torchtitan.models.llama3_moe import (
+    CustomCheckpointManager,
+    TransformingHuggingFaceStorageReader,
+)
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
