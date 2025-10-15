@@ -28,7 +28,8 @@ from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.attention import init_attention_mask
 from torchtitan.models.llama3_moe import (
     CustomCheckpointManager,
-    TransformingHuggingFaceStorageReader, ReplicateMoETransform
+    ReplicateMoETransform,
+    TransformingHuggingFaceStorageReader,
 )
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
@@ -313,15 +314,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # These attributes must be initialized before checkpoint loading.
         self.step = 0
         self.ntokens_seen = 0
-
-        def transform_fn(fqn, t):
-            if "layers.1.mlp" in fqn and "weight" in fqn:
-                print(f"Transforming {fqn=}")
-                t = torch.stack([t for _ in range(8)], dim=0).contiguous()
-                t.zero_()
-            else:
-                print(f"Leaving {fqn=} alone")
-            return t
 
         sd_adapter = (
             self.train_spec.state_dict_adapter(
