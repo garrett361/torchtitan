@@ -52,7 +52,8 @@ class TransformingHuggingFaceStorageReader(HuggingFaceStorageReader):
             tensor = f.get_slice(req.storage_index.fqn)[slices]
         else:
             tensor = f.get_tensor(req.storage_index.fqn)
-            tensor = self.tranform_fn(req.storage_index.fqn, tensor)[slices]
+            tensor = self.tranform_fn(req.storage_index.fqn, tensor)
+            tensor = tensor[slices]
 
         target_tensor = planner.resolve_tensor(req).detach()
 
@@ -84,12 +85,9 @@ class TransformingHuggingFaceStorageReader(HuggingFaceStorageReader):
                     dcp_sharding_info = json.loads(
                         extra_metadata.get(CUSTOM_METADATA_KEY)
                     )
-                for key in set(self.state_dict) & set(f.keys()) :
-                    print(f"TRYING {key=}")
+                for key in set(self.state_dict) & set(f.keys()):
                     storage_shape = f.get_slice(key).get_shape()
-                    print(f"GOT SHAPE {key=}")
                     storage_dtype = f.get_slice(key).get_dtype()
-                    print(f"GOT  DTYPE {key=}")
 
                     if key in self.state_dict:
                         target_tensor = self.state_dict[key]
@@ -100,7 +98,6 @@ class TransformingHuggingFaceStorageReader(HuggingFaceStorageReader):
                             f"Metadata for {key}: storage_shape={storage_shape} -> target_shape={target_shape}"
                         )
                     else:
-                        print(f"{key=} not in {list(self.state_dict)=}")
                         raise ValueError(f"{key=} not in {list(self.state_dict)=}")
 
                     # construct state_dict_metadata

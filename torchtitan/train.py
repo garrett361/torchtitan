@@ -318,7 +318,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         def transform_fn(fqn, t):
             if "layers.1.mlp" in fqn and "weight" in fqn:
                 print(f"Transforming {fqn=}")
-                t = torch.cat([t for _ in range(8)]).contiguous()
+                t = torch.stack([t for _ in range(8)], dim=0).contiguous()
+                t.zero_()
             else:
                 print(f"Leaving {fqn=} alone")
             return t
@@ -573,6 +574,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         job_config = self.job_config
 
         self.checkpointer.load(step=job_config.checkpoint.load_step)
+        # TODO: @goon - DELETE
+        for fqn, t in self.model_parts[0].state_dict().items():
+            dist_utils.rank_zero_print(f"{fqn=}: {t.shape=}\n\t{t=}")
+
+        print(f"{self.model_parts[0].state_dict()=}")
         logger.info(f"Training starts at step {self.step + 1}")
 
         leaf_folder = (
