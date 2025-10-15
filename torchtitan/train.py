@@ -311,8 +311,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.step = 0
         self.ntokens_seen = 0
 
-        def transform_fn(s, t):
-            print(f"{s=}")
+        def transform_fn(fqn, t):
+            if "layers.1.mlp" in fqn and "weight" in fqn:
+                print(f"Transforming {fqn=}")
+                t = torch.cat([t for _ in range(8)]).contiguous()
+            else:
+                print(f"Leaving {fqn=} alone")
             return t
 
         self.checkpointer = CustomCheckpointManager(
