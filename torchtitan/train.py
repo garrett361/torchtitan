@@ -11,11 +11,10 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
-import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpoint import CheckpointManager, ModelWrapper
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
 from torchtitan.components.loss import rescale_accumulated_loss
@@ -26,6 +25,11 @@ from torchtitan.components.metrics import (
 from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.models.attention import init_attention_mask
+from torchtitan.models.llama3_moe import (
+    CustomCheckpointManager,
+    ReplicateMoETransform,
+    TransformingHuggingFaceStorageReader,
+)
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -33,13 +37,6 @@ from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
 )
-
-
-def rank_zero_print(msg: str) -> None:
-    dist.barrier()
-    if dist.get_rank() == 0:
-        print(msg)
-    dist.barrier()
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
@@ -168,7 +165,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         ):
             model = self.train_spec.model_cls(model_args)
             # TODO: @goon - DELETE
-            rank_zero_print(f"Post meta-init: {model=}")
+            dist_utils.rank_zero_print(f"Post meta-init: {model=}")
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -280,7 +277,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.model_parts = [model]
 
         # TODO: @goon - DELETE
-        rank_zero_print(f"Post Parallelization Init: {self.model_parts=}")
+        dist_utils.rank_zero_print(f"Post Parallelization Init: {self.model_parts=}")
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
         # initialize device memory monitor and get peak flops for MFU calculation
@@ -317,20 +314,30 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.step = 0
         self.ntokens_seen = 0
 
-        self.checkpointer = CheckpointManager(
+        sd_adapter = (
+            self.train_spec.state_dict_adapter(
+                model_args, job_config.model.hf_assets_path
+            )
+            if self.train_spec.state_dict_adapter
+            else None
+        )
+        self.checkpointer = CustomCheckpointManager(
+            hf_storage_reader=TransformingHuggingFaceStorageReader,
+            hf_storage_reader_kwargs={
+                "transform_fn": ReplicateMoETransform(
+                    model_args=self.model_args,
+                    hf_to_titan_fqn_map=sd_adapter.from_hf_map,
+                ),
+                "state_dict": ModelWrapper(self.model_parts).state_dict(),
+                "sd_adapter": sd_adapter,
+            },
             dataloader=self.dataloader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
             checkpoint_config=job_config.checkpoint,
-            sd_adapter=(
-                self.train_spec.state_dict_adapter(
-                    model_args, job_config.model.hf_assets_path
-                )
-                if self.train_spec.state_dict_adapter
-                else None
-            ),
+            sd_adapter=sd_adapter,
             base_folder=job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )

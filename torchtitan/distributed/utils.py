@@ -449,3 +449,10 @@ def _clip_grad_norm_with_ep(
     torch.nn.utils.clip_grads_with_norm_(non_ep_params, max_norm, total_norm, foreach)
 
     return total_norm
+
+
+def rank_zero_print(msg: str) -> None:
+    dist.barrier()
+    if dist.get_rank() == 0:
+        print(msg)
+    dist.barrier()

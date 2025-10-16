@@ -36,6 +36,7 @@ class TransformerModelArgs(BaseModelArgs):
     # TODO: node-limited routing is not supported yet
     n_expert_groups: int = 1
     n_limited_groups: int = 1
+    is_moe_list: list[bool] | None = None
 
     max_seq_len: int = 131072
     # If `True`, then each transformer block init uses its layer ID, and if
@@ -68,6 +69,11 @@ class TransformerModelArgs(BaseModelArgs):
         # NOTE: @goon - custom args we've added are processed here
         if job_config.custom_args.load_balance_coeff is not None:
             self.moe_args.load_balance_coeff = job_config.custom_args.load_balance_coeff
+
+        if self.is_moe_list is not None and len(self.is_moe_list) != self.n_layers:
+            raise ValueError(
+                f"{self.is_moe_list=} must be None or have {self.n_layers=} elements."
+            )
 
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int

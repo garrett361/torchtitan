@@ -5,7 +5,7 @@ ENABLE_WANDB ?= False
 GIT_HASH := $(shell git rev-parse --short HEAD)
 NGPU := $(shell echo "$(CUDA_VISIBLE_DEVICES)" | tr ',' '\n' | wc -l)
 LOAD_BALANCE_COEFF ?= 1e-2
-FLAVOR ?= debugmodel_8exp_small
+FLAVOR ?= 3B
 ARGS ?=
 LR ?= 1e-4
 WARMUP_STEPS ?= 100
@@ -61,6 +61,7 @@ define run_ep
 		--parallelism.expert_parallel_degree $$NGPU \
 		--parallelism.fsdp_reshard_after_forward never \
 		--custom-args.load-balance-coeff $(LOAD_BALANCE_COEFF) \
+		--checkpoint.enable $(ENABLE_CKPT) \
 		$(WANDB_FLAG) \
 		$(ARGS)
 endef
@@ -87,6 +88,7 @@ define run_ep_pp
 		--parallelism.pipeline_parallel_degree $$PP \
 		--parallelism.fsdp_reshard_after_forward never \
 		--custom-args.load-balance-coeff $(LOAD_BALANCE_COEFF) \
+		--checkpoint.enable $(ENABLE_CKPT) \
 		$(WANDB_FLAG) \
 		$(ARGS)
 endef
@@ -111,6 +113,7 @@ define run_pp
 		--parallelism.pipeline_parallel_degree $$PP \
 		--parallelism.fsdp_reshard_after_forward never \
 		--custom-args.load-balance-coeff $(LOAD_BALANCE_COEFF) \
+		--checkpoint.enable $(ENABLE_CKPT) \
 		$(WANDB_FLAG) \
 		$(ARGS)
 endef
@@ -135,6 +138,7 @@ define run_fsdp_pp
 		--parallelism.pipeline_parallel_degree $$PP \
 		--parallelism.fsdp_reshard_after_forward never \
 		--custom-args.load-balance-coeff $(LOAD_BALANCE_COEFF) \
+		--checkpoint.enable $(ENABLE_CKPT) \
 		$(WANDB_FLAG) \
 		$(ARGS)
 endef

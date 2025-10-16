@@ -45,6 +45,8 @@ _op_sac_save_list = {
 
 
 # Adapted from deepseek_v3/infra/parallelize.py
+
+# TODO: @goon - check whas is different here, just import if possible
 def parallelize_llama_moe(
     model: nn.Module,
     parallel_dims: ParallelDims,
