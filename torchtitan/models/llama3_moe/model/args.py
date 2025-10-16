@@ -30,6 +30,7 @@ class TransformerModelArgs(BaseModelArgs):
     ffn_dim_multiplier: float | None = None
     norm_eps: float = 1e-5
     rope_theta: float = 10000
+    custom_moe_impl: str | None = None
 
     # MoE
     moe_args: MoEArgs = field(default_factory=MoEArgs)
@@ -69,6 +70,17 @@ class TransformerModelArgs(BaseModelArgs):
         # NOTE: @goon - custom args we've added are processed here
         if job_config.custom_args.load_balance_coeff is not None:
             self.moe_args.load_balance_coeff = job_config.custom_args.load_balance_coeff
+
+        if job_config.custom_args.hf_ffn_hidden_dim is not None:
+            if (
+                self.moe_args.num_experts
+                * self.moe_inter_dim
+                % job_config.custom_args.hf_ffn_hidden_dim
+            ):
+                raise ValueError(
+                    f"{self.moe_args.num_experts *self.moe_inter_dim=} must be divisible by {job_config.custom_args.hf_ffn_hidden_dim=}"
+                )
+            self.moe_args.hf_ffn_hidden_dim = job_config.custom_args.hf_ffn_hidden_dim
 
         if self.is_moe_list is not None and len(self.is_moe_list) != self.n_layers:
             raise ValueError(

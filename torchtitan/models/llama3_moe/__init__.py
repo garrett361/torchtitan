@@ -158,8 +158,30 @@ llama3_moe_configs = {
             score_func="softmax",
             route_norm=True,
             score_before_experts=False,
+            top_k=2,
         ),
         is_moe_list=[False, True],
+    ),
+    "3B_2layer_halfmoe_finegrained": TransformerModelArgs(
+        dim=3072,
+        moe_inter_dim=8192,
+        n_layers=2,
+        n_heads=24,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.0,  # Correct?
+        multiple_of=256,
+        rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=8,
+            num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
+            top_k=2,
+            hf_ffn_hidden_dim=8192,  # Must specify for replicated router init!
+        ),
+        is_moe_list=[False, True],
+        custom_moe_impl="replicated",  # Must specify for replicated router init!
     ),
     "8B": TransformerModelArgs(
         dim=4096,

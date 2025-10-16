@@ -7,9 +7,10 @@
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Any, Type
+from typing import Any
 
 import torch
+from einops import rearrange
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.checkpoint._hf_utils import (
     CUSTOM_METADATA_KEY,
@@ -196,33 +197,65 @@ class _HFWeightTransform(ABC):
 
 class ReplicateMoETransform(_HFWeightTransform):
     """
-    Basic replication of FFN weights into MoE experts: W^moe_exp = W^ffn, as in 2212.05055.
+    Basic replication of FFN weights into MoE experts.  Handles any case where `num_experts *
+    moe_inter_dim` is divisible by the hf FFN weight's hidden_dim by stacking the FFN weights and
+    reshaping as appropriate.
+
+    Cases:
+    1.  moe_inter_dim = hf_hidden_dim: basic replication with each expert weight matching its HF FFN
+        counterpart as in 2212.05055.
+    2.  moe_inter_dim < hf_hidden_dim: each HF FFN is broken up across experts, and can be re-formed
+        by concatenating together hf_hidden_dim // moe_inter_dim consecutive expert weights
+        appropriately, as in 2410.07524.
     """
 
     name = "replicate"
 
     def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor:
-        # TODO: @goon - should add explicit shape checks here.
         if "moe.experts.w" in titan_fqn:
             num_experts = self.model_args.moe_args.num_experts
             moe_inter_dim = self.model_args.moe_inter_dim
             dim = self.model_args.dim
-            if titan_fqn.endswith("w1"):
-                expected_shape = torch.Size((moe_inter_dim, dim))
+            if titan_fqn.endswith("w1") or titan_fqn.endswith("w3"):
+                hidden_dim_hf, dim_hf = t.shape
             elif titan_fqn.endswith("w2"):
-                expected_shape = torch.Size((dim, moe_inter_dim))
-            elif titan_fqn.endswith("w3"):
-                expected_shape = torch.Size((moe_inter_dim, dim))
+                dim_hf, hidden_dim_hf = t.shape
             else:
                 raise ValueError(f"{titan_fqn=} does not end with any of (w1, w2, w3)")
-            if expected_shape != t.shape:
-                raise RuntimeError(
-                    f"Shape mismatch: {expected_shape=} differs from {t.shape=} for {titan_fqn=}"
+
+            if (moe_inter_dim * num_experts) % hidden_dim_hf:
+                raise ValueError(
+                    f"The total number of expert hidden dimensions, {moe_inter_dim * num_experts=}"
+                    f" must be divisible by {hidden_dim_hf=}, the hidden dimension of the HF weight."
                 )
-            t = torch.stack([t for _ in range(num_experts)], dim=0).contiguous()
+            if dim != dim_hf:
+                raise ValueError(
+                    f"The MoE and FFN input dims do not match: {dim=} != {dim_hf=}."
+                )
+
+            t = torch.stack(
+                [t for _ in range(moe_inter_dim * num_experts // hidden_dim_hf)], dim=0
+            ).contiguous()
+
+            if moe_inter_dim != hidden_dim_hf:
+                if titan_fqn.endswith("w1") or titan_fqn.endswith("w3"):
+                    t = rearrange(
+                        t, "x h d-> e m d", e=num_experts, m=moe_inter_dim
+                    ).contiguous()
+                elif titan_fqn.endswith("w2"):
+                    t = rearrange(
+                        t, "x d h-> e d m", e=num_experts, m=moe_inter_dim
+                    ).contiguous()
+                else:
+                    raise ValueError(
+                        f"{titan_fqn=} does not end with any of (w1, w2, w3)"
+                    )
+
         return t
 
 
-def get_hf_weight_transform_cls(name: str) -> Type[_HFWeightTransform]:
-    transform_map = {sc.name: sc for sc in _HFWeightTransform.__subclasses__()}
+def get_hf_weight_transform_cls(name: str) -> type[_HFWeightTransform]:
+    transform_map = {
+        sc.name: sc for sc in _HFWeightTransform.__subclasses__() if hasattr(sc, "name")
+    }
     return transform_map[name]

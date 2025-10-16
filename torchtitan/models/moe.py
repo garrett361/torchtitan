@@ -33,6 +33,11 @@ class MoEArgs:
     _debug_force_load_balance: bool = False
     # if True, we force each experts get same amount of token via round-robin
 
+    # NOTE: @goon - custom attrs
+    # Knowing the HF FFN hidden dim size is required for proper token router init with some
+    # strategies
+    hf_ffn_hidden_dim: int | None = None
+
 
 # can be used as dense FFN layer or shared experts in MoE layers
 class FeedForward(nn.Module):

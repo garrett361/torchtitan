@@ -14,7 +14,7 @@ from torch import nn
 
 from torchtitan.models.llama3.model.model import Attention, FeedForward
 from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
-from torchtitan.models.moe import MoE
+from torchtitan.models.moe import MoE, MoEArgs
 from torchtitan.protocols.train_spec import ModelProtocol
 
 
@@ -203,6 +203,142 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 
+class _CustomMoE(MoE):
+    """
+    Customizable MoE class. Primarily for implementing different router weight initializations.
+    """
+
+    def __init__(self, moe_args: MoEArgs, dim: int, hidden_dim: int):
+        super().__init__(moe_args=moe_args, dim=dim, hidden_dim=hidden_dim)
+        self.moe_args = moe_args
+        self.hidden_dim = hidden_dim
+
+    name: str | None = None
+
+
+class ReplicatedRoutedMoE(_CustomMoE):
+    """
+    Implements the "Virtual Group Initialization" from 2410.07524.
+
+    # Assumptions
+
+    The first FFN weight (say, wlog) W_hd, with h the internal hidden index, is used to initialize
+    the first MoE weight M_emd with h in {0, ..., H -1} and similar for every other dim. The MoE
+    expert and hidden dims, e and m, are chosen such that M is a divisor of H, H/M = N, and N is a
+    divisor of E: E/N = G. Such a weight M_emd can be constructed by stacking G copies of the FFN
+    weight to create a tensor M_ghd, whose components are given by M_ghd = W_hd, and then reshaping
+    as:
+
+    M_ghd --> M_gnmd --> M_emd .
+
+    The validity of these reshapings is ensured by the divisibility conditions. The
+    `ReplicateMoETransform` constructs MoE weights through the above process.
+
+    # Requirements for FFN-MoE equivalence
+
+    The original FFN output is (using a simple FFN; swiGLU doesn't change the argument)
+
+    o_d = W^(2)_dh phi(W_hd x_d) === sum_h(z_h)
+
+    using Einstein summation, where possible.
+
+    Letting p_e the router weight for expert e, the MoE output is:
+
+    o^(moe)_d = p_e M^(2)_edm phi(M_emd x_d) === sum_m(p_e z^(moe)_em)
+
+    The assumptions above let us reshape z^(moe)_em --> z^(moe)_gnm and p_e --> p_gn, which makes
+    the above
+
+    o^(moe)_d = sum_m(p_gn z^(moe)_gnm)
+
+    Our assumptions also allow for reshaping z^(moe)_gnm --> z^(moe)_gh where we further have
+    z^(moe)_gh = z_h, component-wise.  If p_gn were such that its component values are independent
+    of n, say p_gn = q_g, then the above becomes:
+
+    o^(moe)_d = sum_m(p_gn z^(moe)_gnm)
+              = sum_mn(q_g z^(moe)_gnm)
+              = q_g sum_mn(z^(moe)_gnm)
+              = q_g sum_h(z^(moe)_gh)
+              = sum_g(q_g sum_h(z_h))
+              = o_d sum_g(q_g)
+
+    So, 
+
+
+
+
+
+
+
+
+    Here, e is the expert index and the MoE
+    where M is a divisor of H, H/M = N, and N is a divisor of E: E/N = G. The divisibility
+    conditions ensure both that the MoE weight is re-shapeable to the four-dimensional form:
+
+    M_emd --> M_gnmd
+
+    and that the right side in turn can again be reshaped to the 3D form:
+
+    M_gnmd--> M_ghd.
+
+    The `ReplicateMoETransform` class constructs weights of this form where we also have M_ghd =
+    W_hd for all g; these are just replicated FFN weights.
+
+    """
+
+    name = "replicated"
+
+    def init_weights(
+        self,
+        init_std: float,
+        buffer_device: torch.device,
+    ):
+        super().init_weights(init_std=init_std, buffer_device=buffer_device)
+        # Replicated initialization only makes sense if the MoE hidden dim cleanly divides the HF
+        # FFN hidden dim
+        if self.moe_args.hf_ffn_hidden_dim is None:
+            raise ValueError(
+                f"{self.__class__.__name__} requires hf_ffn_hidden_dim to be specified"
+            )
+        ratio, remainder = divmod(
+            self.hidden_dim,
+            self.moe_args.hf_ffn_hidden_dim,
+        )
+        if remainder:
+            raise ValueError(
+                f"{self.hidden_dim=} must be divisible by {self.moe_args.hf_ffn_hidden_dim=}"
+            )
+        num_experts_slice, remainder = divmod(self.moe_args.num_experts, ratio)
+        if remainder:
+            raise ValueError(
+                f"{self.moe_args.num_experts=} must be divisible by {self.hidden_dim // self.moe_args.hf_ffn_hidden_dim=}"
+            )
+        repeats = self.moe_args.num_experts // num_experts_slice
+        if repeats > 1:
+            with torch.no_grad():
+                router_weights = self.router.gate.weight  # Shape: (num_experts, dim)
+                router_weights_slice = router_weights[:num_experts_slice]
+                replicated_router_weights = torch.cat(
+                    [router_weights_slice for _ in range(repeats)], dim=0
+                ).contiguous()
+                self.router.gate.weight.copy_(replicated_router_weights)
+
+                # For completeness, should the expert bias should start as zeros, if it exists.
+                if expert_bias := self.expert_bias is not None:
+                    expert_bias_slice = expert_bias[:num_experts_slice]
+                    replicated_expert_bias = torch.cat(
+                        [expert_bias_slice for _ in range(repeats)], dim=0
+                    ).contiguous()
+                    self.expert_bias.copy_(replicated_expert_bias)
+
+
+def get_moe_impl_cls(name: str | None = None) -> type[MoE]:
+    if name is None:
+        return MoE
+    moe_map = {sc.name: sc for sc in _CustomMoE.__subclasses__() if hasattr(sc, "name")}
+    return moe_map[name]
+
+
 class TransformerBlock(nn.Module):
     """
     TransformerBlock Module
@@ -230,7 +366,7 @@ class TransformerBlock(nn.Module):
         self.attention = Attention(model_args)
         if is_moe:
             self.feed_forward = None
-            self.moe = MoE(
+            self.moe = get_moe_impl_cls(model_args.custom_moe_impl)(
                 model_args.moe_args,
                 dim=model_args.dim,
                 hidden_dim=model_args.moe_inter_dim,
