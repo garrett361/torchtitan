@@ -93,7 +93,7 @@ class TestHFReader(DTest):
                 model_args.vocab_size, size=(self.bsz, self.seqlen), device=self.device
             )
             out = model(inputs)
-            out_copy = model(inputs)
+            out_copy = model_copy(inputs)
             torch.testing.assert_close(out, out_copy)
 
     @pytest.mark.parametrize("sharding", ["fsdp", "ep"])
@@ -150,13 +150,14 @@ class TestHFReader(DTest):
         custom_checkpointer = CustomCheckpointManager(
             model_parts=[model_copy], **ckpt_kwargs
         )
+        custom_checkpointer.load()
         torch.manual_seed(42 + dist.get_rank())
         with torch.no_grad():
             inputs = torch.randint(
                 model_args.vocab_size, size=(self.bsz, self.seqlen), device=self.device
             )
             out = model(inputs)
-            out_copy = model(inputs)
+            out_copy = model_copy(inputs)
             torch.testing.assert_close(out, out_copy)
 
     @pytest.mark.parametrize("sharding", ["fsdp", "ep"])
