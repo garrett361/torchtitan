@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from torch import nn
 
-from torchtitan.config import JobConfig
+from torchtitan.models.llama3_moe.custom_args import JobConfig
 from torchtitan.models.moe import MoEArgs
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModelArgs

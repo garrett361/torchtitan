@@ -56,7 +56,6 @@ interval = 500
 last_save_model_only = true
 export_dtype = "bfloat16"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
-exclude_from_loading = [""]
 
 [compile]
 enable=false
