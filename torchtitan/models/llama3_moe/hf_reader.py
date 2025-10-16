@@ -12,10 +12,10 @@ from typing import Any
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.checkpoint._hf_utils import (
-    _HFStorageInfo,
     CUSTOM_METADATA_KEY,
     SAVED_OFFSETS_KEY,
     SUFFIX,
+    _HFStorageInfo,
 )
 from torch.distributed.checkpoint.metadata import (
     ChunkStorageMetadata,
@@ -34,6 +34,7 @@ from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 # NOTE: @goon - subclass based on the specific version of the HuggingFaceStorageReader for
 # torch==2.10.0.dev20251006+cu126 which corresponds to commit 39cdb9bef4be0c181989a777a7b68ef04002d491
 # https://github.com/pytorch/pytorch/blob/39cdb9bef4be0c181989a777a7b68ef04002d491/torch/distributed/checkpoint/hf_storage.py?plain=1#L202
+# This is also the version of torch which exists in the image us.icr.io/cil15-shared-registry/platform/goon-torch-nightly-dev:20251006
 class TransformingHuggingFaceStorageReader(HuggingFaceStorageReader):
     def __init__(
         self,
@@ -167,7 +168,12 @@ class TransformingHuggingFaceStorageReader(HuggingFaceStorageReader):
         return metadata
 
 
-class WeightTransform(ABC):
+class _HFWeightTransform(ABC):
+    """
+    Base class for implementing transforms of loaded HF safetensor weights prior to loading into
+    a torchtitan model.
+    """
+
     def __init__(
         self, model_args: TransformerModelArgs, hf_to_titan_fqn_map: dict[str, str]
     ) -> None:
@@ -179,11 +185,13 @@ class WeightTransform(ABC):
         return self.transform(titan_fqn, t)
 
     @abstractmethod
-    def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor:
-        ...
+    def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor: ...
 
 
-class ReplicateMoETransform(WeightTransform):
+class ReplicateMoETransform(_HFWeightTransform):
+    """
+    Basic replication of FFN weights into MoE experts: W^moe_exp = W^ffn, as in 2212.05055.
+    """
     def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor:
         # TODO: @goon - should add explicit shape checks here.
         if "moe.experts.w" in titan_fqn:
