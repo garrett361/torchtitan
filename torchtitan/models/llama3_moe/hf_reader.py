@@ -32,9 +32,11 @@ from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 
 # NOTE: @goon - subclass based on the specific version of the HuggingFaceStorageReader for
-# torch==2.10.0.dev20251006+cu126 which corresponds to commit 39cdb9bef4be0c181989a777a7b68ef04002d491
+# torch==2.10.0.dev20251006+cu126 which corresponds to commit
+# 39cdb9bef4be0c181989a777a7b68ef04002d491
 # https://github.com/pytorch/pytorch/blob/39cdb9bef4be0c181989a777a7b68ef04002d491/torch/distributed/checkpoint/hf_storage.py?plain=1#L202
-# This is also the version of torch which exists in the image us.icr.io/cil15-shared-registry/platform/goon-torch-nightly-dev:20251006
+# This is also the version of torch which exists in the image
+# us.icr.io/cil15-shared-registry/platform/goon-torch-nightly-dev:20251006
 class TransformingHuggingFaceStorageReader(HuggingFaceStorageReader):
     def __init__(
         self,
