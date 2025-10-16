@@ -50,7 +50,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=1,
             num_shared_experts=0,
-            score_func="softmax"
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
         is_moe_list=[True if n == 0 else False for n in range(6)],
     ),
@@ -63,7 +65,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=2,
             num_shared_experts=0,
-            score_func="softmax"
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
         is_moe_list=[True if n == 0 else False for n in range(6)],
     ),
@@ -76,7 +80,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=4,
             num_shared_experts=0,
-            score_func="softmax"
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
         is_moe_list=[True if n == 0 else False for n in range(6)],
     ),
@@ -89,7 +95,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=8,
             num_shared_experts=0,
-            score_func="softmax"
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
         is_moe_list=[True if n == 0 else False for n in range(6)],
     ),
@@ -102,7 +110,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=8,
             num_shared_experts=0,
-            score_func="softmax"
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
         is_moe_list=[True if n == 0 else False for n in range(6)],
     ),
@@ -143,7 +153,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=8,
             num_shared_experts=0,
-            score_func="softmax"
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
         is_moe_list=[False, True],
     ),
@@ -159,7 +171,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=2,
             num_shared_experts=0,
-            score_func="softmax"
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
         is_moe_list=None,
     ),
@@ -175,7 +189,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=2,
             num_shared_experts=0,
-            score_func="softmax"
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
     ),
     "8B_2exp_4_layer": TransformerModelArgs(
@@ -190,7 +206,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=2,
             num_shared_experts=0,
-            score_func="softmax"
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
     ),
     "8B_4exp": TransformerModelArgs(
@@ -205,7 +223,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=4,
             num_shared_experts=0,
-            score_func="softmax"
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
     ),
     "8B_8exp": TransformerModelArgs(
@@ -220,7 +240,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=8,
             num_shared_experts=0,
-            score_func="softmax"
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
     ),
     # can add other version from torchtitan/models/llama3/__init__.py
