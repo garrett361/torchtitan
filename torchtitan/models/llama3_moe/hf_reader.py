@@ -7,15 +7,15 @@
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Type
 
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.checkpoint._hf_utils import (
-    _HFStorageInfo,
     CUSTOM_METADATA_KEY,
     SAVED_OFFSETS_KEY,
     SUFFIX,
+    _HFStorageInfo,
 )
 from torch.distributed.checkpoint.metadata import (
     ChunkStorageMetadata,
@@ -174,7 +174,11 @@ class _HFWeightTransform(ABC):
     """
     Base class for implementing transforms of loaded HF safetensor weights prior to loading into
     a torchtitan model.
+
+    Subclasses should be given a name in order to be returnable from get_hf_weight_transform_cls.
     """
+
+    name: str | None = None
 
     def __init__(
         self, model_args: TransformerModelArgs, hf_to_titan_fqn_map: dict[str, str]
@@ -187,14 +191,15 @@ class _HFWeightTransform(ABC):
         return self.transform(titan_fqn, t)
 
     @abstractmethod
-    def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor:
-        ...
+    def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor: ...
 
 
 class ReplicateMoETransform(_HFWeightTransform):
     """
     Basic replication of FFN weights into MoE experts: W^moe_exp = W^ffn, as in 2212.05055.
     """
+
+    name = "replicate"
 
     def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor:
         # TODO: @goon - should add explicit shape checks here.
@@ -216,3 +221,8 @@ class ReplicateMoETransform(_HFWeightTransform):
                 )
             t = torch.stack([t for _ in range(num_experts)], dim=0).contiguous()
         return t
+
+
+def get_hf_weight_transform_cls(name: str) -> Type[_HFWeightTransform]:
+    transform_map = {sc.name: sc for sc in _HFWeightTransform.__subclasses__()}
+    return transform_map[name]

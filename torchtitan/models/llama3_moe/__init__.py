@@ -16,6 +16,7 @@ from torchtitan.models.llama3_moe.custom_args import JobConfig
 from torchtitan.models.llama3_moe.hf_reader import (
     ReplicateMoETransform,
     TransformingHuggingFaceStorageReader,
+    get_hf_weight_transform_cls,
 )
 from torchtitan.models.llama3_moe.infra.parallelize import parallelize_llama_moe
 from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
@@ -34,6 +35,7 @@ __all__ = [
     "Transformer",
     "TransformerModelArgs",
     "TransformingHuggingFaceStorageReader",
+    "get_hf_weight_transform_cls",
     "llama3_configs",
     "parallelize_llama_moe",
     "pipeline_llama",

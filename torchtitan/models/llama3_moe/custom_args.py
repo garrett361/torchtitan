@@ -12,6 +12,7 @@ from torchtitan.config.job_config import JobConfig
 @dataclass
 class CustomArgs:
     load_balance_coeff: float | None = None
+    hf_weight_transform: str = "replicate"
 
 
 @dataclass
