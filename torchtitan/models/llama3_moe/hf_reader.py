@@ -12,10 +12,10 @@ from typing import Any
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.checkpoint._hf_utils import (
+    _HFStorageInfo,
     CUSTOM_METADATA_KEY,
     SAVED_OFFSETS_KEY,
     SUFFIX,
-    _HFStorageInfo,
 )
 from torch.distributed.checkpoint.metadata import (
     ChunkStorageMetadata,
@@ -185,13 +185,15 @@ class _HFWeightTransform(ABC):
         return self.transform(titan_fqn, t)
 
     @abstractmethod
-    def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor: ...
+    def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor:
+        ...
 
 
 class ReplicateMoETransform(_HFWeightTransform):
     """
     Basic replication of FFN weights into MoE experts: W^moe_exp = W^ffn, as in 2212.05055.
     """
+
     def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor:
         # TODO: @goon - should add explicit shape checks here.
         if "moe.experts.w" in titan_fqn:
