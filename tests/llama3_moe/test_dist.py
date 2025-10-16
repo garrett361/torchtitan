@@ -6,20 +6,22 @@
 
 from copy import deepcopy
 
+import pytest
 import torch
 import torch.distributed as dist
 from dtest import DTest
 
 from torchtitan.components.checkpoint import CheckpointManager, ModelWrapper
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.llama3_moe import (
     CustomCheckpointManager,
-    llama3_moe_configs,
     Llama3MoEStateDictAdapter,
-    parallelize_llama_moe,
     ReplicateMoETransform,
     Transformer,
     TransformingHuggingFaceStorageReader,
+    llama3_moe_configs,
+    parallelize_llama_moe,
 )
 from torchtitan.models.llama3_moe.custom_args import JobConfig
 
@@ -32,7 +34,8 @@ class TestHFReader(DTest):
     Test loading correctness
     """
 
-    def test_non_moe_load_equivalence(self) -> None:
+    @pytest.mark.parametrize("sharding", ["fsdp", "ep"])
+    def test_non_moe_load_equivalence(self, sharding: str) -> None:
         """
         Test e2e equivlance on the full 3B model.
         """
@@ -51,7 +54,7 @@ class TestHFReader(DTest):
             cp=1,
             tp=1,
             pp=1,
-            ep=1,
+            ep=self.world_size if sharding == "ep" else 1,
             etp=1,
             world_size=self.world_size,
         )
@@ -94,7 +97,8 @@ class TestHFReader(DTest):
             out_copy = model(inputs)
             torch.testing.assert_close(out, out_copy)
 
-    def test_small_non_moe_load_equivalence(self) -> None:
+    @pytest.mark.parametrize("sharding", ["fsdp", "ep"])
+    def test_small_non_moe_load_equivalence(self, sharding: str) -> None:
         """
         Test equivalence (and that load succeeds) on a truncated version of the model with fewer
         layers.
@@ -114,7 +118,7 @@ class TestHFReader(DTest):
             cp=1,
             tp=1,
             pp=1,
-            ep=1,
+            ep=self.world_size if sharding == "ep" else 1,
             etp=1,
             world_size=self.world_size,
         )
@@ -156,7 +160,8 @@ class TestHFReader(DTest):
             out_copy = model(inputs)
             torch.testing.assert_close(out, out_copy)
 
-    def test_small_moe_load_replicate_transform(self) -> None:
+    @pytest.mark.parametrize("sharding", ["fsdp", "ep"])
+    def test_small_moe_load_replicate_transform(self, sharding: str) -> None:
         """
         Test  (and that load succeeds) on a truncated version of the model with fewer
         layers.
@@ -181,7 +186,7 @@ class TestHFReader(DTest):
             cp=1,
             tp=1,
             pp=1,
-            ep=1,
+            ep=self.world_size if sharding == "ep" else 1,
             etp=1,
             world_size=self.world_size,
         )
