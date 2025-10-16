@@ -18,8 +18,8 @@ save_tb_folder = "tb"
 
 [model]
 name = "llama3_moe"
-flavor = "8B_2exp"
-hf_assets_path = "./assets/hf/Llama-3.1-8B"
+flavor = "3B_8exp"
+hf_assets_path = "./assets/hf/Llama-3.2-3B-no-tied-weights"
 # converters = ["float8"]
 
 [optimizer]
@@ -60,7 +60,6 @@ async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 exclude_from_loading = [""]
 initial_load_model_only = true  # required to load HF ckpt (only loads params, not optimizer)
 initial_load_in_hf = true
-
 
 [compile]
 enable=false

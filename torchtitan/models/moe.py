@@ -137,6 +137,8 @@ class GroupedExperts(nn.Module):
     ):
         super().__init__()
         self.num_experts = num_experts
+        self.dim = dim
+        self.hidden_dim = hidden_dim
         self.w1 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
         self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
         self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
@@ -160,6 +162,13 @@ class GroupedExperts(nn.Module):
         nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.w2, mean=0.0, std=init_std)
         nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std)
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}(exp={self.num_experts}, "
+            f"hid_dim={self.hidden_dim}, interm_dim={self.dim}, "
+            f"grouped_mm={self.use_grouped_mm})"
+        )
 
 
 class TokenChoiceTopKRouter(nn.Module):
@@ -337,6 +346,12 @@ class TokenReorderer(nn.Module):
             top_scores_experts_sorted,
             token_indices_experts_sorted,
             num_tokens_per_expert,
+        )
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}(exp={self.num_experts}, "
+            f"topk={self.top_k})"
         )
 
 

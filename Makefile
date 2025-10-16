@@ -1,18 +1,18 @@
 LOCAL_BATCH_SIZE ?= 2
-STEPS ?= 1000
-CONFIG_FILE=./torchtitan/models/llama3_moe/train_configs/debug_llama3_moe.toml
+STEPS ?= 10
+CONFIG_FILE=./torchtitan/models/llama3_moe/train_configs/llama3_moe.toml
 ENABLE_WANDB ?= False
 GIT_HASH := $(shell git rev-parse --short HEAD)
 NGPU := $(shell echo "$(CUDA_VISIBLE_DEVICES)" | tr ',' '\n' | wc -l)
 LOAD_BALANCE_COEFF ?= 1e-2
-FLAVOR ?= 3B
+FLAVOR ?= 3B_8exp
 ARGS ?=
 LR ?= 1e-4
-WARMUP_STEPS ?= 100
+WARMUP_STEPS ?= 10
 SEQ_LEN ?= 2048
 LOG_FREQ ?= 5
 DATE := $(shell date "+%Y-%m-%d-%H-%M")
-
+LOG_RANK ?= $$(seq -s, 0 $$((NGPU-1)))
 
 # Conditional wandb flag
 ifeq ($(ENABLE_WANDB),True)
@@ -23,7 +23,7 @@ endif
 
 define run_fsdp
 	export NGPU=$(NGPU) && \
-	export LOG_RANK=$$(seq -s, 0 $$((NGPU-1))) && \
+	export LOG_RANK=$$LOG_RANK && \
 	export WANDB_RUN_ID=$(1)-$(LOCAL_BATCH_SIZE)bs-$(STEPS)step-fsdp-$(GIT_HASH)-$(DATE) && \
 	export CONFIG_FILE=$(3) && \
 	./run_train.sh \
@@ -45,7 +45,7 @@ endef
 
 define run_ep
 	export NGPU=$(NGPU) && \
-	export LOG_RANK=$$(seq -s, 0 $$((NGPU-1))) && \
+	export LOG_RANK=$$LOG_RANK && \
 	export WANDB_RUN_ID=$(1)-$(LOCAL_BATCH_SIZE)bs-$(STEPS)step-ep-$(GIT_HASH)-$(DATE) && \
 	export CONFIG_FILE=$(3) && \
 	./run_train.sh \
@@ -69,7 +69,7 @@ endef
 
 define run_ep_pp
 	export NGPU=$(NGPU) && \
-	export LOG_RANK=$$(seq -s, 0 $$((NGPU-1))) && \
+	export LOG_RANK=$$LOG_RANK && \
 	export PP=2 && \
 	export EP=$$((NGPU/PP)) && \
 	export WANDB_RUN_ID=$(1)-$(LR)-$(LOCAL_BATCH_SIZE)bs-$(STEPS)step-$${PP}pp-$${EP}ep-$(GIT_HASH)-$(DATE) && \
@@ -96,7 +96,7 @@ endef
 
 define run_pp
 	export NGPU=$(NGPU) && \
-	export LOG_RANK=$$(seq -s, 0 $$((NGPU-1))) && \
+	export LOG_RANK=$$LOG_RANK && \
 	export PP=$(NGPU)&& \
 	export WANDB_RUN_ID=$(1)-$(LR)-$(LOCAL_BATCH_SIZE)bs-$(STEPS)step-$${PP}pp-$${EP}ep-$(GIT_HASH)-$(DATE) && \
 	export CONFIG_FILE=$(3) && \
@@ -121,7 +121,7 @@ endef
 
 define run_fsdp_pp
 	export NGPU=$(NGPU) && \
-	export LOG_RANK=$$(seq -s, 0 $$((NGPU-1))) && \
+	export LOG_RANK=$$LOG_RANK && \
 	export PP=2 && \
 	export WANDB_RUN_ID=$(1)-$(LR)-$(LOCAL_BATCH_SIZE)bs-$(STEPS)step-$${PP}pp-$${EP}ep-$(GIT_HASH)-$(DATE) && \
 	export CONFIG_FILE=$(3) && \
