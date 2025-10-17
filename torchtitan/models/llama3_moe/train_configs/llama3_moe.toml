@@ -62,7 +62,7 @@ enable=false
 components = ["model", "loss"]
 
 [activation_checkpoint]
-mode = "none"  # ["none", "selective", "full"]
+mode = "selective"  # ["none", "selective", "full"]
 selective_ac_option = "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
 
 [quantize.linear.float8]

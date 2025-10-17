@@ -13,7 +13,7 @@ from torch import nn
 
 from torchtitan.models.llama3_moe.custom_args import JobConfig
 from torchtitan.models.moe import MoEArgs
-from torchtitan.models.utils import get_dense_model_nparams_and_flops
+from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.tools.logging import logger
 
@@ -82,4 +82,4 @@ class TransformerModelArgs(BaseModelArgs):
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:
-        return get_dense_model_nparams_and_flops(self, model, seq_len)
+        return get_moe_model_nparams_and_flops(self, model, seq_len)

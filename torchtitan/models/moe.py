@@ -393,6 +393,13 @@ class MoE(nn.Module):
             torch.zeros(num_experts, dtype=torch.float32),
             persistent=False,
         )
+        # tokens_per_expert is reset every optimizer step, so use tokens_per_expert_cumulative for
+        # metrics reporting and only reset after each report.
+        self.register_buffer(
+            "tokens_per_expert_cumulative",
+            torch.zeros(num_experts, dtype=torch.float32),
+            persistent=False,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -485,6 +492,8 @@ class MoE(nn.Module):
             self.tokens_per_expert = torch.zeros(
                 self.experts.num_experts, dtype=torch.float32
             )
+            self.tokens_per_expert_cumulative.zero_()
+
             if self.load_balance_coeff is not None:
                 self.expert_bias = torch.zeros(
                     self.experts.num_experts, dtype=torch.float32
