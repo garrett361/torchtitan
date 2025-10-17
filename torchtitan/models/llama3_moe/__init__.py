@@ -14,9 +14,9 @@ from torchtitan.models.llama3 import pipeline_llama
 from torchtitan.models.llama3_moe.checkpoint import CustomCheckpointManager
 from torchtitan.models.llama3_moe.custom_args import JobConfig
 from torchtitan.models.llama3_moe.hf_reader import (
+    get_hf_weight_transform_cls,
     ReplicateMoETransform,
     TransformingHuggingFaceStorageReader,
-    get_hf_weight_transform_cls,
 )
 from torchtitan.models.llama3_moe.infra.parallelize import parallelize_llama_moe
 from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
