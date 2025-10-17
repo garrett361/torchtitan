@@ -221,6 +221,7 @@ class VirtualGroupMoE(_CustomMoE):
     """
     Implements the "Virtual Group Initialization" from 2410.07524.
 
+    [Virtual Group Initialization]
     # Assumptions
 
     The first FFN weight (say, wlog) W_hd, with h the internal hidden index, is used to initialize
@@ -242,27 +243,30 @@ class VirtualGroupMoE(_CustomMoE):
 
     o_d = sum_hd'(W^(2)_dh phi(W_hd' x_d')) === sum_h(z_hd)
 
-    Letting p_e the router weight for expert e, the MoE output is:
+    Letting p_e the router weight for expert e with sum_e(p_e) = 1 and route_score an overall router
+    scaling, the MoE output is:
 
-    o^(moe)_d = sum_efd'(p_e M^(2)_edf phi(M_efd' x_d') === sum_ef(p_e z^(moe)_efd)
+    o^(moe)_d = route_score * sum_efd'(p_e M^(2)_edf phi(M_efd' x_d')
+              === route_score * sum_ef(p_e z^(moe)_efd)
 
     The assumptions above let us reshape z^(moe)_efd --> z^(moe)_rgfd and p_e --> p_rg, leading to:
 
-    o^(moe)_d = sum_rgf(p_rg z^(moe)_rgfd)
+    o^(moe)_d = route_score * sum_rgf(p_rg z^(moe)_rgfd)
 
     Our assumptions also allow us to reshape z^(moe)_rgfd --> z^(moe)_rhd where we further have
     z^(moe)_rhd = z_hd, component-wise. If p_rg were such that its component values are independent
     of g, say p_rg = q_r, i.e. each FFN weight slice within a group gets the same routing weight.
     Then the above becomes:
 
-    o^(moe)_d = sum_rgf(q_r z^(moe)_rgfd)
-              = sum_rh(q_r z^(moe)_rhd)
-              = sum_rh(q_r z_hd)
-              = sum_r(q_r) * o_d
+    o^(moe)_d = route_score * sum_rgf(q_r z^(moe)_rgfd)
+              = route_score * sum_rh(q_r z^(moe)_rhd)
+              = route_score * sum_rh(q_r z_hd)
+              = route_score * sum_r(q_r) * o_d
 
     Therefore we can get exact FFN-MoE equivalence if the expert weights meet the two requirements:
     1. The router weights p_e = p_rg is constant across the r-index
-    2. The router weights are normalized over the r-index: sum_r(p_rg) = 1.
+    2. The following normalization condition holds: route_score * sum_r(p_rg) = 1, which uniquely
+       fixes route_score = G, due to the normalization sum_e(p_e) = 1 and p_rg's independence of g.
 
     In the paradigm where the router weights are determined from a top_k-then-softmax approach, as
     in
@@ -270,8 +274,8 @@ class VirtualGroupMoE(_CustomMoE):
     p_e = soft_e(top_k(sum_d(P_ed x_d))) ,
 
     the above can be achieved by initializing the weight P_ed = P_rgd so that it is independent of
-    g, i.e. P_rgd = Q_rd for some Q_rd, and taking the k in top_k to be a multiple of G. The same
-    conclusion also holds for softmax-then-top_k.
+    g, i.e. P_rgd = Q_rd for some Q_rd, and also taking the k in top_k to be a multiple of G so that
+    entire groups are activated together. The same conclusion also holds for softmax-then-top_k.
 
     """
 
@@ -289,13 +293,6 @@ class VirtualGroupMoE(_CustomMoE):
             self.moe_args.hf_ffn_hidden_dim,
             self.hidden_dim,
         )
-
-        if self.moe_args.top_k % self.n_groups:
-            # Required for MoE-FFN equivalence
-            raise ValueError(
-                f"{self.moe_args.top_k=} must be divisible by {self.hidden_dim // self.moe_args.hf_ffn_hidden_dim=}"
-                " for proper virtual group init."
-            )
         if remainder:
             raise ValueError(
                 f"{self.hidden_dim=} must be divisible by {self.moe_args.hf_ffn_hidden_dim=}"
@@ -304,6 +301,10 @@ class VirtualGroupMoE(_CustomMoE):
         if remainder:
             raise ValueError(
                 f"{self.moe_args.num_experts=} must be divisible by {self.hidden_dim // self.moe_args.hf_ffn_hidden_dim=}"
+            )
+        if self.moe_args.route_scale != self.n_groups:
+            raise ValueError(
+                f"{self.moe_args.route_scale} must be divisible by {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
             )
 
     def init_weights(

@@ -181,7 +181,7 @@ llama3_moe_configs = {
             route_norm=True,
             score_before_experts=False,
             top_k=2,
-            route_scale=2,
+            route_scale=2, # Must have route_scale = top_k; see [Virtual Group Initialization].
             hf_ffn_hidden_dim=8192,  # Must specify for virtual_group router init!
         ),
         is_moe_list=[False, True],
