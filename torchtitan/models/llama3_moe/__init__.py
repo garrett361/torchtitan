@@ -14,9 +14,9 @@ from torchtitan.models.llama3 import pipeline_llama
 from torchtitan.models.llama3_moe.checkpoint import CustomCheckpointManager
 from torchtitan.models.llama3_moe.custom_args import JobConfig
 from torchtitan.models.llama3_moe.hf_reader import (
-    get_hf_weight_transform_cls,
     ReplicateMoETransform,
     TransformingHuggingFaceStorageReader,
+    get_hf_weight_transform_cls,
 )
 from torchtitan.models.llama3_moe.infra.parallelize import parallelize_llama_moe
 from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
@@ -163,9 +163,7 @@ llama3_moe_configs = {
         ),
         is_moe_list=[False, True],
     ),
-    # Requirements for virtual_group init:
-    # 1) moe_inter_dim * num_experts fixed to 8192 * 8
-    # 2) top_k a multiple of hf_ffn_hidden_dim / moe_inter_dim
+    # See VirtualGroupMoE for necessary cfg requirements for virtual_group init.
     "3B_2layer_halfmoe_finegrained": TransformerModelArgs(
         dim=3072,
         moe_inter_dim=8192 // 2,
