@@ -6,14 +6,14 @@
 
 import math
 from functools import cache, cached_property
-from typing import TYPE_CHECKING, Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
 
-from torchtitan.components.metrics import MetricsProcessor, _get_metrics_rank
+from torchtitan.components.metrics import _get_metrics_rank, MetricsProcessor
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 
@@ -238,9 +238,9 @@ class CustomMetricsProcessor(MetricsProcessor):
             for metric_name, metric_val in zip(
                 mem_stat_prefixes, mem_t.tolist(), strict=True
             ):
-                pp_mem_metrics[metric_name + f" pp mesh rank {pp_mesh_rank}"] = (
-                    metric_val
-                )
+                pp_mem_metrics[
+                    metric_name + f" pp mesh rank {pp_mesh_rank}"
+                ] = metric_val
         return pp_mem_metrics
 
     def log(
