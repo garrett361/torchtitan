@@ -162,9 +162,12 @@ llama3_moe_configs = {
         ),
         is_moe_list=[False, True],
     ),
+    # Requirements for virtual_group init:
+    # 1) moe_inter_dim * num_experts fixed to 8192 * 8
+    # 2) top_k a multiple of hf_ffn_hidden_dim / moe_inter_dim
     "3B_2layer_halfmoe_finegrained": TransformerModelArgs(
         dim=3072,
-        moe_inter_dim=8192,
+        moe_inter_dim=8192 // 2,
         n_layers=2,
         n_heads=24,
         n_kv_heads=8,
@@ -172,16 +175,17 @@ llama3_moe_configs = {
         multiple_of=256,
         rope_theta=500000,
         moe_args=MoEArgs(
-            num_experts=8,
+            num_experts=8 * 2,
             num_shared_experts=0,
             score_func="softmax",
             route_norm=True,
             score_before_experts=False,
             top_k=2,
-            hf_ffn_hidden_dim=8192,  # Must specify for replicated router init!
+            route_scale=2,
+            hf_ffn_hidden_dim=8192,  # Must specify for virtual_group router init!
         ),
         is_moe_list=[False, True],
-        custom_moe_impl="replicated",  # Must specify for replicated router init!
+        custom_moe_impl="virtual_group",  # Must specify for virtual_group router init!
     ),
     "8B": TransformerModelArgs(
         dim=4096,

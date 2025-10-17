@@ -222,35 +222,33 @@ class ReplicateMoETransform(_HFWeightTransform):
                 dim_hf, hidden_dim_hf = t.shape
             else:
                 raise ValueError(f"{titan_fqn=} does not end with any of (w1, w2, w3)")
-
-            if (moe_inter_dim * num_experts) % hidden_dim_hf:
+            n_groups, remainder = divmod(hidden_dim_hf, moe_inter_dim)
+            if remainder:
                 raise ValueError(
-                    f"The total number of expert hidden dimensions, {moe_inter_dim * num_experts=}"
-                    f" must be divisible by {hidden_dim_hf=}, the hidden dimension of the HF weight."
+                    f"{hidden_dim_hf=} must be divisible by {moe_inter_dim=}"
                 )
+
+            n_replicas, remainder = divmod(num_experts, n_groups)
+            if remainder:
+                raise ValueError(f"{n_replicas=} must be divisible by {n_groups=}")
             if dim != dim_hf:
                 raise ValueError(
                     f"The MoE and FFN input dims do not match: {dim=} != {dim_hf=}."
                 )
 
-            t = torch.stack(
-                [t for _ in range(moe_inter_dim * num_experts // hidden_dim_hf)], dim=0
-            ).contiguous()
+            t = torch.stack([t for _ in range(n_replicas)], dim=0).contiguous()
 
-            if moe_inter_dim != hidden_dim_hf:
+            if n_groups != 1:
                 if titan_fqn.endswith("w1") or titan_fqn.endswith("w3"):
-                    t = rearrange(
-                        t, "x h d-> e m d", e=num_experts, m=moe_inter_dim
-                    ).contiguous()
+                    t = rearrange(t, "r h d-> (r h) d")
+                    t = rearrange(t, "(e m) d-> e m d", e=num_experts, m=moe_inter_dim)
                 elif titan_fqn.endswith("w2"):
-                    t = rearrange(
-                        t, "x d h-> e d m", e=num_experts, m=moe_inter_dim
-                    ).contiguous()
+                    t = rearrange(t, "r d h-> (r h) d")
+                    t = rearrange(t, "(e m) d-> e d m", e=num_experts, m=moe_inter_dim)
                 else:
                     raise ValueError(
                         f"{titan_fqn=} does not end with any of (w1, w2, w3)"
                     )
-
         return t
 
 

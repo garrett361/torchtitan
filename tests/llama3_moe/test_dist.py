@@ -352,7 +352,7 @@ class TestImpls(DTest):
             torch.testing.assert_close(out, out_moe, atol=self.atol, rtol=self.rtol)
 
     @pytest.mark.parametrize("sharding", ["fsdp", "ep"])
-    def test_finegrained_replication(self, sharding: str) -> None:
+    def test_virtual_group(self, sharding: str) -> None:
         """
         Test that the dense and MoE models have the same output with FFN weight replication.
         """
@@ -369,7 +369,10 @@ class TestImpls(DTest):
         assert moe_args.score_before_experts == False
         assert moe_args.hf_ffn_hidden_dim is not None
         assert model_args.custom_moe_impl is None
-        assert model_args_moe.custom_moe_impl == "replicated"
+        assert model_args_moe.custom_moe_impl == "virtual_group"
+        assert (
+            n_groups := moe_args.hf_ffn_hidden_dim // model_args_moe.moe_inter_dim
+        ) > 1, f"{n_groups=} must be larger than 1 for a non-trivial test"
 
         with torch.device("meta"):
             model = Transformer(model_args)

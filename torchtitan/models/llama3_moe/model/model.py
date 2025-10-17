@@ -10,6 +10,7 @@
 import math
 
 import torch
+from einops import rearrange
 from torch import nn
 
 from torchtitan.models.llama3.model.model import Attention, FeedForward
@@ -216,77 +217,94 @@ class _CustomMoE(MoE):
     name: str | None = None
 
 
-class ReplicatedRoutedMoE(_CustomMoE):
+class VirtualGroupMoE(_CustomMoE):
     """
     Implements the "Virtual Group Initialization" from 2410.07524.
 
     # Assumptions
 
     The first FFN weight (say, wlog) W_hd, with h the internal hidden index, is used to initialize
-    the first MoE weight M_emd with h in {0, ..., H -1} and similar for every other dim. The MoE
-    expert and hidden dims, e and m, are chosen such that M is a divisor of H, H/M = N, and N is a
-    divisor of E: E/N = G. Such a weight M_emd can be constructed by stacking G copies of the FFN
-    weight to create a tensor M_ghd, whose components are given by M_ghd = W_hd, and then reshaping
-    as:
+    the first MoE weight M_efd through the following steps:
+    1. Replicate the FFN weight R times to form M_rhd = W_hd (component-wise), with r in {0, ...,
+       R-1} and similar for other indices.
+    2. Split the hidden dimension (size H) into G sequential chunks (groups) of size F = H / G.
+    3. Reshape the replication and group dimensions into a single expert-index dimension of size
+       E = R * G. Full
+       progression:
+       W_hd --> M_rhd --> M_rgfd --> M_efd
 
-    M_ghd --> M_gnmd --> M_emd .
-
-    The validity of these reshapings is ensured by the divisibility conditions. The
-    `ReplicateMoETransform` constructs MoE weights through the above process.
+    Nice divisibility assumed everywhere. The above MoE weight-creation strategy is implemented by
+    ReplicateMoETransform.
 
     # Requirements for FFN-MoE equivalence
 
     The original FFN output is (using a simple FFN; swiGLU doesn't change the argument)
 
-    o_d = W^(2)_dh phi(W_hd x_d) === sum_h(z_h)
-
-    using Einstein summation, where possible.
+    o_d = sum_hd'(W^(2)_dh phi(W_hd' x_d')) === sum_h(z_hd)
 
     Letting p_e the router weight for expert e, the MoE output is:
 
-    o^(moe)_d = p_e M^(2)_edm phi(M_emd x_d) === sum_m(p_e z^(moe)_em)
+    o^(moe)_d = sum_efd'(p_e M^(2)_edf phi(M_efd' x_d') === sum_ef(p_e z^(moe)_efd)
 
-    The assumptions above let us reshape z^(moe)_em --> z^(moe)_gnm and p_e --> p_gn, which makes
-    the above
+    The assumptions above let us reshape z^(moe)_efd --> z^(moe)_rgfd and p_e --> p_rg, leading to:
 
-    o^(moe)_d = sum_m(p_gn z^(moe)_gnm)
+    o^(moe)_d = sum_rgf(p_rg z^(moe)_rgfd)
 
-    Our assumptions also allow for reshaping z^(moe)_gnm --> z^(moe)_gh where we further have
-    z^(moe)_gh = z_h, component-wise.  If p_gn were such that its component values are independent
-    of n, say p_gn = q_g, then the above becomes:
+    Our assumptions also allow us to reshape z^(moe)_rgfd --> z^(moe)_rhd where we further have
+    z^(moe)_rhd = z_hd, component-wise. If p_rg were such that its component values are independent
+    of g, say p_rg = q_r, i.e. each FFN weight slice within a group gets the same routing weight.
+    Then the above becomes:
 
-    o^(moe)_d = sum_m(p_gn z^(moe)_gnm)
-              = sum_mn(q_g z^(moe)_gnm)
-              = q_g sum_mn(z^(moe)_gnm)
-              = q_g sum_h(z^(moe)_gh)
-              = sum_g(q_g sum_h(z_h))
-              = o_d sum_g(q_g)
+    o^(moe)_d = sum_rgf(q_r z^(moe)_rgfd)
+              = sum_rh(q_r z^(moe)_rhd)
+              = sum_rh(q_r z_hd)
+              = sum_r(q_r) * o_d
 
-    So, 
+    Therefore we can get exact FFN-MoE equivalence if the expert weights meet the two requirements:
+    1. The router weights p_e = p_rg is constant across the r-index
+    2. The router weights are normalized over the r-index: sum_r(p_rg) = 1.
 
+    In the paradigm where the router weights are determined from a top_k-then-softmax approach, as
+    in
 
+    p_e = soft_e(top_k(sum_d(P_ed x_d))) ,
 
-
-
-
-
-
-    Here, e is the expert index and the MoE
-    where M is a divisor of H, H/M = N, and N is a divisor of E: E/N = G. The divisibility
-    conditions ensure both that the MoE weight is re-shapeable to the four-dimensional form:
-
-    M_emd --> M_gnmd
-
-    and that the right side in turn can again be reshaped to the 3D form:
-
-    M_gnmd--> M_ghd.
-
-    The `ReplicateMoETransform` class constructs weights of this form where we also have M_ghd =
-    W_hd for all g; these are just replicated FFN weights.
+    the above can be achieved by initializing the weight P_ed = P_rgd so that it is independent of
+    g, i.e. P_rgd = Q_rd for some Q_rd, and taking the k in top_k to be a multiple of G. The same
+    conclusion also holds for softmax-then-top_k.
 
     """
 
-    name = "replicated"
+    name = "virtual_group"
+
+    def __init__(self, moe_args: MoEArgs, dim: int, hidden_dim: int):
+        super().__init__(moe_args=moe_args, dim=dim, hidden_dim=hidden_dim)
+        # Replicated initialization only makes sense if the MoE hidden dim cleanly divides the HF
+        # FFN hidden dim
+        if self.moe_args.hf_ffn_hidden_dim is None:
+            raise ValueError(
+                f"{self.__class__.__name__} requires hf_ffn_hidden_dim to be specified"
+            )
+        self.n_groups, remainder = divmod(
+            self.moe_args.hf_ffn_hidden_dim,
+            self.hidden_dim,
+        )
+
+        if self.moe_args.top_k % self.n_groups:
+            # Required for MoE-FFN equivalence
+            raise ValueError(
+                f"{self.moe_args.top_k=} must be divisible by {self.hidden_dim // self.moe_args.hf_ffn_hidden_dim=}"
+                " for proper virtual group init."
+            )
+        if remainder:
+            raise ValueError(
+                f"{self.hidden_dim=} must be divisible by {self.moe_args.hf_ffn_hidden_dim=}"
+            )
+        self.n_replicas, remainder = divmod(self.moe_args.num_experts, self.n_groups)
+        if remainder:
+            raise ValueError(
+                f"{self.moe_args.num_experts=} must be divisible by {self.hidden_dim // self.moe_args.hf_ffn_hidden_dim=}"
+            )
 
     def init_weights(
         self,
@@ -294,41 +312,34 @@ class ReplicatedRoutedMoE(_CustomMoE):
         buffer_device: torch.device,
     ):
         super().init_weights(init_std=init_std, buffer_device=buffer_device)
-        # Replicated initialization only makes sense if the MoE hidden dim cleanly divides the HF
-        # FFN hidden dim
-        if self.moe_args.hf_ffn_hidden_dim is None:
-            raise ValueError(
-                f"{self.__class__.__name__} requires hf_ffn_hidden_dim to be specified"
-            )
-        ratio, remainder = divmod(
-            self.hidden_dim,
-            self.moe_args.hf_ffn_hidden_dim,
-        )
-        if remainder:
-            raise ValueError(
-                f"{self.hidden_dim=} must be divisible by {self.moe_args.hf_ffn_hidden_dim=}"
-            )
-        num_experts_slice, remainder = divmod(self.moe_args.num_experts, ratio)
-        if remainder:
-            raise ValueError(
-                f"{self.moe_args.num_experts=} must be divisible by {self.hidden_dim // self.moe_args.hf_ffn_hidden_dim=}"
-            )
-        repeats = self.moe_args.num_experts // num_experts_slice
-        if repeats > 1:
+        if self.n_groups > 1:
             with torch.no_grad():
-                router_weights = self.router.gate.weight  # Shape: (num_experts, dim)
-                router_weights_slice = router_weights[:num_experts_slice]
+                # Weight shape: (num_experts, dim) = (n_replicas * n_groups, dim)
+                router_weights = self.router.gate.weight
+                router_weights_slice = router_weights[: self.n_replicas]
                 replicated_router_weights = torch.cat(
-                    [router_weights_slice for _ in range(repeats)], dim=0
-                ).contiguous()
+                    [router_weights_slice for _ in range(self.n_groups)], dim=0
+                )
+                replicated_router_weights = rearrange(
+                    replicated_router_weights,
+                    "(g r) d -> (r g) d",
+                    r=self.n_replicas,
+                    g=self.n_groups,
+                )
                 self.router.gate.weight.copy_(replicated_router_weights)
 
-                # For completeness, should the expert bias should start as zeros, if it exists.
-                if expert_bias := self.expert_bias is not None:
-                    expert_bias_slice = expert_bias[:num_experts_slice]
+                # For completeness, though the expert bias should start as zeros, if it exists.
+                if (expert_bias := self.expert_bias) is not None:
+                    expert_bias_slice = expert_bias[: self.n_replicas]
                     replicated_expert_bias = torch.cat(
-                        [expert_bias_slice for _ in range(repeats)], dim=0
-                    ).contiguous()
+                        [expert_bias_slice for _ in range(self.n_groups)], dim=0
+                    )
+                    replicated_expert_bias = rearrange(
+                        replicated_expert_bias,
+                        "(g r) -> (r g)",
+                        r=self.n_replicas,
+                        g=self.n_groups,
+                    )
                     self.expert_bias.copy_(replicated_expert_bias)
 
 
