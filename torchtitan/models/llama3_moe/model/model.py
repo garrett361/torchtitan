@@ -276,7 +276,6 @@ class VirtualGroupMoE(_CustomMoE):
     the above can be achieved by initializing the weight P_ed = P_rgd so that it is independent of
     g, i.e. P_rgd = Q_rd for some Q_rd, and also taking the k in top_k to be a multiple of G so that
     entire groups are activated together. The same conclusion also holds for softmax-then-top_k.
-
     """
 
     name = "virtual_group"

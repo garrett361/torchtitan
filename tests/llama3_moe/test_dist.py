@@ -15,14 +15,15 @@ from torchtitan.components.checkpoint import CheckpointManager, ModelWrapper
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.llama3_moe import (
     CustomCheckpointManager,
-    Llama3MoEStateDictAdapter,
-    Transformer,
-    TransformingHuggingFaceStorageReader,
     get_hf_weight_transform_cls,
     llama3_moe_configs,
+    Llama3MoEStateDictAdapter,
     parallelize_llama_moe,
+    Transformer,
+    TransformingHuggingFaceStorageReader,
 )
 from torchtitan.models.llama3_moe.custom_args import JobConfig
+from torchtitan.models.moe import MoEArgs
 
 
 class TestHFReader(DTest):
@@ -278,8 +279,8 @@ class TestImpls(DTest):
 
         moe_args = model_args_moe.moe_args
         assert moe_args.score_func == "softmax"
-        assert moe_args.route_norm == True
-        assert moe_args.score_before_experts == False
+        assert moe_args.route_norm is True
+        assert moe_args.score_before_experts is False
         assert model_args.custom_moe_impl is None
         assert model_args_moe.custom_moe_impl is None
 
@@ -351,13 +352,32 @@ class TestImpls(DTest):
             out_moe = model_moe(inputs)
             torch.testing.assert_close(out, out_moe, atol=self.atol, rtol=self.rtol)
 
+    @pytest.mark.parametrize("n_groups", [2, 4])
+    @pytest.mark.parametrize("n_replicas", [4, 8])
     @pytest.mark.parametrize("sharding", ["fsdp", "ep"])
-    def test_virtual_group(self, sharding: str) -> None:
+    def test_virtual_group(self, sharding: str, n_groups: int, n_replicas: int) -> None:
         """
         Test that the dense and MoE models have the same output with FFN weight replication.
         """
         model_args = llama3_moe_configs["3B_2layer"]
-        model_args_moe = llama3_moe_configs["3B_2layer_halfmoe_finegrained"]
+        # Dynamically generate a valid moe cfg for a model with one FFN and one MoE layer.
+        llama_3b_hidden_dim = 8192
+        model_args_moe = deepcopy(model_args)
+        moe_args = MoEArgs(
+            num_experts=n_replicas * n_groups,
+            num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
+            top_k=n_groups,
+            route_scale=n_groups,
+            hf_ffn_hidden_dim=llama_3b_hidden_dim,  # Must specify for virtual_group router init!
+        )
+        model_args_moe.moe_args = moe_args
+        model_args_moe.moe_inter_dim = llama_3b_hidden_dim // n_groups
+        model_args_moe.is_moe_list = [False, True]
+        model_args_moe.custom_moe_impl = "virtual_group"
+
         job_config = JobConfig()
         job_config.checkpoint.enable = True
         job_config.checkpoint.initial_load_in_hf = True
@@ -365,14 +385,11 @@ class TestImpls(DTest):
 
         moe_args = model_args_moe.moe_args
         assert moe_args.score_func == "softmax"
-        assert moe_args.route_norm == True
-        assert moe_args.score_before_experts == False
+        assert moe_args.route_norm is True
+        assert moe_args.score_before_experts is False
         assert moe_args.hf_ffn_hidden_dim is not None
         assert model_args.custom_moe_impl is None
         assert model_args_moe.custom_moe_impl == "virtual_group"
-        assert (
-            n_groups := moe_args.hf_ffn_hidden_dim // model_args_moe.moe_inter_dim
-        ) > 1, f"{n_groups=} must be larger than 1 for a non-trivial test"
 
         with torch.device("meta"):
             model = Transformer(model_args)

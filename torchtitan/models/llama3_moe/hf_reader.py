@@ -13,10 +13,10 @@ import torch
 from einops import rearrange
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.checkpoint._hf_utils import (
+    _HFStorageInfo,
     CUSTOM_METADATA_KEY,
     SAVED_OFFSETS_KEY,
     SUFFIX,
-    _HFStorageInfo,
 )
 from torch.distributed.checkpoint.metadata import (
     ChunkStorageMetadata,
@@ -192,7 +192,8 @@ class _HFWeightTransform(ABC):
         return self.transform(titan_fqn, t)
 
     @abstractmethod
-    def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor: ...
+    def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor:
+        ...
 
 
 class ReplicateMoETransform(_HFWeightTransform):

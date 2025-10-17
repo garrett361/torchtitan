@@ -14,13 +14,13 @@ from torchtitan.models.llama3 import pipeline_llama
 from torchtitan.models.llama3_moe.checkpoint import CustomCheckpointManager
 from torchtitan.models.llama3_moe.custom_args import JobConfig
 from torchtitan.models.llama3_moe.hf_reader import (
+    get_hf_weight_transform_cls,
     ReplicateMoETransform,
     TransformingHuggingFaceStorageReader,
-    get_hf_weight_transform_cls,
 )
 from torchtitan.models.llama3_moe.infra.parallelize import parallelize_llama_moe
 from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
-from torchtitan.models.llama3_moe.model.model import Transformer
+from torchtitan.models.llama3_moe.model.model import Transformer, VirtualGroupMoE
 from torchtitan.models.llama3_moe.model.state_dict_adapter import (
     Llama3MoEStateDictAdapter,
 )
@@ -35,6 +35,7 @@ __all__ = [
     "Transformer",
     "TransformerModelArgs",
     "TransformingHuggingFaceStorageReader",
+    "VirtualGroupMoE",
     "get_hf_weight_transform_cls",
     "llama3_configs",
     "parallelize_llama_moe",
@@ -181,7 +182,7 @@ llama3_moe_configs = {
             route_norm=True,
             score_before_experts=False,
             top_k=2,
-            route_scale=2, # Must have route_scale = top_k; see [Virtual Group Initialization].
+            route_scale=2,  # Must have route_scale = top_k; see [Virtual Group Initialization].
             hf_ffn_hidden_dim=8192,  # Must specify for virtual_group router init!
         ),
         is_moe_list=[False, True],

@@ -72,14 +72,6 @@ class TransformerModelArgs(BaseModelArgs):
             self.moe_args.load_balance_coeff = job_config.custom_args.load_balance_coeff
 
         if job_config.custom_args.hf_ffn_hidden_dim is not None:
-            if (
-                self.moe_args.num_experts
-                * self.moe_inter_dim
-                % job_config.custom_args.hf_ffn_hidden_dim
-            ):
-                raise ValueError(
-                    f"{self.moe_args.num_experts *self.moe_inter_dim=} must be divisible by {job_config.custom_args.hf_ffn_hidden_dim=}"
-                )
             self.moe_args.hf_ffn_hidden_dim = job_config.custom_args.hf_ffn_hidden_dim
 
         if self.is_moe_list is not None and len(self.is_moe_list) != self.n_layers:

@@ -58,9 +58,9 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
             self.from_hf_map[
                 f"model.layers.{layer_idx}.self_attn.rotary_emb.inv_freq"
             ] = None
-            self.from_hf_map[f"model.layers.{layer_idx}.input_layernorm.weight"] = (
-                f"layers.{layer_idx}.attention_norm.weight"
-            )
+            self.from_hf_map[
+                f"model.layers.{layer_idx}.input_layernorm.weight"
+            ] = f"layers.{layer_idx}.attention_norm.weight"
             self.from_hf_map[
                 f"model.layers.{layer_idx}.post_attention_layernorm.weight"
             ] = f"layers.{layer_idx}.ffn_norm.weight"
@@ -70,14 +70,14 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
                 ] = f"layers.{layer_idx}.attention.{titan_name}.weight"
             if is_moe:
                 for hf_name, titan_name in moe_name_weight_map.items():
-                    self.from_hf_map[f"model.layers.{layer_idx}.{hf_name}.weight"] = (
-                        f"layers.{layer_idx}.{titan_name}"
-                    )
+                    self.from_hf_map[
+                        f"model.layers.{layer_idx}.{hf_name}.weight"
+                    ] = f"layers.{layer_idx}.{titan_name}"
             else:
                 for hf_name, titan_name in ffn_name_weight_map.items():
-                    self.from_hf_map[f"model.layers.{layer_idx}.{hf_name}.weight"] = (
-                        f"layers.{layer_idx}.{titan_name}.weight"
-                    )
+                    self.from_hf_map[
+                        f"model.layers.{layer_idx}.{hf_name}.weight"
+                    ] = f"layers.{layer_idx}.{titan_name}.weight"
             dist_utils.rank_zero_print(f"{self.from_hf_map=}")
 
     # HuggingFace permutation function (exact copy from their conversion script)
