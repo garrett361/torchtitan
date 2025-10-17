@@ -407,6 +407,7 @@ def build_optimizers_with_moe_load_balancing(
                     expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
                     moe.expert_bias.add_(expert_bias_delta)
                     moe.tokens_per_expert.zero_()
+                    moe.tokens_per_expert_cumulative.add_(tokens_per_expert)
 
     if _should_register_moe_balancing_hook(model_parts):
         optimizers.register_step_pre_hook(

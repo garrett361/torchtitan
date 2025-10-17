@@ -19,6 +19,10 @@ from torchtitan.models.llama3_moe.hf_reader import (
     TransformingHuggingFaceStorageReader,
 )
 from torchtitan.models.llama3_moe.infra.parallelize import parallelize_llama_moe
+from torchtitan.models.llama3_moe.metrics import (
+    build_custom_metrics_processor,
+    CustomMetricsProcessor,
+)
 from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
 from torchtitan.models.llama3_moe.model.model import Transformer, VirtualGroupMoE
 from torchtitan.models.llama3_moe.model.state_dict_adapter import (
@@ -29,6 +33,7 @@ from torchtitan.protocols.train_spec import TrainSpec
 
 __all__ = [
     "CustomCheckpointManager",
+    "CustomMetricsProcessor",
     "JobConfig",
     "Llama3MoEStateDictAdapter",
     "ReplicateMoETransform",
@@ -36,6 +41,7 @@ __all__ = [
     "TransformerModelArgs",
     "TransformingHuggingFaceStorageReader",
     "VirtualGroupMoE",
+    "build_custom_metrics_processor",
     "get_hf_weight_transform_cls",
     "llama3_configs",
     "parallelize_llama_moe",
@@ -272,7 +278,6 @@ llama3_moe_configs = {
             score_before_experts=False,
         ),
     ),
-    # can add other version from torchtitan/models/llama3/__init__.py
 }
 
 
@@ -290,4 +295,5 @@ def get_train_spec() -> TrainSpec:
         build_loss_fn=build_cross_entropy_loss,
         build_validator_fn=build_validator,
         state_dict_adapter=Llama3MoEStateDictAdapter,
+        build_metrics_processor_fn=build_custom_metrics_processor,
     )
