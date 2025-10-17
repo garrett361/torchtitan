@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Type
+from typing import Any
 
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint import HuggingFaceStorageReader
@@ -22,7 +22,7 @@ TRAIN_STATE = "train_state"
 class CustomCheckpointManager(CheckpointManager):
     def __init__(
         self,
-        hf_storage_reader: Type[HuggingFaceStorageReader] = HuggingFaceStorageReader,
+        hf_storage_reader: type[HuggingFaceStorageReader] = HuggingFaceStorageReader,
         hf_storage_reader_kwargs: dict[str, Any] | None = None,
         *args,
         **kwargs,
@@ -53,8 +53,6 @@ class CustomCheckpointManager(CheckpointManager):
                 self.sd_adapter is not None
             ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
             hf_state_dict = self.sd_adapter.to_hf(state_dict)
-            for k, v in hf_state_dict.items():
-                dist_utils.rank_zero_print(f"{k=}: {v.shape=}")
 
             # TODO: @goon - DELETE
             dist_utils.rank_zero_print(

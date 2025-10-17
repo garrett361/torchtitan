@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
+from einops import rearrange
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.checkpoint._hf_utils import (
     _HFStorageInfo,
@@ -174,7 +175,11 @@ class _HFWeightTransform(ABC):
     """
     Base class for implementing transforms of loaded HF safetensor weights prior to loading into
     a torchtitan model.
+
+    Subclasses should be given a name in order to be returnable from get_hf_weight_transform_cls.
     """
+
+    name: str | None = None
 
     def __init__(
         self, model_args: TransformerModelArgs, hf_to_titan_fqn_map: dict[str, str]
@@ -193,26 +198,63 @@ class _HFWeightTransform(ABC):
 
 class ReplicateMoETransform(_HFWeightTransform):
     """
-    Basic replication of FFN weights into MoE experts: W^moe_exp = W^ffn, as in 2212.05055.
+    Basic replication of FFN weights into MoE experts.  Handles any case where `num_experts *
+    moe_inter_dim` is divisible by the hf FFN weight's hidden_dim by stacking the FFN weights and
+    reshaping as appropriate.
+
+    Cases:
+    1.  moe_inter_dim = hf_hidden_dim: basic replication with each expert weight matching its HF FFN
+        counterpart as in 2212.05055.
+    2.  moe_inter_dim < hf_hidden_dim: each HF FFN is broken up across experts, and can be re-formed
+        by concatenating together hf_hidden_dim // moe_inter_dim consecutive expert weights
+        appropriately, as in 2410.07524.
     """
 
+    name = "replicate"
+
     def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor:
-        # TODO: @goon - should add explicit shape checks here.
         if "moe.experts.w" in titan_fqn:
             num_experts = self.model_args.moe_args.num_experts
             moe_inter_dim = self.model_args.moe_inter_dim
             dim = self.model_args.dim
-            if titan_fqn.endswith("w1"):
-                expected_shape = torch.Size((moe_inter_dim, dim))
+            if titan_fqn.endswith("w1") or titan_fqn.endswith("w3"):
+                hidden_dim_hf, dim_hf = t.shape
             elif titan_fqn.endswith("w2"):
-                expected_shape = torch.Size((dim, moe_inter_dim))
-            elif titan_fqn.endswith("w3"):
-                expected_shape = torch.Size((moe_inter_dim, dim))
+                dim_hf, hidden_dim_hf = t.shape
             else:
                 raise ValueError(f"{titan_fqn=} does not end with any of (w1, w2, w3)")
-            if expected_shape != t.shape:
-                raise RuntimeError(
-                    f"Shape mismatch: {expected_shape=} differs from {t.shape=} for {titan_fqn=}"
+            n_groups, remainder = divmod(hidden_dim_hf, moe_inter_dim)
+            if remainder:
+                raise ValueError(
+                    f"{hidden_dim_hf=} must be divisible by {moe_inter_dim=}"
                 )
-            t = torch.stack([t for _ in range(num_experts)], dim=0).contiguous()
+
+            n_replicas, remainder = divmod(num_experts, n_groups)
+            if remainder:
+                raise ValueError(f"{n_replicas=} must be divisible by {n_groups=}")
+            if dim != dim_hf:
+                raise ValueError(
+                    f"The MoE and FFN input dims do not match: {dim=} != {dim_hf=}."
+                )
+
+            t = torch.stack([t for _ in range(n_replicas)], dim=0).contiguous()
+
+            if n_groups != 1:
+                if titan_fqn.endswith("w1") or titan_fqn.endswith("w3"):
+                    t = rearrange(t, "r h d-> (r h) d")
+                    t = rearrange(t, "(e m) d-> e m d", e=num_experts, m=moe_inter_dim)
+                elif titan_fqn.endswith("w2"):
+                    t = rearrange(t, "r d h-> (r h) d")
+                    t = rearrange(t, "(e m) d-> e d m", e=num_experts, m=moe_inter_dim)
+                else:
+                    raise ValueError(
+                        f"{titan_fqn=} does not end with any of (w1, w2, w3)"
+                    )
         return t
+
+
+def get_hf_weight_transform_cls(name: str) -> type[_HFWeightTransform]:
+    transform_map = {
+        sc.name: sc for sc in _HFWeightTransform.__subclasses__() if hasattr(sc, "name")
+    }
+    return transform_map[name]

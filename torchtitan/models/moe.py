@@ -16,7 +16,7 @@ from torchtitan.distributed.expert_parallel import expert_parallel
 
 @dataclass
 class MoEArgs:
-    num_experts: int = 1
+    num_experts: int = 8
     num_shared_experts: int = 1
 
     # router
@@ -32,6 +32,11 @@ class MoEArgs:
 
     _debug_force_load_balance: bool = False
     # if True, we force each experts get same amount of token via round-robin
+
+    # NOTE: @goon - custom attrs
+    # Knowing the HF FFN hidden dim size is required for proper token router init with some
+    # strategies
+    hf_ffn_hidden_dim: int | None = None
 
 
 # can be used as dense FFN layer or shared experts in MoE layers
@@ -444,13 +449,6 @@ class MoE(nn.Module):
                 * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
 
-        # if torch.distributed.get_rank() == 0:
-        #     breakpoint()
-        #     routed_output = self.experts(routed_input, num_tokens_per_expert)
-
-        # torch.distributed.barrier()
-
-        # shape (bs*slen*top_k, dim)
         routed_output = self.experts(routed_input, num_tokens_per_expert)
 
         # shared expert

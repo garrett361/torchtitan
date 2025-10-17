@@ -8,6 +8,8 @@ import logging
 from typing import Any
 from warnings import warn
 
+import torch.distributed as dist
+
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
@@ -108,7 +110,8 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
         conventions, possibly also changing tensor layouts, if necessary.
 
         Only used when loading from or saving to an HF ckpt (dcp_load,{save}) and in a conversion
-        utility script.
+        utility script. NOTE: @goon - we will need separate versions of this function for weight
+        loading and HF ckpt saving at some point.
         """
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
@@ -128,7 +131,9 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
                 # model's weights, e.g. if testing out with fewer layers than actually exist in the
                 # real model.
                 if key not in to_hf_map:
-                    warn(f"{key=} not found in {list(to_hf_map)=}. Skipping.")
+                    warn(
+                        f"[rank={dist.get_rank()}]: {key=} not found in {list(to_hf_map)=}. Skipping."
+                    )
                     continue
                 else:
                     new_key = to_hf_map[key]

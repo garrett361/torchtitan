@@ -22,12 +22,13 @@ from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
 )
-from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.models.attention import init_attention_mask
 from torchtitan.models.llama3_moe import (
     CustomCheckpointManager,
-    ReplicateMoETransform,
+    get_hf_weight_transform_cls,
+    JobConfig,
     TransformingHuggingFaceStorageReader,
 )
 from torchtitan.protocols.model_converter import build_model_converters
@@ -324,7 +325,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.checkpointer = CustomCheckpointManager(
             hf_storage_reader=TransformingHuggingFaceStorageReader,
             hf_storage_reader_kwargs={
-                "transform_fn": ReplicateMoETransform(
+                "transform_fn": get_hf_weight_transform_cls(
+                    job_config.custom_args.hf_weight_transform
+                )(
                     model_args=self.model_args,
                     hf_to_titan_fqn_map=sd_adapter.from_hf_map,
                 ),

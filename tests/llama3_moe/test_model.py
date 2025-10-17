@@ -6,8 +6,7 @@
 
 import torch
 
-from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
-from torchtitan.models.llama3_moe.model.model import Transformer
+from torchtitan.models.llama3_moe import Transformer, TransformerModelArgs
 
 
 class TestModel:

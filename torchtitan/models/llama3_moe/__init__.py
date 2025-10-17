@@ -14,12 +14,13 @@ from torchtitan.models.llama3 import pipeline_llama
 from torchtitan.models.llama3_moe.checkpoint import CustomCheckpointManager
 from torchtitan.models.llama3_moe.custom_args import JobConfig
 from torchtitan.models.llama3_moe.hf_reader import (
+    get_hf_weight_transform_cls,
     ReplicateMoETransform,
     TransformingHuggingFaceStorageReader,
 )
 from torchtitan.models.llama3_moe.infra.parallelize import parallelize_llama_moe
 from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
-from torchtitan.models.llama3_moe.model.model import Transformer
+from torchtitan.models.llama3_moe.model.model import Transformer, VirtualGroupMoE
 from torchtitan.models.llama3_moe.model.state_dict_adapter import (
     Llama3MoEStateDictAdapter,
 )
@@ -34,6 +35,8 @@ __all__ = [
     "Transformer",
     "TransformerModelArgs",
     "TransformingHuggingFaceStorageReader",
+    "VirtualGroupMoE",
+    "get_hf_weight_transform_cls",
     "llama3_configs",
     "parallelize_llama_moe",
     "pipeline_llama",
@@ -50,6 +53,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=1,
             num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
         is_moe_list=[True if n == 0 else False for n in range(6)],
     ),
@@ -62,6 +68,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=2,
             num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
         is_moe_list=[True if n == 0 else False for n in range(6)],
     ),
@@ -74,6 +83,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=4,
             num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
         is_moe_list=[True if n == 0 else False for n in range(6)],
     ),
@@ -86,6 +98,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=8,
             num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
         is_moe_list=[True if n == 0 else False for n in range(6)],
     ),
@@ -98,6 +113,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=8,
             num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
         is_moe_list=[True if n == 0 else False for n in range(6)],
     ),
@@ -138,8 +156,35 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=8,
             num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
+            top_k=2,
         ),
         is_moe_list=[False, True],
+    ),
+    # See VirtualGroupMoE for necessary cfg requirements for virtual_group init.
+    "3B_2layer_halfmoe_finegrained": TransformerModelArgs(
+        dim=3072,
+        moe_inter_dim=8192 // 2,
+        n_layers=2,
+        n_heads=24,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.0,  # Correct?
+        multiple_of=256,
+        rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=8 * 2,
+            num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
+            top_k=2,
+            route_scale=2,  # Must have route_scale = top_k; see [Virtual Group Initialization].
+            hf_ffn_hidden_dim=8192,  # Must specify for virtual_group router init!
+        ),
+        is_moe_list=[False, True],
+        custom_moe_impl="virtual_group",  # Must specify for virtual_group router init!
     ),
     "8B": TransformerModelArgs(
         dim=4096,
@@ -153,6 +198,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=2,
             num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
         is_moe_list=None,
     ),
@@ -168,6 +216,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=2,
             num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
     ),
     "8B_2exp_4_layer": TransformerModelArgs(
@@ -182,6 +233,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=2,
             num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
     ),
     "8B_4exp": TransformerModelArgs(
@@ -196,6 +250,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=4,
             num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
     ),
     "8B_8exp": TransformerModelArgs(
@@ -210,6 +267,9 @@ llama3_moe_configs = {
         moe_args=MoEArgs(
             num_experts=8,
             num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
         ),
     ),
     # can add other version from torchtitan/models/llama3/__init__.py
