@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import math
 from functools import cache, cached_property
 from typing import TYPE_CHECKING, Any
@@ -62,7 +68,7 @@ class CustomMetricsProcessor(MetricsProcessor):
             return tensor.detach().clone()
         return None
 
-    @cache
+    @cache  # noqa: B019
     def send_moe_layer_idxs_to_metrics_rank(self, rank: int) -> list[int] | None:
         """
         Send MoE layer idxs on `rank` to the metrics rank. Returns the list of idxs on the metric
@@ -115,8 +121,6 @@ class CustomMetricsProcessor(MetricsProcessor):
             for block_idx, transformer_block in model_part.layers.items():
                 if not transformer_block.moe_enabled:
                     continue
-                if transformer_block.moe.load_balance_coeff is None:
-                    return
                 tokens_per_expert_cumulative = (
                     transformer_block.moe.tokens_per_expert_cumulative
                 )
