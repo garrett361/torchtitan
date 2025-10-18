@@ -305,7 +305,7 @@ class VirtualGroupMoE(_CustomMoE):
             raise ValueError(
                 f"{self.moe_args.route_scale=} must be divisible by {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
             )
-        if self.moe_args.route_norm:
+        if not self.moe_args.route_norm:
             raise ValueError(f"{self.moe_args.route_norm=} must be True")
 
     def init_weights(
