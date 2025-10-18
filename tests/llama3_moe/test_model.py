@@ -105,6 +105,7 @@ class TestModel:
             )
             out = model(inputs)
             out_hf = model_hf(inputs)
+            # NOTE: @goon -  current mean error ~ 1%
             torch.testing.assert_close(out_hf.logits, out, atol=1e-1, rtol=1e-1)
 
     def test_dev_cfg(self):
