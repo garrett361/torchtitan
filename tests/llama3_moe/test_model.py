@@ -6,16 +6,16 @@
 
 
 import torch
-from transformers import AutoModelForCausalLM
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.models.llama3_moe import (
     JobConfig,
+    llama3_moe_configs,
     Llama3MoEStateDictAdapter,
     Transformer,
     TransformerModelArgs,
-    llama3_moe_configs,
 )
+from transformers import AutoModelForCausalLM
 
 
 class TestModel:
@@ -106,7 +106,7 @@ class TestModel:
             out = model(inputs)
             out_hf = model_hf(inputs)
             # NOTE: @goon -  current mean error ~ 1%. Might be failing due to the RoPE impl
-            # mismatches? 
+            # mismatches?
             torch.testing.assert_close(out_hf.logits, out, atol=1e-1, rtol=1e-1)
 
     def test_dev_cfg(self):

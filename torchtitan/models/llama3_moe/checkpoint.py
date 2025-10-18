@@ -48,9 +48,9 @@ class CustomCheckpointManager(CheckpointManager):
         """
 
         if from_hf:
-            assert self.sd_adapter is not None, (
-                "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
-            )
+            assert (
+                self.sd_adapter is not None
+            ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
             hf_state_dict = self.sd_adapter.to_hf(state_dict)
 
             dcp.load(
