@@ -98,6 +98,7 @@ class devdict(dict):  # noqa: N801
             elif hasattr(cfg.moe_args, k):
                 setattr(cfg.moe_args, k, dev_kwargs.pop(k))
         # Special args:
+        # - n_moe: use this many MoE layers, starting from the last layer backwards
         if "n_moe" in dev_kwargs:
             n_moe = dev_kwargs.pop("n_moe")
             cfg.is_moe_list = [n >= cfg.n_layers - n_moe for n in range(cfg.n_layers)]
