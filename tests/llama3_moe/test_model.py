@@ -96,7 +96,7 @@ class TestModel:
 
         model_hf = AutoModelForCausalLM.from_pretrained(
             "/gpfs/goon/models/Llama-3.2-3B/"
-        ).to(self.device)
+        ).to(device=self.device)
 
         torch.manual_seed(42)
         with torch.no_grad():
@@ -105,7 +105,8 @@ class TestModel:
             )
             out = model(inputs)
             out_hf = model_hf(inputs)
-            # NOTE: @goon -  current mean error ~ 1%
+            # NOTE: @goon -  current mean error ~ 1%. Might be failing due to the RoPE impl
+            # mismatches? 
             torch.testing.assert_close(out_hf.logits, out, atol=1e-1, rtol=1e-1)
 
     def test_dev_cfg(self):
