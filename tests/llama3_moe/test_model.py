@@ -6,7 +6,11 @@
 
 import torch
 
-from torchtitan.models.llama3_moe import Transformer, TransformerModelArgs
+from torchtitan.models.llama3_moe import (
+    llama3_moe_configs,
+    Transformer,
+    TransformerModelArgs,
+)
 
 
 class TestModel:
@@ -56,3 +60,9 @@ class TestModel:
             self.vocab_size, size=(self.bsz, self.seqlen), device=self.device
         )
         model(inputs)
+
+    def test_dev_cfg(self):
+        dev_cfg = llama3_moe_configs["3B_dev|n_layers=8|n_moe=4|num_experts=3"]
+        assert dev_cfg.n_layers == 8
+        assert dev_cfg.moe_args.num_experts == 3
+        assert dev_cfg.is_moe_list == 4 * [False] + 4 * [True]
