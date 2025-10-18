@@ -10,7 +10,6 @@ from warnings import warn
 
 import torch.distributed as dist
 
-from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
@@ -78,7 +77,6 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
                     self.from_hf_map[
                         f"model.layers.{layer_idx}.{hf_name}.weight"
                     ] = f"layers.{layer_idx}.{titan_name}.weight"
-            dist_utils.rank_zero_print(f"{self.from_hf_map=}")
 
     # HuggingFace permutation function (exact copy from their conversion script)
     def _permute(self, w, n_heads_arg, dim1=None, dim2=None):
