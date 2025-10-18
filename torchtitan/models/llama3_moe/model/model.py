@@ -20,6 +20,9 @@ from torchtitan.protocols.train_spec import ModelProtocol
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
+# NOTE: @goon - this was taken from DSv3 and was used for our 70B Llama context extension, but
+# actual Llama3 uses a different RoPE function that was only properly added to titan after we
+# started this work: https://github.com/pytorch/torchtitan/pull/1839
 def precompute_freqs_cis(
     dim: int,
     seq_len: int,
