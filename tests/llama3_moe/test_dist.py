@@ -15,14 +15,14 @@ from torchtitan.components.checkpoint import CheckpointManager, ModelWrapper
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.llama3_moe import (
     CustomCheckpointManager,
-    get_hf_weight_transform_cls,
-    llama3_moe_configs,
+    JobConfig,
     Llama3MoEStateDictAdapter,
-    parallelize_llama_moe,
     Transformer,
     TransformingHuggingFaceStorageReader,
+    get_hf_weight_transform_cls,
+    llama3_moe_configs,
+    parallelize_llama_moe,
 )
-from torchtitan.models.llama3_moe.custom_args import JobConfig
 from torchtitan.models.moe import MoEArgs
 
 
@@ -63,11 +63,9 @@ class TestHFReader(DTest):
         model_copy = parallelize_llama_moe(model_copy, parallel_dims, job_config)
 
         model.to_empty(device=self.device)
-        with torch.no_grad():
-            model.init_weights(buffer_device=None)
-
         model_copy.to_empty(device=self.device)
         with torch.no_grad():
+            model.init_weights(buffer_device=None)
             model_copy.init_weights(buffer_device=None)
 
         ckpt_kwargs = {
