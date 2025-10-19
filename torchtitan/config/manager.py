@@ -160,6 +160,7 @@ class ConfigManager:
             return data
 
         valid_fields = set(f.name for f in fields(cls))
+        print(f"{valid_fields =}")
         if invalid_fields := set(data) - valid_fields:
             raise ValueError(
                 f"Invalid field names in {cls} data: {invalid_fields}.\n"
