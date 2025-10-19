@@ -10,12 +10,25 @@ from torchtitan.config.job_config import JobConfig
 
 
 @dataclass
-class CustomArgs:
+class Llama3MoECustomArgs:
+    """
+    Catch-all, misc. cfg.
+    """
+
     load_balance_coeff: float | None = None
     hf_weight_transform: str = "replicate"
     hf_ffn_hidden_dim: int | None = None
 
 
 @dataclass
-class JobConfig(JobConfig):
-    custom_args: CustomArgs = field(default_factory=CustomArgs)
+class TopKSchedulerArgs:
+    name: str = "no_op"
+    min_top_k: int | None = None
+    step_interval: int | None = None
+    warmup_steps: int | None = None
+
+
+@dataclass
+class Llama3MoEJobConfig(JobConfig):
+    custom_args: Llama3MoECustomArgs = field(default_factory=Llama3MoECustomArgs)
+    top_k_args: TopKSchedulerArgs = field(default_factory=TopKSchedulerArgs)

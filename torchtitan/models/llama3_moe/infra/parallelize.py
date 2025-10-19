@@ -16,7 +16,7 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
@@ -26,8 +26,8 @@ from torchtitan.experiments.llama4.infra.parallelize import (
     apply_moe_ep_tp,
 )
 from torchtitan.models.llama3.infra.parallelize import apply_ddp
+from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
 from torchtitan.tools.logging import logger
-
 
 # for selective op activation checkpointing
 _op_sac_save_list = {
@@ -46,11 +46,12 @@ _op_sac_save_list = {
 
 # Adapted from deepseek_v3/infra/parallelize.py
 
+
 # TODO: @goon - check whas is different here, just import if possible
 def parallelize_llama_moe(
     model: nn.Module,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    job_config: Llama3MoEJobConfig,
 ):
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data

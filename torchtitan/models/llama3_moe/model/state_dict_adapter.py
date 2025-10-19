@@ -4,23 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import logging
 from typing import Any
-from warnings import warn
 
-import torch.distributed as dist
-
-from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
+from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
-
-logger = logging.getLogger()
+from torchtitan.tools.logging import logger, warn_once
 
 
 # Modified from Llama3StateDictAdapter
 class Llama3MoEStateDictAdapter(StateDictAdapter):
     def __init__(
         self,
-        model_args: TransformerModelArgs,
+        model_args: Llama3MoEModelArgs,
         hf_assets_path: str | None,
     ):
         super().__init__(model_args, hf_assets_path)
@@ -129,8 +124,9 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
                 # model's weights, e.g. if testing out with fewer layers than actually exist in the
                 # real model.
                 if key not in to_hf_map:
-                    warn(
-                        f"[rank={dist.get_rank()}]: {key=} not found in {list(to_hf_map)=}. Skipping."
+                    warn_once(
+                        logger,
+                        f"{key=} not found in {list(to_hf_map)=}. Skipping.",
                     )
                     continue
                 else:

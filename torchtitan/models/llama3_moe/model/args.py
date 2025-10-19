@@ -19,7 +19,7 @@ from torchtitan.tools.logging import logger
 
 
 @dataclass
-class TransformerModelArgs(BaseModelArgs):
+class Llama3MoEModelArgs(BaseModelArgs):
     dim: int = 4096
     moe_inter_dim: int = 14336
     n_layers: int = 32

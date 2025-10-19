@@ -14,7 +14,7 @@ from einops import rearrange
 from torch import nn
 
 from torchtitan.models.llama3.model.model import Attention, FeedForward
-from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
+from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs
 from torchtitan.models.moe import MoE, MoEArgs
 from torchtitan.protocols.train_spec import ModelProtocol
 
@@ -302,14 +302,18 @@ class VirtualGroupMoE(_CustomMoE):
         self.n_replicas, remainder = divmod(self.moe_args.num_experts, self.n_groups)
         if remainder:
             raise ValueError(
-                f"{self.moe_args.num_experts=} must be divisible by {self.hidden_dim // self.moe_args.hf_ffn_hidden_dim=}"
+                f"{self.moe_args.num_experts=} must be divisible by {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
             )
         if self.moe_args.route_scale != self.n_groups:
             raise ValueError(
-                f"{self.moe_args.route_scale=} must be divisible by {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
+                f"{self.moe_args.route_scale=} must equal {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
             )
         if not self.moe_args.route_norm:
             raise ValueError(f"{self.moe_args.route_norm=} must be True")
+        if self.moe_args.top_k % self.n_groups:
+            raise ValueError(
+                f"{self.moe_args.top_k=} must be divisible by {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
+            )
 
     def init_weights(
         self,
@@ -355,13 +359,13 @@ def get_moe_impl_cls(name: str | None = None) -> type[MoE]:
     return moe_map[name]
 
 
-class TransformerBlock(nn.Module):
+class Llama3MoEBlock(nn.Module):
     """
-    TransformerBlock Module
+    Llama3MoEBlock Module
 
     Args:
         layer_id (int): Identifier for the layer.
-        model_args (TransformerModelArgs): Model configuration arguments.
+        model_args (Llama3MoEModelArgs): Model configuration arguments.
 
     Attributes:
         n_heads (int): Number of attention heads.
@@ -375,7 +379,7 @@ class TransformerBlock(nn.Module):
 
     """
 
-    def __init__(self, layer_id: int, model_args: TransformerModelArgs, is_moe: bool):
+    def __init__(self, layer_id: int, model_args: Llama3MoEModelArgs, is_moe: bool):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
@@ -413,7 +417,7 @@ class TransformerBlock(nn.Module):
         freqs_cis: torch.Tensor,
     ):
         """
-        Perform a forward pass through the TransformerBlock.
+        Perform a forward pass through the Llama3MoEBlock.
 
         Args:
             x (torch.Tensor): Input tensor.
@@ -441,26 +445,26 @@ class TransformerBlock(nn.Module):
             self.feed_forward.init_weights(self.weight_init_std)
 
 
-class Transformer(nn.Module, ModelProtocol):
+class Llama3MoE(nn.Module, ModelProtocol):
     """
-    Transformer Module
+    Llama3MoE Module
 
     Args:
-        model_args (TransformerModelArgs): Model configuration arguments.
+        model_args (Llama3MoEModelArgs): Model configuration arguments.
 
     Attributes:
-        model_args (TransformerModelArgs): Model configuration arguments.
+        model_args (Llama3MoEModelArgs): Model configuration arguments.
         vocab_size (int): Vocabulary size.
         n_layers (int): Number of layers in the model.
         tok_embeddings (ParallelEmbedding): Token embeddings.
-        layers (torch.nn.ModuleList): List of Transformer blocks.
+        layers (torch.nn.ModuleList): List of Llama3MoE blocks.
         norm (RMSNorm): Layer normalization for the model output.
         output (Linear): Linear layer for final output.
         freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
 
     """
 
-    def __init__(self, model_args: TransformerModelArgs):
+    def __init__(self, model_args: Llama3MoEModelArgs):
         super().__init__()
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
@@ -478,7 +482,7 @@ class Transformer(nn.Module, ModelProtocol):
             False for _ in range(model_args.n_layers)
         ]
         for layer_id, is_moe in enumerate(is_moe_list):
-            self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args, is_moe)
+            self.layers[str(layer_id)] = Llama3MoEBlock(layer_id, model_args, is_moe)
         self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.output = nn.Linear(
             model_args.dim,
@@ -500,7 +504,7 @@ class Transformer(nn.Module, ModelProtocol):
         Separately, users may want custom initialization for their modules,
         different from that in ``reset_parameters``. For this, we define
         ``init_weights``. We only call it in the constructor of this
-        ``Transformer`` root module to avoid reinitializing tensors.
+        ``Llama3MoE`` root module to avoid reinitializing tensors.
         """
         buffer_device = buffer_device or self.freqs_cis.device
         with torch.device(buffer_device):
@@ -540,7 +544,7 @@ class Transformer(nn.Module, ModelProtocol):
         input_batch: torch.Tensor | None = None,
     ):
         """
-        Perform a forward pass through the Transformer model.
+        Perform a forward pass through the Llama3MoE model.
 
         Args:
             tokens (torch.Tensor): Input token indices if pipeline parallelism is not enabled.
@@ -553,7 +557,7 @@ class Transformer(nn.Module, ModelProtocol):
                 masking attention (to analyze the boundary of the document).
 
         Returns:
-            torch.Tensor: Output logits after applying the Transformer model.
+            torch.Tensor: Output logits after applying the Llama3MoE model.
 
         """
 

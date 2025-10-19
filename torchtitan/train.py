@@ -23,14 +23,16 @@ from torchtitan.components.metrics import (
     ensure_pp_loss_visible,
 )
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
+from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.models.attention import init_attention_mask
 from torchtitan.models.llama3_moe import (
     CustomCheckpointManager,
     get_hf_weight_transform_cls,
-    JobConfig,
     TransformingHuggingFaceStorageReader,
 )
+from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
+from torchtitan.models.llama3_moe.top_k_scheduler import get_top_k_scheduler
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -322,6 +324,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             if self.train_spec.state_dict_adapter
             else None
         )
+
+        states = {"train_state": self}
+        self.top_k_scheduler = (
+            get_top_k_scheduler(
+                model_args=model_args,
+                top_k_args=job_config.top_k_args,
+                model_parts=self.model_parts,
+            )
+            if isinstance(job_config, Llama3MoEJobConfig)
+            else None
+        )
+        if self.top_k_scheduler is not None:
+            states["self.top_k_scheduler"] = self.top_k_scheduler
         self.checkpointer = CustomCheckpointManager(
             hf_storage_reader=TransformingHuggingFaceStorageReader,
             hf_storage_reader_kwargs={
@@ -338,7 +353,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            states={"train_state": self},
+            states=states,
             checkpoint_config=job_config.checkpoint,
             sd_adapter=sd_adapter,
             base_folder=job_config.job.dump_folder,
@@ -531,6 +546,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Reduce the data collected over gradient accumulation steps.
         loss = torch.sum(torch.stack(accumulated_losses))
 
+        # NOTE: @goon - we're now reducing the loss every step because we want the top_k_scheduler to see the
+        # same loss on every rank, which is sub-optimal for perf.
+        if parallel_dims.dp_cp_enabled:
+            loss = loss.detach()
+            ft_pg = self.ft_manager.loss_sync_pg
+            global_avg_loss = dist_utils.dist_mean(
+                loss, parallel_dims.world_mesh["dp_cp"], ft_pg
+            )
+        else:
+            global_avg_loss = global_max_loss = loss.detach().item()
+
+        if self.top_k_scheduler is not None:
+            self.top_k_scheduler.step(global_avg_loss)
+
         # log metrics
         if not self.metrics_processor.should_log(self.step):
             return
@@ -538,8 +567,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
             ft_pg = self.ft_manager.loss_sync_pg
-            global_avg_loss, global_max_loss, global_ntokens_seen = (
-                dist_utils.dist_mean(loss, parallel_dims.world_mesh["dp_cp"], ft_pg),
+            global_max_loss, global_ntokens_seen = (
                 dist_utils.dist_max(loss, parallel_dims.world_mesh["dp_cp"], ft_pg),
                 dist_utils.dist_sum(
                     torch.tensor(
@@ -550,7 +578,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 ),
             )
         else:
-            global_avg_loss = global_max_loss = loss.detach().item()
             global_ntokens_seen = self.ntokens_seen
 
         extra_metrics = {
@@ -670,7 +697,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
 if __name__ == "__main__":
     init_logger()
-    config_manager = ConfigManager()
+    # NOTE: @goon - specifying our custom class as the config_cls allows us to specify all
+    # Llama3MoEJobConfig fields we add via cli/toml cfg.
+    config_manager = ConfigManager(config_cls=Llama3MoEJobConfig)
     config = config_manager.parse_args()
     trainer: Optional[Trainer] = None
 
