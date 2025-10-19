@@ -128,7 +128,7 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
                 if key not in to_hf_map:
                     warn_once(
                         logger,
-                        f"[rank={dist.get_rank()}]: {key=} not found in {list(to_hf_map)=}. Skipping.",
+                        f"{key=} not found in {list(to_hf_map)=}. Skipping.",
                     )
                     continue
                 else:

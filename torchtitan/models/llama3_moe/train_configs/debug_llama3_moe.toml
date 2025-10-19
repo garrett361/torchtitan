@@ -1,6 +1,7 @@
-# We define a custom Llama3MoEJobConfig class with an addition catch-all custom_args field
-[experimental]
-custom_args_module = "torchtitan.models.llama3_moe.custom_args"
+[custom_args]
+load_balance_coeff = 1e-4
+hf_weight_transform = "replicate"
+hf_ffn_hidden_dim=8192
 
 [top_k_args]
 name = "no_op"
