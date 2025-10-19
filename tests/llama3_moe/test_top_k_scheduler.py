@@ -27,7 +27,7 @@ class TestModel:
     bsz = 2
     seqlen = 64
     top_k = 8
-    moe_args = MoEArgs(top_k=top_k)
+    moe_args = MoEArgs(top_k=top_k, num_shared_experts=0)
     model_args = Llama3MoEModelArgs(
         dim=dim,
         moe_inter_dim=moe_inter_dim,
