@@ -76,7 +76,9 @@ class TestModel:
 
         # Reduce the top_k once
         assert top_k_scheduler._step == warmup_steps + step_interval
-        assert top_k_scheduler.layer_idx_to_top_k[str(self.n_layers - 1)] == self.top_k - 1
+        assert (
+            top_k_scheduler.layer_idx_to_top_k[str(self.n_layers - 1)] == self.top_k - 1
+        )
         for layer_idx, top_k in top_k_scheduler.layer_idx_to_top_k.items():
             moe = model.layers[str(layer_idx)].moe
             assert moe.router.top_k == top_k
