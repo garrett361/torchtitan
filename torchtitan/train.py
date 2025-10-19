@@ -328,7 +328,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         states = {"train_state": self}
         top_k_scheduler = (
-            get_top_k_scheduler(job_config, self.model_parts)
+            get_top_k_scheduler(
+                model_args=model_args,
+                top_k_args=job_config.top_k_args,
+                model_parts=self.model_parts,
+            )
             if isinstance(job_config, Llama3MoEJobConfig)
             else None
         )

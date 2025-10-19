@@ -10,7 +10,10 @@ from typing import Any
 import torch
 from torch.distributed.checkpoint.stateful import Stateful
 
-from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
+from torchtitan.models.llama3_moe.custom_args import (
+    TopKSchedulerArgs,
+)
+from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs
 from torchtitan.models.moe import MoE
 from torchtitan.tools.logging import logger
 
@@ -18,32 +21,31 @@ from torchtitan.tools.logging import logger
 class _TopKScheduler(Stateful, ABC):
     def __init__(
         self,
-        job_config: Llama3MoEJobConfig,
+        model_args: Llama3MoEModelArgs,
+        top_k_args: TopKSchedulerArgs,
         model_parts: list[torch.nn.Module],
     ) -> None:
-        self.job_config = job_config
+        self.model_args = model_args
+        self.top_k_args = top_k_args
         self.model_parts = model_parts
         self._step = 0
-        if job_config.model.is_moe_list is None:
+        if self.model_args.is_moe_list is None:
             self.layer_idx_to_top_k: dict[int, int] = {}
         else:
             self.layer_idx_to_top_k: dict[int, int] = {
-                layer_idx: job_config.model.moe_args.top_k
-                for layer_idx, val in enumerate(job_config.model.is_moe_list)
+                layer_idx: self.model_args.moe_args.top_k
+                for layer_idx, val in enumerate(self.model_args.is_moe_list)
                 if val
             }
 
     @abstractmethod
-    def state_dict(self) -> dict[str, Any]:
-        ...
+    def state_dict(self) -> dict[str, Any]: ...
 
     @abstractmethod
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        ...
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None: ...
 
     @abstractmethod
-    def step(self, loss: torch.Tensor) -> None:
-        ...
+    def step(self, loss: torch.Tensor) -> None: ...
 
 
 class NoOpScheduler(_TopKScheduler):
@@ -64,11 +66,13 @@ class ConstantScheduler(_TopKScheduler):
 
     def __init__(
         self,
-        job_config: Llama3MoEJobConfig,
+        model_args: Llama3MoEModelArgs,
+        top_k_args: TopKSchedulerArgs,
         model_parts: list[torch.nn.Module],
     ) -> None:
-        super().__init__(job_config=job_config, model_parts=model_parts)
-        self.top_k_args = job_config.top_k_args
+        super().__init__(
+            model_args=model_args, top_k_args=top_k_args, model_parts=model_parts
+        )
         assert self.top_k_args.min_top_k is not None
         assert self.top_k_args.step_interval is not None
         assert self.top_k_args.warmup_steps is not None
@@ -115,10 +119,13 @@ class ConstantScheduler(_TopKScheduler):
 
 
 def get_top_k_scheduler(
-    job_config: Llama3MoEJobConfig, model_parts: list[torch.nn.Module]
+    model_args: Llama3MoEModelArgs,
+    top_k_args: TopKSchedulerArgs,
+    model_parts: list[torch.nn.Module],
 ) -> type[_TopKScheduler]:
-    top_k_args = job_config.top_k_args
     scheduler_dict = {
         sc.name: sc for sc in _TopKScheduler.__subclasses__() if hasattr(sc, "name")
     }
-    return scheduler_dict[top_k_args.name](job_config, model_parts)
+    return scheduler_dict[top_k_args.name](
+        model_args=model_args, top_k_args=top_k_args, model_parts=model_parts
+    )
