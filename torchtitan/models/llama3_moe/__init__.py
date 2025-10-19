@@ -19,14 +19,14 @@ from torchtitan.models.llama3_moe.custom_args import (
     TopKSchedulerArgs,
 )
 from torchtitan.models.llama3_moe.hf_reader import (
-    get_hf_weight_transform_cls,
     ReplicateMoETransform,
     TransformingHuggingFaceStorageReader,
+    get_hf_weight_transform_cls,
 )
 from torchtitan.models.llama3_moe.infra.parallelize import parallelize_llama_moe
 from torchtitan.models.llama3_moe.metrics import (
-    build_custom_metrics_processor,
     CustomMetricsProcessor,
+    build_custom_metrics_processor,
 )
 from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs
 from torchtitan.models.llama3_moe.model.model import Llama3MoE, VirtualGroupMoE
@@ -80,23 +80,22 @@ DEV_CFG_3B = Llama3MoEModelArgs(
     custom_moe_impl="virtual_group",  # Must specify for virtual_group router init!
 )
 
+dev_cfg_map = {"3B_dev": DEV_CFG_3B}
+
 
 class devdict(dict):  # noqa: N801
     """
     Hacky dict which lets us generate model configs dynamically.
 
-    Usage: key "3B_moe|num_experts=32|top_k=4|n_moe=8"
+    Usage: key "3B_dev|num_experts=32|top_k=4|n_moe=8"
     """
 
     def __missing__(self, key: str) -> Llama3MoEModelArgs:
         # Just supporting (str, int | float) pairs for now
-        dev_key = "3B_dev"
-        if not key.startswith(dev_key):
-            raise ValueError(f"devdict {key=} must start with {dev_key}")
-        key = key.replace(dev_key + "|", "")
-        cfg = deepcopy(DEV_CFG_3B)
+        split_key = key.split("|")
+        cfg = deepcopy(dev_cfg_map[split_key.pop(0)])
         dev_kwargs = {}
-        for pair in key.split("|"):
+        for pair in split_key:
             k, v = pair.split("=")
             dev_kwargs[k] = eval(v)
         for k in list(dev_kwargs):

@@ -310,7 +310,7 @@ class VirtualGroupMoE(_CustomMoE):
             )
         if not self.moe_args.route_norm:
             raise ValueError(f"{self.moe_args.route_norm=} must be True")
-        if (self.moe_args.top_k % self.n_groups) != 0:
+        if self.moe_args.top_k % self.n_groups:
             raise ValueError(
                 f"{self.moe_args.top_k=} must be divisible by {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
             )
