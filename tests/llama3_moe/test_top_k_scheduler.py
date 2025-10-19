@@ -47,7 +47,7 @@ class TestModel:
         top_k_scheduler = get_top_k_scheduler(
             job_config=job_config, model_parts=[model]
         )
-        top_k_scheduler.step(torch.empty(1))
+        top_k_scheduler.step(0.0)
         top_k_scheduler.state_dict()
         top_k_scheduler.load_state_dict({})
 
@@ -70,7 +70,7 @@ class TestModel:
         )
         assert top_k_scheduler._step == 0
 
-        loss = torch.empty(1)
+        loss = 0.0
         for _ in range(warmup_steps + step_interval):
             top_k_scheduler.step(loss)
 
