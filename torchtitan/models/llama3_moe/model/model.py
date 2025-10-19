@@ -302,14 +302,18 @@ class VirtualGroupMoE(_CustomMoE):
         self.n_replicas, remainder = divmod(self.moe_args.num_experts, self.n_groups)
         if remainder:
             raise ValueError(
-                f"{self.moe_args.num_experts=} must be divisible by {self.hidden_dim // self.moe_args.hf_ffn_hidden_dim=}"
+                f"{self.moe_args.num_experts=} must be divisible by {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
             )
         if self.moe_args.route_scale != self.n_groups:
             raise ValueError(
-                f"{self.moe_args.route_scale=} must be divisible by {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
+                f"{self.moe_args.route_scale=} must equal {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
             )
         if not self.moe_args.route_norm:
             raise ValueError(f"{self.moe_args.route_norm=} must be True")
+        if (self.moe_args.top_k % self.n_groups) != 0:
+            raise ValueError(
+                f"{self.moe_args.top_k=} must be divisible by {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
+            )
 
     def init_weights(
         self,
