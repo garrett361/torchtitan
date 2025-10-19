@@ -697,6 +697,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
 if __name__ == "__main__":
     init_logger()
+    # NOTE: @goon - specifying our custom class as the config_cls allows us to specify all
+    # Llama3MoEJobConfig fields we add via cli/toml cfg.
     config_manager = ConfigManager(config_cls=Llama3MoEJobConfig)
     config = config_manager.parse_args()
     trainer: Optional[Trainer] = None
