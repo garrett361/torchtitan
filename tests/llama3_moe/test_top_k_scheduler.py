@@ -104,4 +104,3 @@ class TestModel:
                 assert module.reorderer.top_k == min_top_k
 
         top_k_scheduler.load_state_dict(sd)
-        top_k_scheduler
