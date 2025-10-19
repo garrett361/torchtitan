@@ -16,11 +16,11 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.models.llama3_moe import (
     CustomCheckpointManager,
     get_hf_weight_transform_cls,
-    Llama3MoEJobConfig,
     llama3_moe_configs,
+    Llama3MoE,
+    Llama3MoEJobConfig,
     Llama3MoEStateDictAdapter,
     parallelize_llama_moe,
-    Llama3MoE,
     TransformingHuggingFaceStorageReader,
 )
 from torchtitan.models.moe import MoEArgs

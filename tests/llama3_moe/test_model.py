@@ -9,11 +9,11 @@ import torch
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.models.llama3_moe import (
-    Llama3MoEJobConfig,
     llama3_moe_configs,
-    Llama3MoEStateDictAdapter,
     Llama3MoE,
+    Llama3MoEJobConfig,
     Llama3MoEModelArgs,
+    Llama3MoEStateDictAdapter,
 )
 from transformers import AutoModelForCausalLM
 

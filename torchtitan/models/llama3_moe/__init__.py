@@ -19,14 +19,14 @@ from torchtitan.models.llama3_moe.custom_args import (
     TopKSchedulerArgs,
 )
 from torchtitan.models.llama3_moe.hf_reader import (
+    get_hf_weight_transform_cls,
     ReplicateMoETransform,
     TransformingHuggingFaceStorageReader,
-    get_hf_weight_transform_cls,
 )
 from torchtitan.models.llama3_moe.infra.parallelize import parallelize_llama_moe
 from torchtitan.models.llama3_moe.metrics import (
-    CustomMetricsProcessor,
     build_custom_metrics_processor,
+    CustomMetricsProcessor,
 )
 from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs
 from torchtitan.models.llama3_moe.model.model import Llama3MoE, VirtualGroupMoE

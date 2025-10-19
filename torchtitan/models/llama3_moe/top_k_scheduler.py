@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -28,13 +34,16 @@ class _TopKScheduler(Stateful, ABC):
             }
 
     @abstractmethod
-    def state_dict(self) -> dict[str, Any]: ...
+    def state_dict(self) -> dict[str, Any]:
+        ...
 
     @abstractmethod
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None: ...
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        ...
 
     @abstractmethod
-    def step(self, loss: torch.Tensor) -> None: ...
+    def step(self, loss: torch.Tensor) -> None:
+        ...
 
 
 class NoOpScheduler(_TopKScheduler):
