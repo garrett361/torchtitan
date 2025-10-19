@@ -76,9 +76,11 @@ class Llama3MoEModelArgs(BaseModelArgs):
                 setattr(self.moe_args, k, v)
         # Special arg handling:
         if n_moe_layers := job_config.model_overrides.n_moe_layers is not None:
+            print(f"Using {n_moe_layers=}")
             self.is_moe_list = (self.n_layers - n_moe_layers) * [
                 False
             ] + n_moe_layers * [True]
+            print(f"Using {self.is_moe_list=}")
 
         if self.is_moe_list is not None and len(self.is_moe_list) != self.n_layers:
             raise ValueError(
