@@ -37,13 +37,16 @@ class _TopKScheduler(Stateful, ABC):
             }
 
     @abstractmethod
-    def state_dict(self) -> dict[str, Any]: ...
+    def state_dict(self) -> dict[str, Any]:
+        ...
 
     @abstractmethod
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None: ...
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        ...
 
     @abstractmethod
-    def step(self, loss: float) -> None: ...
+    def step(self, loss: float) -> None:
+        ...
 
 
 class NoOpScheduler(_TopKScheduler):
