@@ -27,11 +27,14 @@ class _TopKScheduler(Stateful, ABC):
         self.top_k_args = top_k_args
         self.model_parts = model_parts
         self._step = 0
+        # NOTE: @goon - self.layer_idx_to_top_k will get saved as part of the state dict and it is
+        # apparently crucial that its keys be strs. Loading errors if they're ints, which seems like
+        # a bug.
         if self.model_args.is_moe_list is None:
-            self.layer_idx_to_top_k: dict[int, int] = {}
+            self.layer_idx_to_top_k: dict[str, int] = {}
         else:
-            self.layer_idx_to_top_k: dict[int, int] = {
-                layer_idx: self.model_args.moe_args.top_k
+            self.layer_idx_to_top_k: dict[str, int] = {
+                str(layer_idx): self.model_args.moe_args.top_k
                 for layer_idx, val in enumerate(self.model_args.is_moe_list)
                 if val
             }
@@ -79,7 +82,8 @@ class ConstantScheduler(_TopKScheduler):
         assert self.top_k_args.warmup_steps is not None
 
     def state_dict(self) -> dict[str, Any]:
-        return {"_step": self._step, "layer_idx_to_top_k": self.layer_idx_to_top_k}
+        state = {"_step": self._step, "layer_idx_to_top_k": self.layer_idx_to_top_k}
+        return state
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         for k, v in state_dict.items():
