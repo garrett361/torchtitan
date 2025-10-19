@@ -2,6 +2,9 @@
 [experimental]
 custom_args_module = "torchtitan.models.llama3_moe.custom_args"
 
+[top_k_args]
+name = "no_op"
+
 [job]
 dump_folder = "./outputs"
 description = "Llama-3-MoE debug model"
