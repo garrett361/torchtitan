@@ -6,16 +6,16 @@
 
 import math
 from functools import cache, cached_property
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
 
-from torchtitan.components.metrics import _get_metrics_rank, MetricsProcessor
-from torchtitan.config import JobConfig
+from torchtitan.components.metrics import MetricsProcessor, _get_metrics_rank
 from torchtitan.distributed import ParallelDims
+from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
 
 if TYPE_CHECKING:
     from torchtitan.protocols import BaseModelArgs
@@ -238,9 +238,9 @@ class CustomMetricsProcessor(MetricsProcessor):
             for metric_name, metric_val in zip(
                 mem_stat_prefixes, mem_t.tolist(), strict=True
             ):
-                pp_mem_metrics[
-                    metric_name + f" pp mesh rank {pp_mesh_rank}"
-                ] = metric_val
+                pp_mem_metrics[metric_name + f" pp mesh rank {pp_mesh_rank}"] = (
+                    metric_val
+                )
         return pp_mem_metrics
 
     def log(
@@ -268,7 +268,7 @@ class CustomMetricsProcessor(MetricsProcessor):
 
 
 def build_custom_metrics_processor(
-    job_config: JobConfig,
+    job_config: Llama3MoEJobConfig,
     parallel_dims: ParallelDims,
     model_args: "BaseModelArgs | None" = None,
     tag: str | None = None,
@@ -276,7 +276,7 @@ def build_custom_metrics_processor(
     """Create a metrics processor.
 
     Args:
-        job_config (JobConfig): Job configuration.
+        job_config (Llama3MoEJobConfig): Job configuration.
         parallel_dims (ParallelDims): Parallel dimensions.
         model_args (BaseModelArgs | None): Model-specific arguments. Defaults to None.
         tag (str | None): Tag to use for TensorBoard or WandB. Defaults to None.

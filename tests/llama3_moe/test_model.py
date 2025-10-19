@@ -9,11 +9,11 @@ import torch
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.models.llama3_moe import (
-    JobConfig,
+    Llama3MoEJobConfig,
     llama3_moe_configs,
     Llama3MoEStateDictAdapter,
-    Transformer,
-    TransformerModelArgs,
+    Llama3MoE,
+    Llama3MoEModelArgs,
 )
 from transformers import AutoModelForCausalLM
 
@@ -32,7 +32,7 @@ class TestModel:
     hf_assets_path = "/gpfs/goon/models/Llama-3.2-3B-no-tied-weights/"
 
     def test_model_no_moe(self):
-        args = TransformerModelArgs(
+        args = Llama3MoEModelArgs(
             dim=self.dim,
             moe_inter_dim=self.moe_inter_dim,
             n_layers=self.n_layers,
@@ -40,7 +40,7 @@ class TestModel:
             vocab_size=self.vocab_size,
             is_moe_list=None,
         )
-        model = Transformer(args)
+        model = Llama3MoE(args)
         model.init_weights()
         model.to(self.device)
         inputs = torch.randint(
@@ -51,7 +51,7 @@ class TestModel:
     def test_model_all_moe(self):
         # NOTE: @goon - testing requires cuda, as the histogram op used in the current router impl
         # is not supported on CPU, apparently.
-        args = TransformerModelArgs(
+        args = Llama3MoEModelArgs(
             dim=self.dim,
             moe_inter_dim=self.moe_inter_dim,
             n_layers=self.n_layers,
@@ -59,7 +59,7 @@ class TestModel:
             vocab_size=self.vocab_size,
             is_moe_list=[True for _ in range(self.n_layers)],
         )
-        model = Transformer(args)
+        model = Llama3MoE(args)
         model.init_weights()
         model.to(self.device)
         inputs = torch.randint(
@@ -69,12 +69,12 @@ class TestModel:
 
     def test_hf_equivalence(self) -> None:
         model_args = llama3_moe_configs["3B"]
-        job_config = JobConfig()
+        job_config = Llama3MoEJobConfig()
         job_config.checkpoint.enable = True
         job_config.checkpoint.initial_load_in_hf = True
         job_config.model.hf_assets_path = self.hf_assets_path
         with torch.device("meta"):
-            model = Transformer(model_args)
+            model = Llama3MoE(model_args)
 
         model.to_empty(device=self.device)
         with torch.no_grad():

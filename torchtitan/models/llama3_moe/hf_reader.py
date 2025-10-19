@@ -28,7 +28,7 @@ from torch.distributed.checkpoint.metadata import (
 )
 from torch.distributed.checkpoint.planner import LoadPlanner, ReadItem
 
-from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
+from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 
@@ -182,7 +182,7 @@ class _HFWeightTransform(ABC):
     name: str | None = None
 
     def __init__(
-        self, model_args: TransformerModelArgs, hf_to_titan_fqn_map: dict[str, str]
+        self, model_args: Llama3MoEModelArgs, hf_to_titan_fqn_map: dict[str, str]
     ) -> None:
         self.hf_to_titan_fqn_map = hf_to_titan_fqn_map
         self.model_args = model_args

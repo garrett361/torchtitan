@@ -16,11 +16,11 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.models.llama3_moe import (
     CustomCheckpointManager,
     get_hf_weight_transform_cls,
-    JobConfig,
+    Llama3MoEJobConfig,
     llama3_moe_configs,
     Llama3MoEStateDictAdapter,
     parallelize_llama_moe,
-    Transformer,
+    Llama3MoE,
     TransformingHuggingFaceStorageReader,
 )
 from torchtitan.models.moe import MoEArgs
@@ -40,12 +40,12 @@ class TestHFReader(DTest):
         Test e2e equivlance on the full 3B model.
         """
         model_args = llama3_moe_configs["3B"]
-        job_config = JobConfig()
+        job_config = Llama3MoEJobConfig()
         job_config.checkpoint.enable = True
         job_config.checkpoint.initial_load_in_hf = True
         job_config.model.hf_assets_path = self.hf_assets_path
         with torch.device("meta"):
-            model = Transformer(model_args)
+            model = Llama3MoE(model_args)
         model_copy = deepcopy(model)
 
         parallel_dims = ParallelDims(
@@ -102,12 +102,12 @@ class TestHFReader(DTest):
         layers.
         """
         model_args = llama3_moe_configs["3B_2layer"]
-        job_config = JobConfig()
+        job_config = Llama3MoEJobConfig()
         job_config.checkpoint.enable = True
         job_config.checkpoint.initial_load_in_hf = True
         job_config.model.hf_assets_path = self.hf_assets_path
         with torch.device("meta"):
-            model = Transformer(model_args)
+            model = Llama3MoE(model_args)
         model_copy = deepcopy(model)
 
         parallel_dims = ParallelDims(
@@ -167,14 +167,14 @@ class TestHFReader(DTest):
         """
         model_args = llama3_moe_configs["3B_2layer"]
         model_args_moe = llama3_moe_configs["3B_2layer_halfmoe"]
-        job_config = JobConfig()
+        job_config = Llama3MoEJobConfig()
         job_config.checkpoint.enable = True
         job_config.checkpoint.initial_load_in_hf = True
         job_config.model.hf_assets_path = self.hf_assets_path
 
         with torch.device("meta"):
-            model = Transformer(model_args)
-            model_moe = Transformer(model_args_moe)
+            model = Llama3MoE(model_args)
+            model_moe = Llama3MoE(model_args_moe)
 
         parallel_dims = ParallelDims(
             dp_shard=-1,
@@ -270,7 +270,7 @@ class TestImpls(DTest):
         """
         model_args = llama3_moe_configs["3B_2layer"]
         model_args_moe = llama3_moe_configs["3B_2layer_halfmoe"]
-        job_config = JobConfig()
+        job_config = Llama3MoEJobConfig()
         job_config.checkpoint.enable = True
         job_config.checkpoint.initial_load_in_hf = True
         job_config.model.hf_assets_path = self.hf_assets_path
@@ -283,8 +283,8 @@ class TestImpls(DTest):
         assert model_args_moe.custom_moe_impl is None
 
         with torch.device("meta"):
-            model = Transformer(model_args)
-            model_moe = Transformer(model_args_moe)
+            model = Llama3MoE(model_args)
+            model_moe = Llama3MoE(model_args_moe)
 
         parallel_dims = ParallelDims(
             dp_shard=-1,
@@ -376,7 +376,7 @@ class TestImpls(DTest):
         model_args_moe.is_moe_list = [False, True]
         model_args_moe.custom_moe_impl = "virtual_group"
 
-        job_config = JobConfig()
+        job_config = Llama3MoEJobConfig()
         job_config.checkpoint.enable = True
         job_config.checkpoint.initial_load_in_hf = True
         job_config.model.hf_assets_path = self.hf_assets_path
@@ -390,8 +390,8 @@ class TestImpls(DTest):
         assert model_args_moe.custom_moe_impl == "virtual_group"
 
         with torch.device("meta"):
-            model = Transformer(model_args)
-            model_moe = Transformer(model_args_moe)
+            model = Llama3MoE(model_args)
+            model_moe = Llama3MoE(model_args_moe)
 
         parallel_dims = ParallelDims(
             dp_shard=-1,

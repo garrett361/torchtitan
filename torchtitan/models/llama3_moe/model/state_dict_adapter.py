@@ -6,12 +6,12 @@
 
 import logging
 from typing import Any
-from warnings import warn
 
 import torch.distributed as dist
 
-from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
+from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+from torchtitan.tools.logging import warn_once
 
 logger = logging.getLogger()
 
@@ -20,7 +20,7 @@ logger = logging.getLogger()
 class Llama3MoEStateDictAdapter(StateDictAdapter):
     def __init__(
         self,
-        model_args: TransformerModelArgs,
+        model_args: Llama3MoEModelArgs,
         hf_assets_path: str | None,
     ):
         super().__init__(model_args, hf_assets_path)
@@ -57,9 +57,9 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
             self.from_hf_map[
                 f"model.layers.{layer_idx}.self_attn.rotary_emb.inv_freq"
             ] = None
-            self.from_hf_map[
-                f"model.layers.{layer_idx}.input_layernorm.weight"
-            ] = f"layers.{layer_idx}.attention_norm.weight"
+            self.from_hf_map[f"model.layers.{layer_idx}.input_layernorm.weight"] = (
+                f"layers.{layer_idx}.attention_norm.weight"
+            )
             self.from_hf_map[
                 f"model.layers.{layer_idx}.post_attention_layernorm.weight"
             ] = f"layers.{layer_idx}.ffn_norm.weight"
@@ -69,14 +69,14 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
                 ] = f"layers.{layer_idx}.attention.{titan_name}.weight"
             if is_moe:
                 for hf_name, titan_name in moe_name_weight_map.items():
-                    self.from_hf_map[
-                        f"model.layers.{layer_idx}.{hf_name}.weight"
-                    ] = f"layers.{layer_idx}.{titan_name}"
+                    self.from_hf_map[f"model.layers.{layer_idx}.{hf_name}.weight"] = (
+                        f"layers.{layer_idx}.{titan_name}"
+                    )
             else:
                 for hf_name, titan_name in ffn_name_weight_map.items():
-                    self.from_hf_map[
-                        f"model.layers.{layer_idx}.{hf_name}.weight"
-                    ] = f"layers.{layer_idx}.{titan_name}.weight"
+                    self.from_hf_map[f"model.layers.{layer_idx}.{hf_name}.weight"] = (
+                        f"layers.{layer_idx}.{titan_name}.weight"
+                    )
 
     # HuggingFace permutation function (exact copy from their conversion script)
     def _permute(self, w, n_heads_arg, dim1=None, dim2=None):
@@ -129,7 +129,7 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
                 # model's weights, e.g. if testing out with fewer layers than actually exist in the
                 # real model.
                 if key not in to_hf_map:
-                    warn(
+                    warn_once(
                         f"[rank={dist.get_rank()}]: {key=} not found in {list(to_hf_map)=}. Skipping."
                     )
                     continue

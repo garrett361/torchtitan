@@ -14,43 +14,50 @@ from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.models.llama3 import pipeline_llama
 from torchtitan.models.llama3_moe.checkpoint import CustomCheckpointManager
-from torchtitan.models.llama3_moe.custom_args import JobConfig
+from torchtitan.models.llama3_moe.custom_args import (
+    Llama3MoEJobConfig,
+    TopKSchedulerArgs,
+)
 from torchtitan.models.llama3_moe.hf_reader import (
-    get_hf_weight_transform_cls,
     ReplicateMoETransform,
     TransformingHuggingFaceStorageReader,
+    get_hf_weight_transform_cls,
 )
 from torchtitan.models.llama3_moe.infra.parallelize import parallelize_llama_moe
 from torchtitan.models.llama3_moe.metrics import (
-    build_custom_metrics_processor,
     CustomMetricsProcessor,
+    build_custom_metrics_processor,
 )
-from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
-from torchtitan.models.llama3_moe.model.model import Transformer, VirtualGroupMoE
+from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs
+from torchtitan.models.llama3_moe.model.model import Llama3MoE, VirtualGroupMoE
 from torchtitan.models.llama3_moe.model.state_dict_adapter import (
     Llama3MoEStateDictAdapter,
 )
+from torchtitan.models.llama3_moe.top_k_scheduler import get_top_k_scheduler
 from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import TrainSpec
 
 __all__ = [
     "CustomCheckpointManager",
     "CustomMetricsProcessor",
-    "JobConfig",
+    "Llama3MoE",
+    "Llama3MoEJobConfig",
+    "Llama3MoEModelArgs",
     "Llama3MoEStateDictAdapter",
     "ReplicateMoETransform",
-    "Transformer",
-    "TransformerModelArgs",
+    "TopKSchedulerArgs",
+    "TopKSchedulerArgs",
     "TransformingHuggingFaceStorageReader",
     "VirtualGroupMoE",
     "build_custom_metrics_processor",
     "get_hf_weight_transform_cls",
+    "get_top_k_scheduler",
     "llama3_configs",
     "parallelize_llama_moe",
     "pipeline_llama",
 ]
 
-DEV_CFG_3B = TransformerModelArgs(
+DEV_CFG_3B = Llama3MoEModelArgs(
     dim=3072,
     moe_inter_dim=8192,
     n_layers=28,
@@ -81,7 +88,7 @@ class devdict(dict):  # noqa: N801
     Usage: key "3B_moe|num_experts=32|top_k=4|n_moe=8"
     """
 
-    def __missing__(self, key: str) -> TransformerModelArgs:
+    def __missing__(self, key: str) -> Llama3MoEModelArgs:
         # Just supporting (str, int | float) pairs for now
         dev_key = "3B_dev"
         if not key.startswith(dev_key):
@@ -110,7 +117,7 @@ class devdict(dict):  # noqa: N801
 
 
 llama3_moe_configs = devdict()
-llama3_moe_configs["debugmodel_1exp"] = TransformerModelArgs(
+llama3_moe_configs["debugmodel_1exp"] = Llama3MoEModelArgs(
     dim=256,
     moe_inter_dim=1024,
     n_layers=6,
@@ -125,7 +132,7 @@ llama3_moe_configs["debugmodel_1exp"] = TransformerModelArgs(
     ),
     is_moe_list=[True if n == 0 else False for n in range(6)],
 )
-llama3_moe_configs["debugmodel_2exp"] = TransformerModelArgs(
+llama3_moe_configs["debugmodel_2exp"] = Llama3MoEModelArgs(
     dim=256,
     moe_inter_dim=1024,
     n_layers=6,
@@ -140,7 +147,7 @@ llama3_moe_configs["debugmodel_2exp"] = TransformerModelArgs(
     ),
     is_moe_list=[True if n == 0 else False for n in range(6)],
 )
-llama3_moe_configs["debugmodel_4exp"] = TransformerModelArgs(
+llama3_moe_configs["debugmodel_4exp"] = Llama3MoEModelArgs(
     dim=256,
     moe_inter_dim=1024,
     n_layers=6,
@@ -155,7 +162,7 @@ llama3_moe_configs["debugmodel_4exp"] = TransformerModelArgs(
     ),
     is_moe_list=[True if n == 0 else False for n in range(6)],
 )
-llama3_moe_configs["debugmodel_8exp"] = TransformerModelArgs(
+llama3_moe_configs["debugmodel_8exp"] = Llama3MoEModelArgs(
     dim=256,
     moe_inter_dim=1024,
     n_layers=6,
@@ -170,7 +177,7 @@ llama3_moe_configs["debugmodel_8exp"] = TransformerModelArgs(
     ),
     is_moe_list=[True if n == 0 else False for n in range(6)],
 )
-llama3_moe_configs["debugmodel_8exp_small"] = TransformerModelArgs(
+llama3_moe_configs["debugmodel_8exp_small"] = Llama3MoEModelArgs(
     dim=64,
     moe_inter_dim=128,
     n_layers=6,
@@ -186,7 +193,7 @@ llama3_moe_configs["debugmodel_8exp_small"] = TransformerModelArgs(
     is_moe_list=[True if n == 0 else False for n in range(6)],
 )
 # https://huggingface.co/meta-llama/Llama-3.2-3B/blob/main/config.json
-llama3_moe_configs["3B"] = TransformerModelArgs(
+llama3_moe_configs["3B"] = Llama3MoEModelArgs(
     dim=3072,
     n_layers=28,
     n_heads=24,
@@ -199,7 +206,7 @@ llama3_moe_configs["3B"] = TransformerModelArgs(
 # NOTE: @goon - the 3B_2layer and 3B_2layer_halfmoe models are used in
 # torchtitan/tests/llama3_moe/test_dist.py, do not delete!
 #
-llama3_moe_configs["3B_2layer"] = TransformerModelArgs(
+llama3_moe_configs["3B_2layer"] = Llama3MoEModelArgs(
     dim=3072,
     moe_inter_dim=8192,
     n_layers=2,
@@ -210,7 +217,7 @@ llama3_moe_configs["3B_2layer"] = TransformerModelArgs(
     rope_theta=500000,
     is_moe_list=None,
 )
-llama3_moe_configs["3B_2layer_halfmoe"] = TransformerModelArgs(
+llama3_moe_configs["3B_2layer_halfmoe"] = Llama3MoEModelArgs(
     dim=3072,
     moe_inter_dim=8192,
     n_layers=2,
@@ -230,7 +237,7 @@ llama3_moe_configs["3B_2layer_halfmoe"] = TransformerModelArgs(
     is_moe_list=[False, True],
 )
 # See VirtualGroupMoE for necessary cfg requirements for virtual_group init.
-llama3_moe_configs["3B_2layer_halfmoe_finegrained"] = TransformerModelArgs(
+llama3_moe_configs["3B_2layer_halfmoe_finegrained"] = Llama3MoEModelArgs(
     dim=3072,
     moe_inter_dim=8192 // 2,
     n_layers=2,
@@ -252,7 +259,7 @@ llama3_moe_configs["3B_2layer_halfmoe_finegrained"] = TransformerModelArgs(
     is_moe_list=[False, True],
     custom_moe_impl="virtual_group",  # Must specify for virtual_group router init!
 )
-llama3_moe_configs["8B"] = TransformerModelArgs(
+llama3_moe_configs["8B"] = Llama3MoEModelArgs(
     dim=4096,
     moe_inter_dim=14336,
     n_layers=32,
@@ -270,7 +277,7 @@ llama3_moe_configs["8B"] = TransformerModelArgs(
     ),
     is_moe_list=None,
 )
-llama3_moe_configs["8B_2exp"] = TransformerModelArgs(
+llama3_moe_configs["8B_2exp"] = Llama3MoEModelArgs(
     dim=4096,
     moe_inter_dim=14336,
     n_layers=32,
@@ -287,7 +294,7 @@ llama3_moe_configs["8B_2exp"] = TransformerModelArgs(
         score_before_experts=False,
     ),
 )
-llama3_moe_configs["8B_2exp_4_layer"] = TransformerModelArgs(
+llama3_moe_configs["8B_2exp_4_layer"] = Llama3MoEModelArgs(
     dim=4096,
     moe_inter_dim=14336,
     n_layers=4,
@@ -304,7 +311,7 @@ llama3_moe_configs["8B_2exp_4_layer"] = TransformerModelArgs(
         score_before_experts=False,
     ),
 )
-llama3_moe_configs["8B_4exp"] = TransformerModelArgs(
+llama3_moe_configs["8B_4exp"] = Llama3MoEModelArgs(
     dim=4096,
     moe_inter_dim=14336,
     n_layers=32,
@@ -321,7 +328,7 @@ llama3_moe_configs["8B_4exp"] = TransformerModelArgs(
         score_before_experts=False,
     ),
 )
-llama3_moe_configs["8B_8exp"] = TransformerModelArgs(
+llama3_moe_configs["8B_8exp"] = Llama3MoEModelArgs(
     dim=4096,
     moe_inter_dim=14336,
     n_layers=32,
@@ -343,7 +350,7 @@ llama3_moe_configs["8B_8exp"] = TransformerModelArgs(
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
         name="llama3_moe",
-        model_cls=Transformer,
+        model_cls=Llama3MoE,
         model_args=llama3_moe_configs,
         parallelize_fn=parallelize_llama_moe,
         pipelining_fn=pipeline_llama,

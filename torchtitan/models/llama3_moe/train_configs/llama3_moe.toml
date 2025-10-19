@@ -1,4 +1,4 @@
-# We define a custom JobConfig class with an addition catch-all custom_args field
+# We define a custom Llama3MoEJobConfig class with an addition catch-all custom_args field
 [experimental]
 custom_args_module = "torchtitan.models.llama3_moe.custom_args"
 
