@@ -79,7 +79,7 @@ class ConstantScheduler(_TopKScheduler):
         assert self.top_k_args.warmup_steps is not None
 
     def state_dict(self) -> dict[str, Any]:
-        return {"step": self.step, "layer_idx_to_top_k": self.layer_idx_to_top_k}
+        return {"_step": self._step, "layer_idx_to_top_k": self.layer_idx_to_top_k}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         for k, v in state_dict.items():
