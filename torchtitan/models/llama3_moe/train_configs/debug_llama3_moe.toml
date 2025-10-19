@@ -1,7 +1,17 @@
 [custom_args]
-load_balance_coeff = 1e-4
 hf_weight_transform = "replicate"
-hf_ffn_hidden_dim=8192
+
+[moe_overrides]
+load_balance_coeff = 1e-4
+hf_ffn_hidden_dim = 8192
+route_norm = true
+top_k = 2
+route_scale = 1
+num_shared_experts = 0
+
+[model_overrides]
+custom_moe_impl = "virtual_group"
+moe_inter_dim = 8192
 
 [top_k_args]
 name = "no_op"

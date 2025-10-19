@@ -4,7 +4,6 @@ CONFIG_FILE=./torchtitan/models/llama3_moe/train_configs/debug_llama3_moe.toml
 ENABLE_WANDB ?= False
 GIT_HASH := $(shell git rev-parse --short HEAD)
 NGPU := $(shell echo "$(CUDA_VISIBLE_DEVICES)" | tr ',' '\n' | wc -l)
-LOAD_BALANCE_COEFF ?= 1e-2
 FLAVOR ?= 3B
 ARGS ?=
 LR ?= 1e-4
@@ -37,7 +36,6 @@ define run_fsdp
 		--metrics.log_freq $(LOG_FREQ) \
 		--lr-scheduler.warmup-steps $(WARMUP_STEPS) \
 		--model.flavor $(2) \
-		--custom-args.load-balance-coeff $(LOAD_BALANCE_COEFF) \
 		$(WANDB_FLAG) \
 		$(ARGS)
 endef
@@ -60,7 +58,6 @@ define run_ep
 		--parallelism.tensor_parallel_degree 1 \
 		--parallelism.expert_parallel_degree $$NGPU \
 		--parallelism.fsdp_reshard_after_forward never \
-		--custom-args.load-balance-coeff $(LOAD_BALANCE_COEFF) \
 		--checkpoint.enable $(ENABLE_CKPT) \
 		$(WANDB_FLAG) \
 		$(ARGS)
@@ -87,7 +84,6 @@ define run_ep_pp
 		--parallelism.expert_parallel_degree $$EP \
 		--parallelism.pipeline_parallel_degree $$PP \
 		--parallelism.fsdp_reshard_after_forward never \
-		--custom-args.load-balance-coeff $(LOAD_BALANCE_COEFF) \
 		--checkpoint.enable $(ENABLE_CKPT) \
 		$(WANDB_FLAG) \
 		$(ARGS)
@@ -112,7 +108,6 @@ define run_pp
 		--parallelism.tensor_parallel_degree 1 \
 		--parallelism.pipeline_parallel_degree $$PP \
 		--parallelism.fsdp_reshard_after_forward never \
-		--custom-args.load-balance-coeff $(LOAD_BALANCE_COEFF) \
 		--checkpoint.enable $(ENABLE_CKPT) \
 		$(WANDB_FLAG) \
 		$(ARGS)
@@ -137,7 +132,6 @@ define run_fsdp_pp
 		--parallelism.tensor_parallel_degree 1 \
 		--parallelism.pipeline_parallel_degree $$PP \
 		--parallelism.fsdp_reshard_after_forward never \
-		--custom-args.load-balance-coeff $(LOAD_BALANCE_COEFF) \
 		--checkpoint.enable $(ENABLE_CKPT) \
 		$(WANDB_FLAG) \
 		$(ARGS)

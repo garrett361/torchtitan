@@ -27,7 +27,7 @@ class TestModel:
     bsz = 2
     seqlen = 64
     top_k = 8
-    moe_args = MoEArgs(top_k=top_k)
+    moe_args = MoEArgs(top_k=top_k, num_shared_experts=0)
     model_args = Llama3MoEModelArgs(
         dim=dim,
         moe_inter_dim=moe_inter_dim,
@@ -45,7 +45,7 @@ class TestModel:
             model = Llama3MoE(self.model_args)
 
         top_k_scheduler = get_top_k_scheduler(
-            job_config=job_config, model_parts=[model]
+            model_args=self.model_args, top_k_args=top_k_args, model_parts=[model]
         )
         top_k_scheduler.step(0.0)
         top_k_scheduler.state_dict()
@@ -66,7 +66,7 @@ class TestModel:
             model = Llama3MoE(self.model_args)
 
         top_k_scheduler = get_top_k_scheduler(
-            job_config=job_config, model_parts=[model]
+            model_args=self.model_args, top_k_args=top_k_args, model_parts=[model]
         )
         assert top_k_scheduler._step == 0
 
@@ -76,7 +76,9 @@ class TestModel:
 
         # Reduce the top_k once
         assert top_k_scheduler._step == warmup_steps + step_interval
-        assert top_k_scheduler.layer_idx_to_top_k[self.n_layers - 1] == self.top_k - 1
+        assert (
+            top_k_scheduler.layer_idx_to_top_k[str(self.n_layers - 1)] == self.top_k - 1
+        )
         for layer_idx, top_k in top_k_scheduler.layer_idx_to_top_k.items():
             moe = model.layers[str(layer_idx)].moe
             assert moe.router.top_k == top_k
@@ -88,7 +90,9 @@ class TestModel:
         for _ in range(step_interval):
             top_k_scheduler.step(loss)
         assert top_k_scheduler._step == warmup_steps + 2 * step_interval
-        assert top_k_scheduler.layer_idx_to_top_k[self.n_layers - 1] == self.top_k - 2
+        assert (
+            top_k_scheduler.layer_idx_to_top_k[str(self.n_layers - 1)] == self.top_k - 2
+        )
         for layer_idx, top_k in top_k_scheduler.layer_idx_to_top_k.items():
             moe = model.layers[str(layer_idx)].moe
             assert moe.router.top_k == top_k

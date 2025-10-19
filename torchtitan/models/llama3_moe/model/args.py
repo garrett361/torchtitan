@@ -7,11 +7,11 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from torch import nn
 
-from torchtitan.models.llama3_moe.custom_args import JobConfig
+from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
 from torchtitan.models.moe import MoEArgs
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModelArgs
@@ -54,7 +54,7 @@ class Llama3MoEModelArgs(BaseModelArgs):
     beta_fast: int = 32  # \alpha in 2309.00071; see around eq (23)
     beta_slow: int = 1  # \beta in 2309.00071; see around eq (23)
 
-    def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
+    def update_from_config(self, job_config: Llama3MoEJobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
         if seq_len > self.max_seq_len:
             logger.warning(
@@ -67,12 +67,18 @@ class Llama3MoEModelArgs(BaseModelArgs):
                 "CP support for FlexAttention is still in progress."
             )
 
-        # NOTE: @goon - custom args we've added are processed here
-        if job_config.custom_args.load_balance_coeff is not None:
-            self.moe_args.load_balance_coeff = job_config.custom_args.load_balance_coeff
-
-        if job_config.custom_args.hf_ffn_hidden_dim is not None:
-            self.moe_args.hf_ffn_hidden_dim = job_config.custom_args.hf_ffn_hidden_dim
+        # NOTE: @goon - processing overrides
+        for k, v in asdict(job_config.model_overrides).items():
+            if v is not None and hasattr(self, k):
+                setattr(self, k, v)
+        for k, v in asdict(job_config.moe_overrides).items():
+            if v is not None and hasattr(self.moe_args, k):
+                setattr(self.moe_args, k, v)
+        # Special arg handling:
+        if (n_moe_layers := job_config.model_overrides.n_moe_layers) is not None:
+            self.is_moe_list = (self.n_layers - n_moe_layers) * [
+                False
+            ] + n_moe_layers * [True]
 
         if self.is_moe_list is not None and len(self.is_moe_list) != self.n_layers:
             raise ValueError(
