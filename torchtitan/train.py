@@ -546,6 +546,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Reduce the data collected over gradient accumulation steps.
         loss = torch.sum(torch.stack(accumulated_losses))
 
+        # NOTE: @goon - we're now reducing the loss every step because we want the top_k_scheduler to see the
+        # same loss on every rank, which is sub-optimal for perf.
+        if parallel_dims.dp_cp_enabled:
+            loss = loss.detach()
+            ft_pg = self.ft_manager.loss_sync_pg
+            global_avg_loss = dist_utils.dist_mean(
+                loss, parallel_dims.world_mesh["dp_cp"], ft_pg
+            )
+        else:
+            global_avg_loss = global_max_loss = loss.detach().item()
+
+        if self.top_k_scheduler is not None:
+            self.top_k_scheduler.step(global_avg_loss)
+
         # log metrics
         if not self.metrics_processor.should_log(self.step):
             return
@@ -553,8 +567,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
             ft_pg = self.ft_manager.loss_sync_pg
-            global_avg_loss, global_max_loss, global_ntokens_seen = (
-                dist_utils.dist_mean(loss, parallel_dims.world_mesh["dp_cp"], ft_pg),
+            global_max_loss, global_ntokens_seen = (
                 dist_utils.dist_max(loss, parallel_dims.world_mesh["dp_cp"], ft_pg),
                 dist_utils.dist_sum(
                     torch.tensor(
@@ -565,11 +578,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 ),
             )
         else:
-            global_avg_loss = global_max_loss = loss.detach().item()
             global_ntokens_seen = self.ntokens_seen
-
-        if self.top_k_scheduler is not None:
-            self.top_k_scheduler.step(global_avg_loss)
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,

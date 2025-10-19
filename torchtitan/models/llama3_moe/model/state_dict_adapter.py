@@ -6,8 +6,6 @@
 
 from typing import Any
 
-import torch.distributed as dist
-
 from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 from torchtitan.tools.logging import logger, warn_once
