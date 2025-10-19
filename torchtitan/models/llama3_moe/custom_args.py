@@ -30,7 +30,7 @@ class TopKSchedulerArgs:
 # Classes for overriding model architecture configurations, which can't be done via the CLI or toml
 # files otherwise. When non-None values are supplied here, a value will be overridden. Some
 # convenience fields are also added:
-# - n_moe_layers: int, add this many moe layers starting from the final layer.
+# - n_moe_layers: int, use this many moe layers starting from the final layer.
 
 
 @dataclass
