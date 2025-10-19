@@ -10,9 +10,7 @@ from typing import Any
 import torch
 from torch.distributed.checkpoint.stateful import Stateful
 
-from torchtitan.models.llama3_moe.custom_args import (
-    TopKSchedulerArgs,
-)
+from torchtitan.models.llama3_moe.custom_args import TopKSchedulerArgs
 from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs
 from torchtitan.models.moe import MoE
 from torchtitan.tools.logging import logger
@@ -39,13 +37,16 @@ class _TopKScheduler(Stateful, ABC):
             }
 
     @abstractmethod
-    def state_dict(self) -> dict[str, Any]: ...
+    def state_dict(self) -> dict[str, Any]:
+        ...
 
     @abstractmethod
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None: ...
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        ...
 
     @abstractmethod
-    def step(self, loss: torch.Tensor) -> None: ...
+    def step(self, loss: torch.Tensor) -> None:
+        ...
 
 
 class NoOpScheduler(_TopKScheduler):
