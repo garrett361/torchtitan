@@ -144,7 +144,7 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
             warn_once(
                 logger,
                 f"{missing_keys=} are not specified in {self.__class__.__name__}.from_hf_map, "
-                " will not get state loaded into them.",
+                "will not get state loaded into them.",
             )
 
         return hf_state_dict
