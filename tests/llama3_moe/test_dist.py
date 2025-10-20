@@ -15,13 +15,13 @@ from torchtitan.components.checkpoint import CheckpointManager, ModelWrapper
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.llama3_moe import (
     CustomCheckpointManager,
+    get_hf_weight_transform_cls,
+    llama3_moe_configs,
     Llama3MoE,
     Llama3MoEJobConfig,
     Llama3MoEStateDictAdapter,
-    TransformingHuggingFaceStorageReader,
-    get_hf_weight_transform_cls,
-    llama3_moe_configs,
     parallelize_llama_moe,
+    TransformingHuggingFaceStorageReader,
 )
 from torchtitan.models.moe import MoE, MoEArgs
 
