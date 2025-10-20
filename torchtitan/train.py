@@ -22,14 +22,15 @@ from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
 )
-from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
+from torchtitan.config import TORCH_DTYPE_MAP, ConfigManager
 from torchtitan.config.job_config import JobConfig
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.attention import init_attention_mask
 from torchtitan.models.llama3_moe import (
     CustomCheckpointManager,
-    get_hf_weight_transform_cls,
     TransformingHuggingFaceStorageReader,
+    get_hf_weight_transform_cls,
 )
 from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
 from torchtitan.models.llama3_moe.top_k_scheduler import get_top_k_scheduler
@@ -584,6 +585,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
         }
+        if self.top_k_scheduler is not None:
+            for layer_idx, top_k in self.top_k_scheduler.layer_idx_to_top_k.items():
+                extra_metrics[f"top_k/layer_{layer_idx}"] = top_k
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
@@ -649,9 +653,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 )
 
                 # Run validation if validator is available
-                if (
-                    self.job_config.validation.enable
-                    and self.validator.should_validate(self.step)
+                if self.job_config.validation.enable and self.validator.should_validate(
+                    self.step
                 ):
                     with self.loss_fn.no_rescale():
                         self.validator.validate(self.model_parts, self.step)
@@ -711,12 +714,12 @@ if __name__ == "__main__":
         trainer = Trainer(config)
 
         if config.checkpoint.create_seed_checkpoint:
-            assert (
-                int(os.environ["WORLD_SIZE"]) == 1
-            ), "Must create seed checkpoint using a single device, to disable sharding."
-            assert (
-                config.checkpoint.enable
-            ), "Must enable checkpointing when creating a seed checkpoint."
+            assert int(os.environ["WORLD_SIZE"]) == 1, (
+                "Must create seed checkpoint using a single device, to disable sharding."
+            )
+            assert config.checkpoint.enable, (
+                "Must enable checkpointing when creating a seed checkpoint."
+            )
             trainer.checkpointer.save(curr_step=0, last_step=True)
             logger.info("Created seed checkpoint")
         else:
