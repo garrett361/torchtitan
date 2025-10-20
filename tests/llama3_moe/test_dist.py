@@ -23,7 +23,7 @@ from torchtitan.models.llama3_moe import (
     parallelize_llama_moe,
     TransformingHuggingFaceStorageReader,
 )
-from torchtitan.models.moe import MoEArgs
+from torchtitan.models.moe import MoE, MoEArgs
 
 
 class TestHFReader(DTest):
@@ -125,11 +125,9 @@ class TestHFReader(DTest):
         model_copy = parallelize_llama_moe(model_copy, parallel_dims, job_config)
 
         model.to_empty(device=self.device)
-        with torch.no_grad():
-            model.init_weights(buffer_device=None)
-
         model_copy.to_empty(device=self.device)
         with torch.no_grad():
+            model.init_weights(buffer_device=None)
             model_copy.init_weights(buffer_device=None)
 
         ckpt_kwargs = {
@@ -191,12 +189,14 @@ class TestHFReader(DTest):
         model_moe = parallelize_llama_moe(model_moe, parallel_dims, job_config)
 
         model.to_empty(device=self.device)
-        with torch.no_grad():
-            model.init_weights(buffer_device=None)
-
         model_moe.to_empty(device=self.device)
         with torch.no_grad():
+            model.init_weights(buffer_device=None)
             model_moe.init_weights(buffer_device=None)
+
+        # Sanity checks:
+        assert not any(isinstance(m, MoE) for m in model.modules())
+        assert any(isinstance(m, MoE) for m in model_moe.modules())
 
         ckpt_kwargs = {
             "dataloader": None,
@@ -286,6 +286,10 @@ class TestImpls(DTest):
             model = Llama3MoE(model_args)
             model_moe = Llama3MoE(model_args_moe)
 
+        # Sanity checks:
+        assert not any(isinstance(m, MoE) for m in model.modules())
+        assert any(isinstance(m, MoE) for m in model_moe.modules())
+
         parallel_dims = ParallelDims(
             dp_shard=-1,
             dp_replicate=1,
@@ -350,12 +354,16 @@ class TestImpls(DTest):
             out_moe = model_moe(inputs)
             torch.testing.assert_close(out, out_moe, atol=self.atol, rtol=self.rtol)
 
-    @pytest.mark.parametrize("n_groups", [2, 4])
-    @pytest.mark.parametrize("n_replicas", [4, 8])
+    @pytest.mark.parametrize("n_groups", [2, 4], ids=lambda x: f"n_groups={x}")
+    @pytest.mark.parametrize("n_replicas", [4, 8], ids=lambda x: f"n_replicas={x}")
+    @pytest.mark.parametrize("hf_weight_transform", ["replicate", "replicate_shuffle"])
     @pytest.mark.parametrize("sharding", ["fsdp", "ep"])
-    def test_virtual_group(self, sharding: str, n_groups: int, n_replicas: int) -> None:
+    def test_virtual_group(
+        self, sharding: str, n_groups: int, n_replicas: int, hf_weight_transform: str
+    ) -> None:
         """
-        Test that the dense and MoE models have the same output with FFN weight replication.
+        Test that the dense and MoE models have the same output with FFN weight replication when
+        using virtual group init and any applicable weight transformation strategy.
         """
         model_args = llama3_moe_configs["3B_2layer"]
         # Dynamically generate a valid moe cfg for a model with one FFN and one MoE layer.
@@ -392,6 +400,10 @@ class TestImpls(DTest):
         with torch.device("meta"):
             model = Llama3MoE(model_args)
             model_moe = Llama3MoE(model_args_moe)
+
+        # Sanity checks:
+        assert not any(isinstance(m, MoE) for m in model.modules())
+        assert any(isinstance(m, MoE) for m in model_moe.modules())
 
         parallel_dims = ParallelDims(
             dp_shard=-1,

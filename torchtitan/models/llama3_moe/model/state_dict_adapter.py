@@ -118,16 +118,11 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
         head_dim = dim // n_heads
         hf_state_dict = {}
 
+        missing_keys = []
         for key, value in state_dict.items():
             if "layers" in key:
-                # NOTE: @goon - added the ability here to only load a portion of the serialized HF
-                # model's weights, e.g. if testing out with fewer layers than actually exist in the
-                # real model.
                 if key not in to_hf_map:
-                    warn_once(
-                        logger,
-                        f"{key=} not found in {list(to_hf_map)=}. Skipping.",
-                    )
+                    missing_keys.append(key)
                     continue
                 else:
                     new_key = to_hf_map[key]
@@ -145,6 +140,12 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
                 new_key = to_hf_map[key]
 
             hf_state_dict[new_key] = value
+        if missing_keys:
+            warn_once(
+                logger,
+                f"{missing_keys=} are not specified in {self.__class__.__name__}.from_hf_map, "
+                "will not get state loaded into them.",
+            )
 
         return hf_state_dict
 

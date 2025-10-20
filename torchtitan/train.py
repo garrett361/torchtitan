@@ -584,6 +584,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
         }
+        if self.top_k_scheduler is not None:
+            for layer_idx, top_k in self.top_k_scheduler.layer_idx_to_top_k.items():
+                extra_metrics[f"top_k/layer_{layer_idx}"] = top_k
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
