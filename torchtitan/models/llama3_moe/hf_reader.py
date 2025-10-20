@@ -13,10 +13,10 @@ import torch
 from einops import rearrange
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.checkpoint._hf_utils import (
-    _HFStorageInfo,
     CUSTOM_METADATA_KEY,
     SAVED_OFFSETS_KEY,
     SUFFIX,
+    _HFStorageInfo,
 )
 from torch.distributed.checkpoint.metadata import (
     ChunkStorageMetadata,
@@ -192,8 +192,7 @@ class _HFWeightTransform(ABC):
         return self.transform(titan_fqn, t)
 
     @abstractmethod
-    def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor:
-        ...
+    def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor: ...
 
 
 class ReplicateMoETransform(_HFWeightTransform):
@@ -238,6 +237,74 @@ class ReplicateMoETransform(_HFWeightTransform):
                 )
 
             t = torch.stack([t for _ in range(n_replicas)], dim=0).contiguous()
+
+            if n_groups != 1:
+                if titan_fqn.endswith("w1") or titan_fqn.endswith("w3"):
+                    t = rearrange(t, "r h d-> (r h) d")
+                    t = rearrange(t, "(e m) d-> e m d", e=num_experts, m=moe_inter_dim)
+                elif titan_fqn.endswith("w2"):
+                    t = rearrange(t, "r d h-> (r h) d")
+                    t = rearrange(t, "(e m) d-> e d m", e=num_experts, m=moe_inter_dim)
+                else:
+                    raise ValueError(
+                        f"{titan_fqn=} does not end with any of (w1, w2, w3)"
+                    )
+        return t
+
+
+class ReplicateShuffleMoETransform(_HFWeightTransform):
+    """
+    Basic replication + hidden_dim shuffling of FFN weights into MoE experts.  Handles any case
+    where `num_experts * moe_inter_dim` is divisible by the hf FFN weight's hidden_dim by stacking
+    the FFN weights and reshaping as appropriate.
+    """
+
+    name = "replicate_shuffle"
+
+    # TODO: @goon - implement
+
+    def transform(self, titan_fqn: str, t: torch.Tensor) -> torch.Tensor:
+        if "moe.experts.w" in titan_fqn:
+            num_experts = self.model_args.moe_args.num_experts
+            moe_inter_dim = self.model_args.moe_inter_dim
+            dim = self.model_args.dim
+            if titan_fqn.endswith("w1") or titan_fqn.endswith("w3"):
+                hidden_dim_hf, dim_hf = t.shape
+                shuffle_dim = 0
+            elif titan_fqn.endswith("w2"):
+                dim_hf, hidden_dim_hf = t.shape
+                shuffle_dim = 1
+            else:
+                raise ValueError(f"{titan_fqn=} does not end with any of (w1, w2, w3)")
+            n_groups, remainder = divmod(hidden_dim_hf, moe_inter_dim)
+            if remainder:
+                raise ValueError(
+                    f"{hidden_dim_hf=} must be divisible by {moe_inter_dim=}"
+                )
+
+            n_replicas, remainder = divmod(num_experts, n_groups)
+            if remainder:
+                raise ValueError(f"{n_replicas=} must be divisible by {n_groups=}")
+            if dim != dim_hf:
+                raise ValueError(
+                    f"The MoE and FFN input dims do not match: {dim=} != {dim_hf=}."
+                )
+
+            # Ensure that the same shuffles occur on every rank:
+            # TODO: @goon - in principle this should already be handled by `set_determinism`.  Check
+            # and also ensure this call does mess anything up.
+            torch.manual_seed(42)
+            replicated_shuffled_t_list = [t]
+            for _ in range(n_replicas - 1):
+                idx = torch.randperm(hidden_dim_hf)
+                if shuffle_dim == 0:
+                    replicated_shuffled_t_list.append(t[idx])
+                elif shuffle_dim == 1:
+                    replicated_shuffled_t_list.append(t[:, idx])
+                else:
+                    raise ValueError
+
+            t = torch.stack(replicated_shuffled_t_list, dim=0).contiguous()
 
             if n_groups != 1:
                 if titan_fqn.endswith("w1") or titan_fqn.endswith("w3"):
