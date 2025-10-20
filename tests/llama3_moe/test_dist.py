@@ -356,10 +356,10 @@ class TestImpls(DTest):
 
     @pytest.mark.parametrize("n_groups", [2, 4], ids=lambda x: f"n_groups={x}")
     @pytest.mark.parametrize("n_replicas", [4, 8], ids=lambda x: f"n_replicas={x}")
-    @pytest.mark.parametrize("weight_transform", ["replicate", "replicate_shuffle"])
+    @pytest.mark.parametrize("hf_weight_transform", ["replicate", "replicate_shuffle"])
     @pytest.mark.parametrize("sharding", ["fsdp", "ep"])
     def test_virtual_group(
-        self, sharding: str, n_groups: int, n_replicas: int, weight_transform: str
+        self, sharding: str, n_groups: int, n_replicas: int, hf_weight_transform: str
     ) -> None:
         """
         Test that the dense and MoE models have the same output with FFN weight replication when
