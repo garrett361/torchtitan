@@ -1,8 +1,10 @@
 # NOTE: this toml config is a preset for 64 A100 GPUs.
+[gdn_args]
+attn_freq = 1
 
 [job]
 dump_folder = "./outputs"
-description = "Llama 3 70B training"
+description = "Llama 3 8B training"
 
 [profiling]
 enable_profiling = true
@@ -15,21 +17,21 @@ enable_tensorboard = true
 save_tb_folder = "tb"
 
 [model]
-name = "llama3"
-flavor = "70B"
-hf_assets_path = "./assets/hf/Llama-3.1-70B"
+name = "llama3gdn"
+flavor = "8B"
+hf_assets_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
 
 [optimizer]
 name = "AdamW"
-lr = 1.5e-4
+lr = 3e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 200  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 200  # lr scheduler warm up
 
 [training]
-local_batch_size = 8
+local_batch_size = 1
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
 steps = 1000
@@ -38,7 +40,7 @@ dataset = "c4"
 [parallelism]
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
-tensor_parallel_degree = 8  # 8-way TP
+tensor_parallel_degree = 1
 pipeline_parallel_degree = 1
 context_parallel_degree = 1
 
@@ -50,12 +52,13 @@ last_save_model_only = true
 export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 
-[activation_checkpoint]
-mode = "full"
-
 [compile]
 enable=false
 components = ["model", "loss"]
+
+[activation_checkpoint]
+mode = "selective"  # ["none", "selective", "full"]
+selective_ac_option = "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
 
 [quantize.linear.float8]
 enable_fsdp_float8_all_gather = false
