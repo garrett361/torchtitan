@@ -1,13 +1,25 @@
-import pytest
 import torch
-import torch.distributed as dist
 
-from dtest import DTest
+from torchtitan.models.llama3gdn.model.args import Llama3GDNModelArgs
+from torchtitan.models.llama3gdn.model.model import LinearAttention
 
 
-class TestDTest(DTest):
-    @pytest.mark.parametrize("n", list(range(1, 4)))
-    def test_all_reduce(self, n: int) -> None:
-        t = torch.arange(n * self.world_size, device=self.device)
-        dist.all_reduce(t)
-        self.print_rank(f"{t=}")
+class TestLinearAttention:
+    bsz = 1
+    # NOTE: @goon - seqlen must be larger than 128
+    seqlen = 128
+    dim = 256
+    num_heads = 4
+    head_dim = 64
+
+    def test(self) -> None:
+        args = Llama3GDNModelArgs(dim=self.dim)
+        args.gdn_layer_args.hidden_size = self.dim
+        args.gdn_layer_args.num_heads = self.num_heads
+        args.gdn_layer_args.head_dim = self.head_dim
+
+        model = LinearAttention(args).to(device="cuda", dtype=torch.bfloat16)
+        x = torch.randn(
+            self.bsz, self.seqlen, self.dim, device="cuda", dtype=torch.bfloat16
+        )
+        out = model(x, None, None)
