@@ -23,6 +23,8 @@ from torchtitan.components.metrics import (
     ensure_pp_loss_visible,
 )
 from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
+from torchtitan.models.llama3gdn import Llama3GDNJobConfig
+
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
@@ -151,6 +153,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             utils.set_default_dtype(TORCH_DTYPE_MAP[job_config.training.dtype]),
         ):
             model = self.train_spec.model_cls(model_args)
+
+        print(f"{model=}")
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -667,8 +671,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
 if __name__ == "__main__":
     init_logger()
-    config_manager = ConfigManager()
+    config_manager = ConfigManager(config_cls=Llama3GDNJobConfig)
     config = config_manager.parse_args()
+    print(f"{config=}")
     trainer: Optional[Trainer] = None
 
     try:

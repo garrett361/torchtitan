@@ -1,4 +1,6 @@
 # NOTE: this toml config is a preset for 64 A100 GPUs.
+[gdn_args]
+attn_freq = 1
 
 [job]
 dump_folder = "./outputs"
@@ -15,7 +17,7 @@ enable_tensorboard = true
 save_tb_folder = "tb"
 
 [model]
-name = "llama3"
+name = "llama3gdn"
 flavor = "8B"
 hf_assets_path = "./assets/hf/Llama-3.1-8B"
 # converters = ["float8"]
