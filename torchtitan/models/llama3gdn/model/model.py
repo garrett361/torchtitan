@@ -11,7 +11,6 @@ from dataclasses import asdict
 
 import torch
 import torch.nn.functional as F
-
 from fla.layers.gated_deltanet_cp import GatedDeltaNet
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask, and_masks
@@ -268,7 +267,10 @@ class LinearAttention(nn.Module):
         # The CP GatedDeltaNet impl expects these kwargs:
         cp_rank = kwargs.get("cp_rank", 0)
         cp_size = kwargs.get("cp_size", 1)
-        cp_group = kwargs.get("cp_group", None)
+        cp_group = kwargs.get("cp_group")
+        from torch.distributed import get_rank
+
+        print(f"[rank={get_rank()}]: {cp_rank=}, {cp_size=}, {cp_group=}")
 
         self.gdn = GatedDeltaNet(
             **asdict(self.gdn_layer_args),

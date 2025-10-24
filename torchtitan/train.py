@@ -11,6 +11,7 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
+import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
@@ -22,10 +23,10 @@ from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
 )
-from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import TORCH_DTYPE_MAP, ConfigManager, JobConfig
+from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.llama3gdn import Llama3GDNJobConfig
-
-from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -33,9 +34,6 @@ from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
 )
-
-
-
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
@@ -151,13 +149,36 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         logger.info(
             f"Building {job_config.model.name} {job_config.model.flavor} with {model_args}"
         )
+
+        # HACK: @goon - cp kwargs for building the cp gdn layer
+        # if not dist.get_rank():
+        #     print(f"{parallel_dims=}")
+        #     print(f"{parallel_dims.world_mesh['cp']=}")
+        #     print(f"{parallel_dims.world_mesh['cp']=}")
+        #     print(f"{parallel_dims.world_mesh['cp'].mesh=}")
+
+        if "cp" in parallel_dims.world_mesh.mesh_dim_names:
+            cp_mesh = parallel_dims.world_mesh["cp"]
+            cp_kwargs = {
+                "cp_rank": cp_mesh.get_local_rank(),
+                "cp_size": cp_mesh.size(),
+                "cp_group": cp_mesh.get_group(),
+            }
+
+            from torch.distributed.tensor.experimental._attention import _cp_options
+            # NOTE: @goon -  I think we need this for proper, naive sharding?
+            _cp_options.enable_load_balance = False
+            # print(f"{_cp_options.enable_load_balance=}")
+        else:
+            cp_kwargs = {}
         with (
             torch.device("meta"),
             utils.set_default_dtype(TORCH_DTYPE_MAP[job_config.training.dtype]),
         ):
-            model = self.train_spec.model_cls(model_args)
+            model = self.train_spec.model_cls(model_args, **cp_kwargs)
 
-        print(f"{model=}")
+        if not dist.get_rank():
+            print(f"{model=}")
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -626,9 +647,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 )
 
                 # Run validation if validator is available
-                if (
-                    self.job_config.validation.enable
-                    and self.validator.should_validate(self.step)
+                if self.job_config.validation.enable and self.validator.should_validate(
+                    self.step
                 ):
                     with self.loss_fn.no_rescale():
                         self.validator.validate(self.model_parts, self.step)
@@ -683,12 +703,12 @@ if __name__ == "__main__":
         trainer = Trainer(config)
 
         if config.checkpoint.create_seed_checkpoint:
-            assert (
-                int(os.environ["WORLD_SIZE"]) == 1
-            ), "Must create seed checkpoint using a single device, to disable sharding."
-            assert (
-                config.checkpoint.enable
-            ), "Must enable checkpointing when creating a seed checkpoint."
+            assert int(os.environ["WORLD_SIZE"]) == 1, (
+                "Must create seed checkpoint using a single device, to disable sharding."
+            )
+            assert config.checkpoint.enable, (
+                "Must enable checkpointing when creating a seed checkpoint."
+            )
             trainer.checkpointer.save(curr_step=0, last_step=True)
             logger.info("Created seed checkpoint")
         else:
