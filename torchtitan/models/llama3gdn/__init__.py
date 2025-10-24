@@ -14,7 +14,7 @@ from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.protocols.train_spec import TrainSpec
 
 from .infra.parallelize import parallelize_llama
-from .model.args import Llama3GDNModelArgs
+from .model.args import Llama3GDNModelArgs, Llama3GDNJobConfig
 from .model.model import Llama3GDN
 from .model.state_dict_adapter import Llama3StateDictAdapter
 
@@ -23,6 +23,7 @@ __all__ = [
     "Llama3GDNModelArgs",
     "Llama3GDN",
     "llama3gdn_args",
+    "Llama3GDNJobConfig"
 ]
 
 

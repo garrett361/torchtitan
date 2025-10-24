@@ -46,6 +46,7 @@ class Llama3GDNModelArgs(BaseModelArgs):
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
     eos_id: int = 0
+    attn_freq: int = 1
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
@@ -59,8 +60,19 @@ class Llama3GDNModelArgs(BaseModelArgs):
             raise NotImplementedError(
                 "CP support for FlexAttention is still in progress."
             )
+        self.attn_freq = job_config.gdn_args.attn_freq
 
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:
         return get_dense_model_nparams_and_flops(self, model, seq_len)
+
+
+@dataclass
+class GDNArgs:
+    attn_freq: int = 1
+
+
+@dataclass
+class Llama3GDNJobConfig(JobConfig):
+    gdn_args: GDNArgs = field(default_factory=GDNArgs)

@@ -41,5 +41,28 @@ define run_fsdp
 endef
 
 
+define run_fsdp_cp
+	export NGPU=$(NGPU) && \
+	export LOG_RANK=$$(seq -s, 0 $$((NGPU-1))) && \
+	export WANDB_RUN_ID=$(1)-$(LOCAL_BATCH_SIZE)bs-$(STEPS)step-fsdp-$(GIT_HASH)-$(DATE) && \
+	export CONFIG_FILE=$(CONFIG_FILE) && \
+	./run_train.sh \
+		--training.local_batch_size $(LOCAL_BATCH_SIZE) \
+		--training.steps $(STEPS) \
+		--training.seq_len $(SEQ_LEN) \
+		--optimizer.lr $(LR) \
+		--metrics.log_freq $(LOG_FREQ) \
+		--lr-scheduler.warmup-steps $(WARMUP_STEPS) \
+		--gdn_args.attn_freq 0 \
+		--parallelism.context_parallel_degree $$NGPU \
+		--model.flavor $(2) \
+		$(WANDB_FLAG) \
+		$(ARGS)
+endef
+
+
 fsdp:
 	$(call run_fsdp,debug,"$(FLAVOR)")
+
+fsdp-cp:
+	$(call run_fsdp_cp,debug,"$(FLAVOR)")

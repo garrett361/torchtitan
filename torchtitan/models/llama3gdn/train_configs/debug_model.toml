@@ -1,3 +1,6 @@
+[gdn_args]
+attn_freq = 1
+
 [job]
 dump_folder = "./outputs"
 description = "Llama 3 debug training"
@@ -18,7 +21,7 @@ save_tb_folder = "tb"
 enable_wandb = false
 
 [model]
-name = "llama3"
+name = "llama3gdn"
 flavor = "debugmodel"
 # test folder with tokenizer.json, for debug purpose only
 hf_assets_path = "./tests/assets/tokenizer"
