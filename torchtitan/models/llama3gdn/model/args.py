@@ -26,6 +26,23 @@ class RoPEScalingArgs:
 
 
 @dataclass
+class GDNLayerArgs:
+    hidden_size: int = 2048
+    expand_v: float = 2
+    head_dim: int = 256
+    num_heads: int = 6
+    num_v_heads: int = None
+    mode: str = "chunk"
+    use_gate: bool = True
+    use_short_conv: bool = False
+    allow_neg_eigval: bool = False
+    conv_size: int = 4
+    conv_bias: bool = False
+    layer_idx: int = None
+    norm_eps: float = 1e-5
+
+
+@dataclass
 class Llama3GDNModelArgs(BaseModelArgs):
     dim: int = 4096
     n_layers: int = 32
@@ -37,6 +54,7 @@ class Llama3GDNModelArgs(BaseModelArgs):
     norm_eps: float = 1e-5
     rope_theta: float = 10000
     rope_scaling_args: RoPEScalingArgs = field(default_factory=RoPEScalingArgs)
+    gdn_layer_args: GDNLayerArgs = field(default_factory=GDNLayerArgs)
 
     max_seq_len: int = 131072
     # If `True`, then each transformer block init uses its layer ID, and if
@@ -61,6 +79,8 @@ class Llama3GDNModelArgs(BaseModelArgs):
                 "CP support for FlexAttention is still in progress."
             )
         self.attn_freq = job_config.gdn_args.attn_freq
+
+        self.gdn_layer_args.hidden_size = self.dim
 
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int

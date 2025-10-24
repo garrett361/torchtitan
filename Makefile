@@ -34,6 +34,7 @@ define run_fsdp
 		--training.seq_len $(SEQ_LEN) \
 		--optimizer.lr $(LR) \
 		--metrics.log_freq $(LOG_FREQ) \
+		--gdn_args.attn_freq 2 \
 		--lr-scheduler.warmup-steps $(WARMUP_STEPS) \
 		--model.flavor $(2) \
 		$(WANDB_FLAG) \
@@ -53,7 +54,7 @@ define run_fsdp_cp
 		--optimizer.lr $(LR) \
 		--metrics.log_freq $(LOG_FREQ) \
 		--lr-scheduler.warmup-steps $(WARMUP_STEPS) \
-		--gdn_args.attn_freq 0 \
+		--gdn_args.attn_freq 2 \
 		--parallelism.context_parallel_degree $$NGPU \
 		--model.flavor $(2) \
 		$(WANDB_FLAG) \
