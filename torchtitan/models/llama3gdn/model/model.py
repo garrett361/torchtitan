@@ -12,12 +12,8 @@ from dataclasses import asdict
 import torch
 import torch.nn.functional as F
 
-# from fla.layers.gated_deltanet_cp import GatedDeltaNet
-from fla.layers.gated_deltanet import GatedDeltaNet
+from fla.layers.gated_deltanet_cp import GatedDeltaNet
 from torch import nn
-from torch.distributed.tensor import (
-    DTensor,
-)
 from torch.nn.attention.flex_attention import BlockMask, and_masks
 
 from torchtitan.components.tokenizer import BaseTokenizer
@@ -266,10 +262,20 @@ class Attention(nn.Module):
 
 
 class LinearAttention(nn.Module):
-    def __init__(self, model_args: Llama3GDNModelArgs):
+    def __init__(self, model_args: Llama3GDNModelArgs, **kwargs):
         super().__init__()
         self.gdn_layer_args = model_args.gdn_layer_args
-        self.gdn = GatedDeltaNet(**asdict(self.gdn_layer_args))
+        # The CP GatedDeltaNet impl expects these kwargs:
+        cp_rank = kwargs.get("cp_rank", 0)
+        cp_size = kwargs.get("cp_size", 1)
+        cp_group = kwargs.get("cp_group", None)
+
+        self.gdn = GatedDeltaNet(
+            **asdict(self.gdn_layer_args),
+            cp_rank=cp_rank,
+            cp_size=cp_size,
+            cp_group=cp_group,
+        )
 
     def init_weights(self, init_std: float):
         for m in self.modules():
@@ -350,13 +356,13 @@ class Llama3GDNBlock(nn.Module):
 
     """
 
-    def __init__(self, layer_id: int, model_args: Llama3GDNModelArgs):
+    def __init__(self, layer_id: int, model_args: Llama3GDNModelArgs, **kwargs):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
         attn_freq = model_args.attn_freq
         if attn_freq == 0 or ((layer_id + 1) % attn_freq) != 0:
-            self.attention = LinearAttention(model_args)
+            self.attention = LinearAttention(model_args, **kwargs)
         else:
             self.attention = Attention(model_args)
 
@@ -421,7 +427,7 @@ class Llama3GDN(nn.Module, ModelProtocol):
 
     """
 
-    def __init__(self, model_args: Llama3GDNModelArgs):
+    def __init__(self, model_args: Llama3GDNModelArgs, **kwargs):
         super().__init__()
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
@@ -435,7 +441,7 @@ class Llama3GDN(nn.Module, ModelProtocol):
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
-            self.layers[str(layer_id)] = Llama3GDNBlock(layer_id, model_args)
+            self.layers[str(layer_id)] = Llama3GDNBlock(layer_id, model_args, **kwargs)
         self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
 
