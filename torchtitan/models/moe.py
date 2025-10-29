@@ -379,7 +379,7 @@ class MoE(nn.Module):
         #       to work with gradient accumulation.
         self.load_balance_coeff = moe_args.load_balance_coeff
         if self.load_balance_coeff is not None:
-            assert self.load_balance_coeff > 0.0
+            assert self.load_balance_coeff >= 0.0
             self.register_buffer(
                 "expert_bias",
                 torch.zeros(num_experts, dtype=torch.float32),

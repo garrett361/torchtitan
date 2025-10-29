@@ -29,7 +29,7 @@ class Llama3MoEModelArgs(BaseModelArgs):
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     ffn_dim_multiplier: float | None = None
     norm_eps: float = 1e-5
-    rope_theta: float = 10000
+    rope_theta: float = 500000.0
     custom_moe_impl: str | None = None
 
     # MoE
@@ -50,9 +50,7 @@ class Llama3MoEModelArgs(BaseModelArgs):
 
     # yarn: https://arxiv.org/pdf/2309.00071
     original_seq_len: int = 8192
-    rope_factor: float = 20  # s in 2309.00071 (I believe); see eq (25)
-    beta_fast: int = 32  # \alpha in 2309.00071; see around eq (23)
-    beta_slow: int = 1  # \beta in 2309.00071; see around eq (23)
+    rope_impl: str = "llama"  # llama or dsv3
 
     def update_from_config(self, job_config: Llama3MoEJobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len

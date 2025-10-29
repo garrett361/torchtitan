@@ -15,7 +15,11 @@ from torchtitan.models.llama3_moe import (
     Llama3MoEModelArgs,
     Llama3MoEStateDictAdapter,
 )
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+TEST_TEXT = "Why did the chicken cross the road? To get to the other side."
+LLAMA_3B_HF_PATH = "/gpfs/goon/models/Llama-3.2-3B/"
+LLAMA_3B_HF_NO_TIED_PATH = "/gpfs/goon/models/Llama-3.2-3B-no-tied-weights/"
 
 
 class TestModel:
@@ -29,7 +33,7 @@ class TestModel:
     bsz = 2
     seqlen = 64
     device = "cuda"
-    hf_assets_path = "/gpfs/goon/models/Llama-3.2-3B-no-tied-weights/"
+    hf_assets_path = LLAMA_3B_HF_NO_TIED_PATH
 
     def test_model_no_moe(self):
         args = Llama3MoEModelArgs(
@@ -68,6 +72,7 @@ class TestModel:
         model(inputs)
 
     def test_hf_equivalence(self) -> None:
+        torch.manual_seed(42)
         model_args = llama3_moe_configs["3B"]
         job_config = Llama3MoEJobConfig()
         job_config.checkpoint.enable = True
@@ -94,23 +99,18 @@ class TestModel:
         checkpointer = CheckpointManager(model_parts=[model], **ckpt_kwargs)
         checkpointer.load()
 
-        model_hf = AutoModelForCausalLM.from_pretrained(
-            "/gpfs/goon/models/Llama-3.2-3B/"
-        ).to(device=self.device)
+        model_hf = AutoModelForCausalLM.from_pretrained(LLAMA_3B_HF_PATH).to(
+            device=self.device
+        )
+        tokenizer = AutoTokenizer.from_pretrained(LLAMA_3B_HF_PATH)
+        inputs = tokenizer(TEST_TEXT, return_tensors="pt")
+        for k, v in inputs.items():
+            inputs[k] = v.cuda()
 
-        torch.manual_seed(42)
         with torch.no_grad():
-            inputs = torch.randint(
-                model_args.vocab_size, size=(self.bsz, self.seqlen), device=self.device
-            )
-            out = model(inputs)
-            out_hf = model_hf(inputs)
-            # NOTE: @goon -  current mean error ~ 1%. Might be failing due to the RoPE impl
-            # mismatches?
-            torch.testing.assert_close(out_hf.logits, out, atol=1e-1, rtol=1e-1)
-
-    def test_dev_cfg(self):
-        dev_cfg = llama3_moe_configs["3B_dev|n_layers=8|n_moe=4|num_experts=3"]
-        assert dev_cfg.n_layers == 8
-        assert dev_cfg.moe_args.num_experts == 3
-        assert dev_cfg.is_moe_list == 4 * [False] + 4 * [True]
+            out = model(inputs["input_ids"])
+            out_hf = model_hf(**inputs).logits
+            p, q = out_hf.softmax(dim=-1), out.softmax(dim=-1)
+            kl = (p * (p / q).log()).sum(dim=-1).mean()
+            assert kl < 1e-5, f"{kl=}"
+            torch.testing.assert_close(out_hf, out, atol=1e-2, rtol=1e-5)
