@@ -113,4 +113,4 @@ class TestModel:
             torch.testing.assert_close(out_hf, out, atol=1e-2, rtol=1e-5)
             p, q = out_hf.softmax(dim=-1), out.softmax(dim=-1)
             kl = (p * (p / q).log()).sum(dim=-1).mean()
-            kl
+            assert kl < 1e-5, f"{kl=}"
