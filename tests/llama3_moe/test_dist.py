@@ -381,7 +381,7 @@ class TestImpls(DTest):
         )
         model_args_moe.moe_args = moe_args
         model_args_moe.moe_inter_dim = llama_3b_hidden_dim // n_groups
-        model_args_moe.is_moe_list = [False, True]
+        model_args_moe.is_moe_list = [True, False]
         model_args_moe.custom_moe_impl = "virtual_group"
 
         job_config = Llama3MoEJobConfig()
