@@ -114,3 +114,25 @@ class TestModel:
             kl = (p * (p / q).log()).sum(dim=-1).mean()
             assert kl < 1e-5, f"{kl=}"
             torch.testing.assert_close(out_hf, out, atol=1e-2, rtol=1e-5)
+
+    def test_model_dynamic_n_moe_layers(self):
+        """
+        Test dynamically inserting MoE layers through the job config args
+        """
+        # NOTE: @goon - testing requires cuda, as the histogram op used in the current router impl
+        # is not supported on CPU, apparently.
+        args = Llama3MoEModelArgs(
+            dim=self.dim,
+            moe_inter_dim=self.moe_inter_dim,
+            n_layers=4,
+            n_heads=self.n_heads,
+            vocab_size=self.vocab_size,
+            is_moe_list=[True for _ in range(self.n_layers)],
+        )
+        job_config = Llama3MoEJobConfig()
+        job_config.model_overrides.n_moe_layers = 2
+        args.update_from_config(job_config)
+        with torch.device("meta"):
+            model = Llama3MoE(args)
+        moe_enabled_list = [l.moe_enabled for l in model.layers.values()]
+        assert moe_enabled_list == [False, True, True, False]

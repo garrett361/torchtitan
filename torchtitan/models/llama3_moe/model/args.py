@@ -74,9 +74,17 @@ class Llama3MoEModelArgs(BaseModelArgs):
                 setattr(self.moe_args, k, v)
         # Special arg handling:
         if (n_moe_layers := job_config.model_overrides.n_moe_layers) is not None:
-            self.is_moe_list = (self.n_layers - n_moe_layers) * [
-                False
-            ] + n_moe_layers * [True]
+            if n_moe_layers >= self.n_layers - 1:
+                raise ValueError(
+                    f"Must have {n_moe_layers=} larger than {self.n_layers - 1 =}"
+                    "n_moe_layers inserts MoE layers starting from the second to last layer"
+                    " following the advice of https://arxiv.org/pdf/2403.17887 sec 4.4"
+                )
+            self.is_moe_list = (
+                (self.n_layers - n_moe_layers - 1) * [False]
+                + n_moe_layers * [True]
+                + [False]
+            )
 
         if self.is_moe_list is not None and len(self.is_moe_list) != self.n_layers:
             raise ValueError(
