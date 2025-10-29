@@ -8,6 +8,7 @@
 
 
 import math
+from dataclasses import dataclass
 
 import torch
 from einops import rearrange
@@ -18,12 +19,14 @@ from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs
 from torchtitan.models.moe import MoE, MoEArgs
 from torchtitan.protocols.train_spec import ModelProtocol
 
+# NOTE: @goon - we pull in both the dsv3 yarn impl, as well as the llama style rope impl
+
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
 # NOTE: @goon - this was taken from DSv3 and was used for our 70B Llama context extension, but
 # actual Llama3 uses a different RoPE function that was only properly added to titan after we
 # started this work: https://github.com/pytorch/torchtitan/pull/1839
-def precompute_freqs_cis(
+def precompute_freqs_cis_dsv3(
     dim: int,
     seq_len: int,
     original_seq_len: int,
@@ -140,71 +143,72 @@ def precompute_freqs_cis(
     return freqs_cis
 
 
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+# From
+# https://github.com/pytorch/torchtitan/blob/89c631cdcefd05885af511513507099148f2bd1d/torchtitan/models/llama3/model/model.py?plain=1#L30
+@dataclass
+class RoPEScalingArgs:
+    scaling_factor: float = 8.0
+    low_freq_factor: float = 1.0
+    high_freq_factor: float = 4.0
+    original_max_position_embeddings: int = 8192
+
+
+def precompute_freqs_cis_llama(
+    dim: int,
+    end: int,
+    theta: float = 10000.0,
+    scaling_args: RoPEScalingArgs = RoPEScalingArgs(),
+) -> torch.Tensor:
     """
-    Reshape frequency tensor for broadcasting it with another tensor.
+    Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
 
-    This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
-    for the purpose of broadcasting the frequency tensor during element-wise operations.
-
-    The input freqs_cis tensor is assumed to be of shape (max_seqlen, dim),
-    and the first seqlen elements will be sliced, but dim must match x.
+    This function calculates a frequency tensor with complex exponentials using the given dimension 'dim'
+    and the end index 'end'. The 'theta' parameter scales the frequencies.
+    The returned tensor contains complex values in complex64 data type.
 
     Args:
-        freqs_cis (torch.Tensor): Frequency tensor to be reshaped.
-        x (torch.Tensor): Target tensor for broadcasting compatibility.
-
+        dim (int): Dimension of the frequency tensor.
+        end (int): End index for precomputing frequencies.
+        theta (float | None): Scaling factor for frequency computation. Defaults to 10000.0.
+        scaling_args (RoPEScalingArgs | None): RoPE scaling arguments. Defaults to None.
+            scaling_factor (float): RoPE scaling multiplier; larger values
+                stretch positions to support longer contexts. Defaults to 8.0.
+            low_freq_factor (float): Extra scaling applied to the low-frequency
+                (long-wavelength) RoPE bands. Defaults to 1.0.
+            high_freq_factor (float): Extra scaling applied to the high-frequency
+                (short-wavelength) RoPE bands. Defaults to 4.0.
+            original_max_position_embeddings (int): Maximum position embeddings
+                for original model. Defaults to 8192.
     Returns:
-        torch.Tensor: Reshaped frequency tensor.
+        torch.Tensor: Precomputed frequency tensor with complex exponentials.
     """
-    ndim = x.ndim
-    assert ndim > 1
-    seqlen = x.shape[1]
-    freqs_cis = freqs_cis[0:seqlen]
-    assert freqs_cis.shape == (seqlen, x.shape[-1])
-    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-    return freqs_cis.view(*shape)
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
 
-
-def apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cis: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Apply rotary embeddings to input tensors using the given frequency tensor.
-
-    This function applies rotary embeddings to the given query 'xq' and key 'xk' tensors using the provided
-    frequency tensor 'freqs_cis'. The input tensors are reshaped as complex numbers, and the frequency tensor
-    is reshaped for broadcasting compatibility. The resulting tensors contain rotary embeddings and are
-    returned as real tensors.
-
-    Args:
-        xq (torch.Tensor): Query tensor to apply rotary embeddings.
-        xk (torch.Tensor): Key tensor to apply rotary embeddings.
-        freqs_cis (torch.Tensor): Precomputed frequency tensor for complex exponentials.
-
-    Returns:
-        tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
-    """
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
-
-
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    bs, slen, n_kv_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        torch.unsqueeze(x, dim=3)
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
+    # apply rope scaling
+    scaling_factor = scaling_args.scaling_factor
+    low_freq_factor = scaling_args.low_freq_factor
+    high_freq_factor = scaling_args.high_freq_factor
+    original_max_position_embeddings = scaling_args.original_max_position_embeddings
+    wavelen = 2 * math.pi / freqs
+    high_freq_wavelen = original_max_position_embeddings / high_freq_factor
+    low_freq_wavelen = original_max_position_embeddings / low_freq_factor
+    # wavelen < high_freq_wavelen: do nothing
+    # wavelen > low_freq_wavelen: divide by scaling factor
+    freqs = torch.where(wavelen > low_freq_wavelen, freqs / scaling_factor, freqs)
+    # wavelen in between: linear interpolation of the scaled freqs and the original freqs
+    smooth_factor = (original_max_position_embeddings / wavelen - low_freq_factor) / (
+        high_freq_factor - low_freq_factor
     )
+    smoothed_freqs = (
+        1 - smooth_factor
+    ) * freqs / scaling_factor + smooth_factor * freqs
+    is_medium_freqs = ~(wavelen < high_freq_wavelen) * ~(wavelen > low_freq_wavelen)
+    freqs = torch.where(is_medium_freqs, smoothed_freqs, freqs)
+
+    t = torch.arange(end, device=freqs.device)
+    freqs = torch.outer(t, freqs).float()
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+    return freqs_cis
 
 
 class _CustomMoE(MoE):
@@ -528,15 +532,21 @@ class Llama3MoE(nn.Module, ModelProtocol):
             )
 
     def _precompute_freqs_cis(self) -> torch.Tensor:
-        return precompute_freqs_cis(
-            dim=self.model_args.dim // self.model_args.n_heads,
-            seq_len=self.model_args.max_seq_len,
-            original_seq_len=self.model_args.original_seq_len,
-            rope_theta=self.model_args.rope_theta,
-            rope_factor=self.model_args.rope_factor,
-            beta_fast=self.model_args.beta_fast,
-            beta_slow=self.model_args.beta_slow,
-        )
+        if self.model_args.rope_impl == "llama":
+            return precompute_freqs_cis_llama(
+                dim=self.model_args.dim // self.model_args.n_heads,
+                end=self.model_args.max_seq_len,
+                theta=self.model_args.rope_theta,
+            )
+        elif self.model_args.rope_impl == "dsv3":
+            return precompute_freqs_cis_dsv3(
+                dim=self.model_args.dim // self.model_args.n_heads,
+                seq_len=self.model_args.max_seq_len,
+                original_seq_len=self.model_args.original_seq_len,
+                rope_theta=self.model_args.rope_theta,
+            )
+        else:
+            raise ValueError(f"{self.model_args.rope_impl=} not in ['dsv3', 'llama']")
 
     def forward(
         self,
