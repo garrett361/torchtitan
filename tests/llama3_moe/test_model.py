@@ -72,6 +72,7 @@ class TestModel:
         model(inputs)
 
     def test_hf_equivalence(self) -> None:
+        torch.manual_seed(42)
         model_args = llama3_moe_configs["3B"]
         job_config = Llama3MoEJobConfig()
         job_config.checkpoint.enable = True
@@ -106,11 +107,10 @@ class TestModel:
         for k, v in inputs.items():
             inputs[k] = v.cuda()
 
-        torch.manual_seed(42)
         with torch.no_grad():
             out = model(inputs["input_ids"])
             out_hf = model_hf(**inputs).logits
-            torch.testing.assert_close(out_hf, out, atol=1e-2, rtol=1e-5)
             p, q = out_hf.softmax(dim=-1), out.softmax(dim=-1)
             kl = (p * (p / q).log()).sum(dim=-1).mean()
             assert kl < 1e-5, f"{kl=}"
+            torch.testing.assert_close(out_hf, out, atol=1e-2, rtol=1e-5)
