@@ -318,6 +318,11 @@ class VirtualGroupMoE(_CustomMoE):
             raise ValueError(
                 f"{self.moe_args.top_k=} must be divisible by {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
             )
+        if self.moe_args.score_before_experts:
+            raise ValueError(
+                f"Virtual group init requires {self.moe_args.score_before_experts=} to be False"
+            )
+
 
     def init_weights(
         self,
