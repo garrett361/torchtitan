@@ -323,7 +323,6 @@ class VirtualGroupMoE(_CustomMoE):
                 f"Virtual group init requires {self.moe_args.score_before_experts=} to be False"
             )
 
-
     def init_weights(
         self,
         init_std: float,
