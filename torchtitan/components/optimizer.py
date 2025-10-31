@@ -345,7 +345,7 @@ def build_optimizers_with_moe_load_balancing(
             for transformer_block in model_part.layers.values():
                 if transformer_block.moe_enabled:
                     # Assumption: load_balance_coeff is set universally on all moe blocks.
-                    return bool(transformer_block.moe.load_balance_coeff)
+                    return transformer_block.moe.load_balance_coeff is not None
         return False
 
     # for MoE auxiliary-loss-free load balancing
@@ -366,8 +366,6 @@ def build_optimizers_with_moe_load_balancing(
             for transformer_block in model_part.layers.values():
                 if not transformer_block.moe_enabled:
                     continue
-                if transformer_block.moe.load_balance_coeff is None:
-                    return
                 tokens_per_expert = transformer_block.moe.tokens_per_expert
                 if _is_recomputation_enabled(transformer_block):
                     # TODO: This is a hack, we assume with full AC, the tokens_per_expert is counted twice.
@@ -401,11 +399,12 @@ def build_optimizers_with_moe_load_balancing(
 
                     # update the expert bias
                     # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
-                    expert_bias_delta = moe.load_balance_coeff * torch.sign(
-                        tokens_per_expert.mean() - tokens_per_expert
-                    )
-                    expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
-                    moe.expert_bias.add_(expert_bias_delta)
+                    if transformer_block.moe.load_balance_coeff != 0.0:
+                        expert_bias_delta = moe.load_balance_coeff * torch.sign(
+                            tokens_per_expert.mean() - tokens_per_expert
+                        )
+                        expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
+                        moe.expert_bias.add_(expert_bias_delta)
                     moe.tokens_per_expert.zero_()
                     moe.tokens_per_expert_cumulative.add_(tokens_per_expert)
 
