@@ -142,6 +142,14 @@ llama3_moe_configs = {
         multiple_of=256,
         rope_theta=500000,
         is_moe_list=None,
+        moe_args=MoEArgs(
+            num_experts=8,
+            num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
+            top_k=2,
+        ),
     ),
     # NOTE: @goon - the 3B_2layer and 3B_2layer_halfmoe models are used in
     # torchtitan/tests/llama3_moe/test_dist.py, do not delete!
@@ -156,6 +164,14 @@ llama3_moe_configs = {
         multiple_of=256,
         rope_theta=500000,
         is_moe_list=None,
+        moe_args=MoEArgs(
+            num_experts=8,
+            num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
+            top_k=2,
+        ),
     ),
     "3B_2layer_halfmoe": Llama3MoEModelArgs(
         dim=3072,
