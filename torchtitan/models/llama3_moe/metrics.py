@@ -24,7 +24,6 @@ if TYPE_CHECKING:
 class CustomMetricsProcessor(MetricsProcessor):
     eps = 1e-5
     device = "cuda"
-    max_entropy: float | None = None
 
     @cached_property
     def rank(self) -> int:
@@ -132,10 +131,8 @@ class CustomMetricsProcessor(MetricsProcessor):
                     -tokens_per_expert_cumulative_prob.log()
                     * tokens_per_expert_cumulative_prob
                 ).sum()
-                self.max_entropy = self.max_entropy or math.log(
-                    tokens_per_expert_cumulative_prob.numel()
-                )
-                moe_metrics[int(block_idx)] = entropy / self.max_entropy
+                max_entropy = math.log(tokens_per_expert_cumulative_prob.numel())
+                moe_metrics[int(block_idx)] = entropy / max_entropy
                 transformer_block.moe.tokens_per_expert_cumulative.zero_()
 
         # If using PP, need to also gather stats from other PP ranks.
