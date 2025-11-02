@@ -7,8 +7,9 @@
 
 import torch
 from einops import rearrange
-from torchtitan.models.moe import FeedForward, MoE, MoEArgs, MoEOld
 from triton.testing import do_bench
+
+from torchtitan.models.moe import FeedForward, MoE, MoEArgs, MoEOld
 
 
 # NOTE: @goon -  torch.testing.assert_close is very strict and hard to pass. Use the more-lenient
@@ -140,18 +141,25 @@ class TestModel:
     ) -> tuple[float, float]:
         torch.manual_seed(42)
         moe_old, moe = self._get_moe_old_and_moe_layers(score_before_experts)
-        with torch.no_grad():
-            inputs = torch.randn(
-                self.bsz,
-                self.seqlen,
-                self.dim,
-                device=self.device,
-                dtype=torch.bfloat16,
-            )
-            out_moe_old = moe_old(inputs)
-            out_moe = moe(inputs)
+        inputs = torch.randn(
+            self.bsz,
+            self.seqlen,
+            self.dim,
+            device=self.device,
+            dtype=torch.bfloat16,
+        )
+        out_moe_old = moe_old(inputs)
+        out_moe = moe(inputs)
+        assert_close("moe_old vs moe", out_moe_old, out_moe, self.assert_close_ratio)
+
+        out_moe_old.sum().backward()
+        out_moe.sum().backward()
+        for (n_old, p_old), (n, p) in zip(
+            moe_old.named_parameters(), moe.named_parameters(), strict=True
+        ):
+            assert n_old == n, f"{n_old=}, {n=}"
             assert_close(
-                "moe_old vs moe", out_moe_old, out_moe, self.assert_close_ratio
+                f"grad_old vs grad: {n}", p_old.grad, p.grad, self.assert_close_ratio
             )
 
     def test_moe_ffn_equivalence(self, iteration: int = 0) -> tuple[float, float]:
