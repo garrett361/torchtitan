@@ -162,6 +162,28 @@ class TestModel:
                 f"grad_old vs grad: {n}", p_old.grad, p.grad, self.assert_close_ratio
             )
 
+    def test_determinism(self):
+        torch.manual_seed(42)
+        moe_old, moe = self._get_moe_old_and_moe_layers(score_before_experts=False)
+        inputs = torch.randn(
+            self.bsz,
+            self.seqlen,
+            self.dim,
+            device=self.device,
+            dtype=torch.bfloat16,
+        )
+
+        out_moe_old = []
+        out_moe = []
+        with torch.no_grad():
+            for _ in range(100):
+                out_moe_old.append(moe_old(inputs))
+                out_moe.append(moe(inputs))
+        out_moe_old = torch.stack(out_moe_old, dim=0)
+        out_moe = torch.stack(out_moe, dim=0)
+        print(f"{out_moe_old.std(dim=0).mean()=}")
+        print(f"{out_moe.std(dim=0).mean()=}")
+
     def test_moe_ffn_equivalence(self, iteration: int = 0) -> tuple[float, float]:
         torch.manual_seed(42 + iteration)
         moe_old, moe, ffn = self._get_equiv_layers()
