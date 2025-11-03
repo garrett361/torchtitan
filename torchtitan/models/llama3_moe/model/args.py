@@ -34,9 +34,7 @@ class Llama3MoEModelArgs(BaseModelArgs):
 
     # MoE
     moe_args: MoEArgs = field(default_factory=MoEArgs)
-    # TODO: node-limited routing is not supported yet
     n_expert_groups: int = 1
-    n_limited_groups: int = 1
     is_moe_list: list[bool] | None = None
 
     max_seq_len: int = 131072

@@ -188,6 +188,7 @@ class TokenChoiceTopKRouter(nn.Module):
         score_func: Literal["softmax", "sigmoid"],
         route_norm: bool,
         route_scale: float,
+        n_expert_groups: int = 1,
         _debug_force_load_balance: bool = False,
     ):
         super().__init__()
@@ -197,6 +198,7 @@ class TokenChoiceTopKRouter(nn.Module):
         self.score_func = score_func
         self.route_norm = route_norm
         self.route_scale = route_scale
+        self.n_expert_groups = n_expert_groups
         self._debug_force_load_balance = _debug_force_load_balance
 
     def _debug_force_load_balance_routing(
@@ -244,6 +246,32 @@ class TokenChoiceTopKRouter(nn.Module):
             scores = F.softmax(scores.to(torch.float32), dim=1)
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
+
+        if self.n_expert_groups > 1:
+            n_tok = scores.shape[0]
+            group_scores = (
+                router_logits.view(batch_size * seq_len, self.num_group, -1)
+                .max(dim=-1)
+                .values
+            )
+            group_idx = torch.topk(
+                group_scores, k=self.topk_group, dim=-1, sorted=False
+            )[1]
+            group_mask = torch.zeros_like(group_scores)
+            group_mask.scatter_(1, group_idx, 1)
+            score_mask = (
+                group_mask.unsqueeze(-1)
+                .expand(
+                    batch_size * seq_len,
+                    self.num_group,
+                    self.num_experts // self.num_group,
+                )
+                .reshape(batch_size * seq_len, -1)
+            )
+            tmp_scores = router_logits.masked_fill(~score_mask.bool(), 0.0)
+            topk_weight, topk_idx = torch.topk(
+                tmp_scores, k=self.top_k, dim=-1, sorted=False
+            )
 
         # top scores shape (bs*slen, top_k)
         # NOTE: The expert_bias is only used for routing. The gating value
@@ -516,7 +544,7 @@ class MoE(MoEOld):
         x = x.view(-1, dim)
 
         # top_scores shape (bs*slen, top_k)
-        # token_indices_experts_sorted shape (bs*slen*top_k,)
+        # selected_experts_indices shape (bs*slen, top_k)
         # num_tokens_per_expert shape (num_experts,)
         (
             top_scores,
@@ -532,8 +560,7 @@ class MoE(MoEOld):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        # top_scores shape (bs*slen,top_k)
-        # token_indices_experts_sorted shape (bs*slen*top_k,)
+        # top_scores and token_indices_experts_sorted shape (bs*slen*top_k,)
         # num_tokens_per_expert shape (num_experts,)
         # NOTE: the reason we need to compute num_tokens_per_expert again is:
         #       1st computation in router is to update self.tokens_per_expert
@@ -570,15 +597,15 @@ class MoE(MoEOld):
             top_scores = top_scores.flatten()
             top_scores[token_indices_experts_sorted] = top_scores_experts_sorted
             routed_input[token_indices_experts_sorted] = routed_output
-            routed_input = routed_input.reshape(bs * slen, -1, dim)
-            top_scores = top_scores.reshape(bs * slen, 1, -1)
+            routed_input = routed_input.reshape(-1, self.router.top_k, dim)
+            top_scores = top_scores.reshape(-1, 1, self.router.top_k)
             out_experts = (
                 torch.bmm(top_scores, routed_input.float()).to(x.dtype).squeeze(1)
             )
         else:
             # Unsort routed outputs and save an allocation: store unsorted outputs in routed_input
             routed_input[token_indices_experts_sorted] = routed_output
-            out_experts = routed_input.reshape(bs * slen, -1, dim).sum(dim=1)
+            out_experts = routed_input.reshape(-1, self.router.top_k, dim).sum(dim=1)
 
         if out is None:
             return out_experts.reshape(bs, slen, dim)

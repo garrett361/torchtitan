@@ -38,6 +38,7 @@ class ModelOverrides:
     moe_inter_dim: int | None = None
     n_layers: int | None = None
     custom_moe_impl: str | None = None
+    n_expert_groups: int | None = None
     # Covenience args below:
     n_moe_layers: int | None = None
 
