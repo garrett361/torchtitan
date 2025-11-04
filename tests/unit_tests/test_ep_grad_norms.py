@@ -49,6 +49,7 @@ class TestGradNorm(dtest.DTest):
         )
         out_fsdp = model_fsdp(inputs)
         out_ep = model_ep(inputs)
+        torch.testing.assert_close(out_fsdp, out_ep, atol=1e-2, rtol=1e-2)
         out_fsdp.pow(2).mean().backward()
         out_ep.pow(2).mean().backward()
 
@@ -66,5 +67,4 @@ class TestGradNorm(dtest.DTest):
             pp_mesh=None,
             ep_enabled=parallel_dims_ep.ep_enabled,
         )
-
-        grad_norm_ep
+        torch.testing.assert_close(grad_norm_ep, grad_norm_fsdp)
