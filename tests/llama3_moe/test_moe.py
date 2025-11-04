@@ -34,7 +34,7 @@ def assert_close(prefix, ref, tri, ratio, err_atol=1e-6):
     assert error_rate < ratio, msg
 
 
-class TestModel:
+class TestMoE:
     # Default following DSv3 16B
     assert_close_ratio = 1e-2
     bsz = 2
@@ -51,6 +51,30 @@ class TestModel:
     seqlen = 64
     top_k = 6
     use_grouped_mm = True
+
+    def _get_moe_layer(
+        self, score_before_experts: bool | None = None, n_expert_groups: int = 1
+    ) -> MoE:
+        """
+        Create and MOE layer.
+        """
+        moe_args = MoEArgs(
+            num_experts=self.num_experts,
+            num_shared_experts=self.num_shared_experts,
+            score_func="softmax",
+            route_norm=self.route_norm,
+            score_before_experts=score_before_experts or self.score_before_experts,
+            top_k=self.top_k,
+            use_grouped_mm=self.use_grouped_mm,
+            n_expert_groups=n_expert_groups,
+        )
+        moe = MoE(moe_args, dim=self.dim, hidden_dim=self.moe_inter_dim).to(
+            device=self.device, dtype=torch.bfloat16
+        )
+
+        moe.init_weights(1 / self.dim**0.5, self.device)
+
+        return moe
 
     def _get_moe_old_and_moe_layers(
         self, score_before_experts: bool | None = None
@@ -236,6 +260,21 @@ class TestModel:
         print(f"{moe_old_time_ms=}")
         print(f"{moe_time_ms=}")
         print(f"Speedup: {moe_old_time_ms/moe_time_ms=}")
+
+    def test_n_expert_groups(self) -> None:
+        """
+        Just testing no errors for now.
+        """
+        moe = self._get_moe_layer(score_before_experts=False, n_expert_groups=2)
+        torch.manual_seed(42)
+        inputs = torch.randn(
+            self.bsz,
+            self.seqlen,
+            self.dim,
+            device=self.device,
+            dtype=torch.bfloat16,
+        )
+        moe(inputs).sum().backward()
 
 
 if __name__ == "__main__":

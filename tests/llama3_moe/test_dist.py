@@ -448,7 +448,7 @@ class TestImpls(DTest):
         custom_checkpointer = CustomCheckpointManager(
             hf_storage_reader=TransformingHuggingFaceStorageReader,
             hf_storage_reader_kwargs={
-                "transform_fn": get_hf_weight_transform_cls("replicate")(
+                "transform_fn": get_hf_weight_transform_cls(hf_weight_transform)(
                     model_args=model_args_moe,
                     hf_to_titan_fqn_map=sd_adapter_moe.from_hf_map,
                 ),

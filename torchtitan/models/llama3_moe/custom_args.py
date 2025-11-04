@@ -54,6 +54,8 @@ class MoEOverrides:
     use_grouped_mm: bool | None = None
     load_balance_coeff: float | None | None = None
     hf_ffn_hidden_dim: int | None | None = None
+    n_expert_groups: int | None = None
+    top_k_group: int | None = None
 
 
 @dataclass
