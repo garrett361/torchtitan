@@ -123,6 +123,85 @@ class ConstantScheduler(_TopKScheduler):
                     )
 
 
+class LossBasedScheduler(_TopKScheduler):
+    name = "loss"
+
+    def __init__(
+        self,
+        model_args: Llama3MoEModelArgs,
+        top_k_args: TopKSchedulerArgs,
+        model_parts: list[torch.nn.Module],
+    ) -> None:
+        super().__init__(
+            model_args=model_args, top_k_args=top_k_args, model_parts=model_parts
+        )
+        assert self.top_k_args.min_top_k is not None
+        assert self.top_k_args.target_loss is not None
+        assert self.top_k_args.min_steps is not None
+        assert self.top_k_args.warmup_steps is not None
+        assert self.top_k_args.beta is not None
+        assert self.top_k_args.beta >= 0.0
+        assert self.top_k_args.beta <= 1.0
+        self._curr_loss: float | None = None
+        self._mini_step = 0
+
+    def state_dict(self) -> dict[str, Any]:
+        state = {
+            "_step": self._step,
+            "layer_idx_to_top_k": self.layer_idx_to_top_k,
+            "_curr_loss": self._curr_loss,
+            "_mini_step": self._mini_step,
+        }
+        return state
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        for k, v in state_dict.items():
+            setattr(self, k, v)
+
+    def _get_idx_and_moe(self) -> tuple[int, MoE] | tuple[None, None]:
+        layer_top_k_pairs = [
+            (layer_idx, k)
+            for layer_idx, k in self.layer_idx_to_top_k.items()
+            if k > self.top_k_args.min_top_k
+        ]
+        if not layer_top_k_pairs:
+            return None, None
+        layer_idx = max(layer_top_k_pairs, key=lambda x: x[0])[0]
+        layer_idx_str = str(layer_idx)
+        for mp in self.model_parts:
+            if layer_idx_str in mp.layers:
+                return layer_idx, mp.layers[layer_idx_str].moe
+
+    def step(self, loss: float) -> None:
+        self._step += 1
+        self._mini_step += 1
+        done_warmup = self._step > self.top_k_args.warmup_steps
+        if done_warmup:
+            self._curr_loss = (
+                loss
+                if self._curr_loss is None
+                else (self.top_k_args.beta * self._curr_loss)
+                + (1 - self.top_k_args.beta) * loss
+            )
+            if self._mini_step >= self.top_k_args.min_steps:
+                if self._curr_loss <= self.top_k_args.target_loss:
+                    self._mini_step = 0
+                    self._curr_loss = None
+                    layer_idx, moe = self._get_idx_and_moe()
+                    if moe is not None:
+                        moe.router.top_k -= 1
+                        moe.reorderer.top_k -= 1
+                        self.layer_idx_to_top_k[layer_idx] -= 1
+                        new_top_k = self.layer_idx_to_top_k[layer_idx]
+                        logger.info(
+                            f"Reducing top_k on {layer_idx=} MoE from {new_top_k + 1} -> {new_top_k}."
+                        )
+                        # TODO: @goon - DELETE
+                        logger.info(
+                            f"{self._mini_step=}, {self._curr_loss=}, {self.top_k_args.target_loss=}"
+                        )
+
+
 def get_top_k_scheduler(
     model_args: Llama3MoEModelArgs,
     top_k_args: TopKSchedulerArgs,
