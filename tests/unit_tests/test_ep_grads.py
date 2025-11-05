@@ -15,8 +15,8 @@ from torch.distributed.tensor import DTensor
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.deepseek_v3 import (
-    deepseekv3_args,
     DeepSeekV3Model,
+    deepseekv3_args,
     parallelize_deepseekv3,
 )
 
@@ -60,7 +60,7 @@ class TestGrads(dtest.DTest):
     tol = 1e-2
 
     @pytest.mark.world_size([2, 4])
-    def test_grads(self, world_size: int) -> None:
+    def test_grads_fsdp_vs_ep(self, world_size: int) -> None:
         # Create equivalent FSDP and EP debug models:
         model_args = deepseekv3_args["debugmodel"]
         model_args.max_seq_len = self.seqlen
@@ -79,6 +79,44 @@ class TestGrads(dtest.DTest):
         }
         parallel_dims_fsdp = ParallelDims(**pd_kwargs, ep=1)
         parallel_dims_ep = ParallelDims(**pd_kwargs, ep=self.world_size)
+
+        # Default JobConfig is fine for parallelization.
+        job_config = JobConfig()
+        model_fsdp = parallelize_deepseekv3(model_fsdp, parallel_dims_fsdp, job_config)
+        model_ep = parallelize_deepseekv3(model_ep, parallel_dims_ep, job_config)
+
+        inputs = torch.randint(
+            model_args.vocab_size, size=(self.bsz, self.seqlen), device=self.device
+        )
+        out_fsdp = model_fsdp(inputs)
+        out_ep = model_ep(inputs)
+        torch.testing.assert_close(out_fsdp, out_ep, atol=self.tol, rtol=self.tol)
+        out_fsdp.pow(2).mean().backward()
+        out_ep.pow(2).mean().backward()
+        _check_grads_close(
+            model_fsdp, model_ep, world_size, atol=self.tol, rtol=self.tol
+        )
+
+    @pytest.mark.world_size(4)
+    def test_grads_partial_ep(self, world_size: int) -> None:
+        # Create equivalent FSDP and EP debug models:
+        model_args = deepseekv3_args["debugmodel"]
+        model_args.max_seq_len = self.seqlen
+        model_fsdp = DeepSeekV3Model(model_args)
+        model_fsdp.init_weights(buffer_device=self.device)
+        model_ep = deepcopy(model_fsdp)
+
+        pd_kwargs = {
+            "dp_shard": -1,
+            "dp_replicate": 1,
+            "cp": 1,
+            "tp": 1,
+            "pp": 1,
+            "etp": 1,
+            "world_size": self.world_size,
+        }
+        parallel_dims_fsdp = ParallelDims(**pd_kwargs, ep=1)
+        parallel_dims_ep = ParallelDims(**pd_kwargs, ep=2)
 
         # Default JobConfig is fine for parallelization.
         job_config = JobConfig()
