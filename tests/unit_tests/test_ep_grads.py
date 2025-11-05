@@ -15,14 +15,19 @@ from torch.distributed.tensor import DTensor
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.deepseek_v3 import (
-    DeepSeekV3Model,
     deepseekv3_args,
+    DeepSeekV3Model,
     parallelize_deepseekv3,
 )
 
 
 def _check_grads_close(
-    model_fsdp: nn.Module, model_ep: nn.Module, world_size: int, atol=None, rtol=None
+    model_fsdp: nn.Module,
+    model_ep: nn.Module,
+    world_size: int,
+    ep_degree: int,
+    atol=None,
+    rtol=None,
 ) -> None:
     fails = []
     for (n, p_fsdp), (_, p_ep) in zip(
@@ -48,7 +53,7 @@ def _check_grads_close(
                 )
             except AssertionError:
                 fails.append(
-                    f"Failed on {n=}: {g_ep_abs_sum/g_fsdp_abs_sum=}, {world_size=}"
+                    f"Failed on {n=}: {g_ep_abs_sum/g_fsdp_abs_sum=}, {world_size=}, {ep_degree=}"
                 )
     if fails:
         raise AssertionError("\n".join(fails))
@@ -57,14 +62,13 @@ def _check_grads_close(
 class TestGrads(dtest.DTest):
     bsz = 2
     seqlen = 256
-    tol = 1e-2
+    tol = 1e-1
+    model_args = deepseekv3_args["debugmodel"]
 
-    @pytest.mark.world_size([2, 4])
-    def test_grads_fsdp_vs_ep(self, world_size: int) -> None:
+    def _get_fsdp_ep_models(self, ep_degree: int) -> tuple[nn.Module, nn.Module]:
         # Create equivalent FSDP and EP debug models:
-        model_args = deepseekv3_args["debugmodel"]
-        model_args.max_seq_len = self.seqlen
-        model_fsdp = DeepSeekV3Model(model_args)
+        self.model_args.max_seq_len = self.seqlen
+        model_fsdp = DeepSeekV3Model(self.model_args)
         model_fsdp.init_weights(buffer_device=self.device)
         model_ep = deepcopy(model_fsdp)
 
@@ -84,9 +88,13 @@ class TestGrads(dtest.DTest):
         job_config = JobConfig()
         model_fsdp = parallelize_deepseekv3(model_fsdp, parallel_dims_fsdp, job_config)
         model_ep = parallelize_deepseekv3(model_ep, parallel_dims_ep, job_config)
+        return model_fsdp, model_ep
 
+    @pytest.mark.world_size([2, 4, 8])
+    def test_grads_world_ep(self, world_size: int) -> None:
+        model_fsdp, model_ep = self._get_fsdp_ep_models(ep_degree=self.world_size)
         inputs = torch.randint(
-            model_args.vocab_size, size=(self.bsz, self.seqlen), device=self.device
+            self.model_args.vocab_size, size=(self.bsz, self.seqlen), device=self.device
         )
         out_fsdp = model_fsdp(inputs)
         out_ep = model_ep(inputs)
@@ -94,37 +102,15 @@ class TestGrads(dtest.DTest):
         out_fsdp.pow(2).mean().backward()
         out_ep.pow(2).mean().backward()
         _check_grads_close(
-            model_fsdp, model_ep, world_size, atol=self.tol, rtol=self.tol
+            model_fsdp, model_ep, world_size, world_size, atol=self.tol, rtol=self.tol
         )
 
-    @pytest.mark.world_size(4)
+    @pytest.mark.world_size([4, 8])
     def test_grads_partial_ep(self, world_size: int) -> None:
-        # Create equivalent FSDP and EP debug models:
-        model_args = deepseekv3_args["debugmodel"]
-        model_args.max_seq_len = self.seqlen
-        model_fsdp = DeepSeekV3Model(model_args)
-        model_fsdp.init_weights(buffer_device=self.device)
-        model_ep = deepcopy(model_fsdp)
-
-        pd_kwargs = {
-            "dp_shard": -1,
-            "dp_replicate": 1,
-            "cp": 1,
-            "tp": 1,
-            "pp": 1,
-            "etp": 1,
-            "world_size": self.world_size,
-        }
-        parallel_dims_fsdp = ParallelDims(**pd_kwargs, ep=1)
-        parallel_dims_ep = ParallelDims(**pd_kwargs, ep=2)
-
-        # Default JobConfig is fine for parallelization.
-        job_config = JobConfig()
-        model_fsdp = parallelize_deepseekv3(model_fsdp, parallel_dims_fsdp, job_config)
-        model_ep = parallelize_deepseekv3(model_ep, parallel_dims_ep, job_config)
-
+        ep_degree = world_size // 2
+        model_fsdp, model_ep = self._get_fsdp_ep_models(ep_degree=self.world_size)
         inputs = torch.randint(
-            model_args.vocab_size, size=(self.bsz, self.seqlen), device=self.device
+            self.model_args.vocab_size, size=(self.bsz, self.seqlen), device=self.device
         )
         out_fsdp = model_fsdp(inputs)
         out_ep = model_ep(inputs)
@@ -132,5 +118,5 @@ class TestGrads(dtest.DTest):
         out_fsdp.pow(2).mean().backward()
         out_ep.pow(2).mean().backward()
         _check_grads_close(
-            model_fsdp, model_ep, world_size, atol=self.tol, rtol=self.tol
+            model_fsdp, model_ep, world_size, ep_degree, atol=self.tol, rtol=self.tol
         )
