@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 from copy import deepcopy
 
 import dtest
@@ -9,8 +15,8 @@ from torch.distributed.tensor import DTensor
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.deepseek_v3 import (
-    DeepSeekV3Model,
     deepseekv3_args,
+    DeepSeekV3Model,
     parallelize_deepseekv3,
 )
 
