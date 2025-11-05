@@ -102,12 +102,17 @@ class TestGrads(dtest.DTest):
         out_fsdp.pow(2).mean().backward()
         out_ep.pow(2).mean().backward()
         _check_grads_close(
-            model_fsdp, model_ep, world_size, world_size, atol=self.tol, rtol=self.tol
+            model_fsdp,
+            model_ep,
+            self.world_size,
+            self.world_size,
+            atol=self.tol,
+            rtol=self.tol,
         )
 
     @pytest.mark.world_size([4, 8])
     def test_grads_partial_ep(self, world_size: int) -> None:
-        ep_degree = world_size // 2
+        ep_degree = self.world_size // 2
         model_fsdp, model_ep = self._get_fsdp_ep_models(ep_degree=self.world_size)
         inputs = torch.randint(
             self.model_args.vocab_size, size=(self.bsz, self.seqlen), device=self.device
@@ -118,5 +123,10 @@ class TestGrads(dtest.DTest):
         out_fsdp.pow(2).mean().backward()
         out_ep.pow(2).mean().backward()
         _check_grads_close(
-            model_fsdp, model_ep, world_size, ep_degree, atol=self.tol, rtol=self.tol
+            model_fsdp,
+            model_ep,
+            self.world_size,
+            ep_degree,
+            atol=self.tol,
+            rtol=self.tol,
         )
