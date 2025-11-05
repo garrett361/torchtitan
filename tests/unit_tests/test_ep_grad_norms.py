@@ -3,10 +3,11 @@ from copy import deepcopy
 import dtest
 import pytest
 import torch
+import torch.nn as nn
+from torch.distributed.tensor import DTensor
 
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.deepseek_v3 import (
     DeepSeekV3Model,
     deepseekv3_args,
@@ -14,12 +15,46 @@ from torchtitan.models.deepseek_v3 import (
 )
 
 
-class TestGradNorm(dtest.DTest):
+def _check_grads_close(
+    model_fsdp: nn.Module, model_ep: nn.Module, world_size: int, atol=None, rtol=None
+) -> None:
+    fails = []
+    for (n, p_fsdp), (_, p_ep) in zip(
+        model_fsdp.named_parameters(), model_ep.named_parameters(), strict=True
+    ):
+        if p_fsdp.grad is None:
+            assert p_ep.grad is None
+        else:
+            g_fsdp = (
+                p_fsdp.grad.full_tensor()
+                if isinstance(p_fsdp.grad, DTensor)
+                else p_fsdp.grad
+            )
+            g_ep = (
+                p_ep.grad.full_tensor() if isinstance(p_ep.grad, DTensor) else p_ep.grad
+            )
+            # Very simple test: the abs sum of all grads should be close:
+            try:
+                g_fsdp_abs_sum = g_fsdp.abs().sum()
+                g_ep_abs_sum = g_ep.abs().sum()
+                torch.testing.assert_close(
+                    g_fsdp_abs_sum, g_ep_abs_sum, atol=atol, rtol=rtol
+                )
+            except AssertionError:
+                fails.append(
+                    f"Failed on {n=}: {g_ep_abs_sum/g_fsdp_abs_sum=}, {world_size=}"
+                )
+    if fails:
+        raise AssertionError("\n".join(fails))
+
+
+class TestGrads(dtest.DTest):
     bsz = 2
     seqlen = 256
+    tol = 1e-2
 
-    @pytest.mark.world_size(2)
-    def test_grad_norm(self, world_size: int) -> None:
+    @pytest.mark.world_size([2, 4])
+    def test_grads(self, world_size: int) -> None:
         # Create equivalent FSDP and EP debug models:
         model_args = deepseekv3_args["debugmodel"]
         model_args.max_seq_len = self.seqlen
@@ -49,22 +84,9 @@ class TestGradNorm(dtest.DTest):
         )
         out_fsdp = model_fsdp(inputs)
         out_ep = model_ep(inputs)
-        torch.testing.assert_close(out_fsdp, out_ep, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out_fsdp, out_ep, atol=self.tol, rtol=self.tol)
         out_fsdp.pow(2).mean().backward()
         out_ep.pow(2).mean().backward()
-
-        grad_norm_fsdp = dist_utils.clip_grad_norm_(
-            [p for p in model_fsdp.parameters()],
-            1.0,
-            foreach=True,
-            pp_mesh=None,
-            ep_enabled=parallel_dims_fsdp.ep_enabled,
+        _check_grads_close(
+            model_fsdp, model_ep, world_size, atol=self.tol, rtol=self.tol
         )
-        grad_norm_ep = dist_utils.clip_grad_norm_(
-            [p for p in model_ep.parameters()],
-            1.0,
-            foreach=True,
-            pp_mesh=None,
-            ep_enabled=parallel_dims_ep.ep_enabled,
-        )
-        torch.testing.assert_close(grad_norm_ep, grad_norm_fsdp)
