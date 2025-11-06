@@ -6,14 +6,18 @@ dump_folder = "./outputs"
 description = "Llama 3 8B training"
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 profile_freq = 100
 
 [metrics]
 log_freq = 10
-enable_tensorboard = true
+enable_tensorboard = false
 save_tb_folder = "tb"
+enable_ibm_wandb = false
+wandb_dir = "/gpfs/lchu"
+wandb_project_name = "8b-test"  # to be switched to prod name once tested
+wandb_run_id = "8-test-1"  # to be switched to prod name once tested
 
 [model]
 name = "llama3"
@@ -35,7 +39,7 @@ data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 tensor_parallel_degree = 1
 compile = false
-dataset = "c4"
+dataset = "c4-test"
 
 [experimental]
 context_parallel_degree = 1
