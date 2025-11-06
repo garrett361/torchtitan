@@ -38,17 +38,8 @@ tokenize-tulu:
     --dataset_mixer_list $(TULU) 1.0 \
 	$(OI_CACHE_DATASET_FLAGS)
 
-fsdp-debug:
-	export CONFIG_FILE=./torchtitan/train_configs/debug_yarn_model && \
-	./run_train.sh \
-			--parallelism.data_parallel_shard_degree -1 \
-			--parallelism.tensor_parallel_degree 1 \
-			--parallelism.expert_parallel_degree 1
-
 fsdp-8b:
-	torchrun --nproc-per-node 8 train.py --job.config_file ./train_configs/llama3_70b.toml
-	# export CONFIG_FILE=./torchtitan/train_configs/llama3_8B.toml && \
-	# ./run_train.sh \
-	# 		--parallelism.data_parallel_shard_degree -1 \
-	# 		--parallelism.tensor_parallel_degree 1 \
-	# 		--parallelism.expert_parallel_degree 1 \
+	torchrun --nproc-per-node 8 train.py --job.config_file ./train_configs/llama3_8b.toml
+
+fsdp-8b-sft:
+	torchrun --nproc-per-node 8 train.py --job.config_file ./train_configs/llama3_8b.toml

@@ -9,30 +9,34 @@ import time
 from datetime import timedelta
 
 import torch
-
 from torch.distributed.elastic.multiprocessing.errors import record
+from torchao.float8.fsdp_utils import WeightWithDynamicFloat8CastTensor
+from transformers import AutoTokenizer
 
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
-from torchtitan.datasets import build_experimental_data_loader, build_hf_data_loader, build_tokenizer
+from torchtitan.datasets import (
+    build_experimental_data_loader,
+    build_hf_data_loader,
+    build_sft_data_loader,
+    build_tokenizer,
+)
 from torchtitan.float8 import Float8Handler
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.parallelisms import (
+    ParallelDims,
     models_parallelize_fns,
     models_pipelining_fns,
-    ParallelDims,
 )
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 from torchtitan.utils import device_module, device_type
 
-from transformers import AutoTokenizer
-
-from torchao.float8.fsdp_utils import WeightWithDynamicFloat8CastTensor
 torch.serialization.add_safe_globals([WeightWithDynamicFloat8CastTensor])
+
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
@@ -85,19 +89,38 @@ def main(job_config: JobConfig):
     else:
         dp_degree, dp_rank = 1, 0
 
+    if parallel_dims.cp_enabled:
+        cp_mesh = world_mesh["cp"]
+        cp_degree, cp_rank = cp_mesh.size(), cp_mesh.get_local_rank()
+    else:
+        cp_degree, cp_rank = 1, 0
+
     if parallel_dims.pp_enabled:
         pp_mesh = world_mesh["pp"]
 
     model_name = job_config.model.name
 
     # build dataloader
-    if job_config.dataset.use_experimental_dataloader:
+    if job_config.dataset.use_sft_dataloader:
+        data_loader = build_sft_data_loader(
+            dataset_path=job_config.dataset.dataset_path,
+            dataset_weights=job_config.dataset_weights,
+            dp_rank=dp_rank,
+            dp_degree=dp_degree,
+            cp_rank=cp_rank,
+            cp_degree=cp_degree,
+            batch_size=job_config.training.batch_size,
+            seq_len=job_config.training.seq_len,
+            naive_padding_free=job_config.dataset.naive_padding_free,
+            max_out_tokens=job_config.dataset.max_out_tokens,
+        )
+    elif job_config.dataset.use_experimental_dataloader:
         tokenizer = AutoTokenizer.from_pretrained(job_config.model.tokenizer_path)
         data_loader = build_experimental_data_loader(
             job_config,
             dp_rank,
             dp_degree,
-            None if job_config.dataset.file_type=="arrow" else tokenizer,
+            None if job_config.dataset.file_type == "arrow" else tokenizer,
         )
     else:
         tokenizer_type = model_name_to_tokenizer[model_name]
@@ -121,7 +144,8 @@ def main(job_config: JobConfig):
     # 3. max_seq_len base on inputs
     model_config.norm_type = job_config.model.norm_type
     model_config.vocab_size = (
-        len(tokenizer.vocab) if job_config.dataset.use_experimental_dataloader 
+        len(tokenizer.vocab)
+        if job_config.dataset.use_experimental_dataloader
         else tokenizer.n_words
     )
     model_config.max_seq_len = job_config.training.seq_len
@@ -216,9 +240,9 @@ def main(job_config: JobConfig):
     )
 
     if job_config.checkpoint.create_seed_checkpoint:
-        assert (
-            world_size == 1
-        ), "Must create seed-checkpoint using one gpu, to disable sharding"
+        assert world_size == 1, (
+            "Must create seed-checkpoint using one gpu, to disable sharding"
+        )
         checkpoint.save(curr_step=0, force=True)
         logger.info("Created seed checkpoint")
         return
@@ -239,7 +263,9 @@ def main(job_config: JobConfig):
         try:
             import wandb  # type: ignore
         except ImportError:
-            raise ImportError("wandb is enabled in the config but wandb is not installed.")
+            raise ImportError(
+                "wandb is enabled in the config but wandb is not installed."
+            )
         if torch.distributed.get_rank() == 0:
             logger.info("wandb is enabled!")
             try:
@@ -300,7 +326,9 @@ def main(job_config: JobConfig):
     ) as memory_profiler:
         while train_state.step < job_config.training.steps:
             train_state.step += 1
-            train_state.ntokens += job_config.training.batch_size * dp_degree * job_config.training.seq_len
+            train_state.ntokens += (
+                job_config.training.batch_size * dp_degree * job_config.training.seq_len
+            )
             gc_handler.run(train_state.step)
 
             # get batch
@@ -439,7 +467,9 @@ def main(job_config: JobConfig):
                         wandb_metrics = {
                             "loss": global_avg_loss,
                             "gradient norm": global_avg_gnorm,
-                            "learning rate": lr_schedulers.schedulers[0].get_last_lr()[0],
+                            "learning rate": lr_schedulers.schedulers[0].get_last_lr()[
+                                0
+                            ],
                             "num tokens seen": train_state.ntokens,
                             "current throughput": tps,
                             "mfu": mfu,

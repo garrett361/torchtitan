@@ -233,7 +233,7 @@ class JobConfig:
                 loaded from this path instead of downloaded.""",
         )
         self.parser.add_argument(
-            "--training.batch_size", type=int, default=8, help="Batch size"
+            "--training.batch_size", type=int, default=1, help="Batch size"
         )
         self.parser.add_argument(
             "--training.seq_len", type=int, default=2048, help="Sequence length"
@@ -419,6 +419,20 @@ class JobConfig:
             help="Implement reproducibility by setting a Python, PyTorch and CUDA seed",
         )
 
+        # common flags for experimental and sft dataloaders
+        self.parser.add_argument(
+            "--dataset.datasets",
+            type=str,
+            default="c4_mini",
+            help="Datasets to use for training, comma-separated",
+        )
+        self.parser.add_argument(
+            "--dataset.dataset_weights",
+            type=str,
+            default="1",
+            help="Sampling ratios for sub-datasets, comma-separated. Do not need to sum to 1.",
+        )
+
         # experimental dataloader flags
         self.parser.add_argument(
             "--dataset.use_experimental_dataloader",
@@ -448,18 +462,6 @@ class JobConfig:
             type=str,
             default="",
             help="Dummy token values to drop from begin/end of sequences (comma-separated ints)",
-        )
-        self.parser.add_argument(
-            "--dataset.datasets",
-            type=str,
-            default="c4_mini",
-            help="Datasets to use for training, comma-separated",
-        )
-        self.parser.add_argument(
-            "--dataset.dataset_weights",
-            type=str,
-            default="1",
-            help="Sampling ratios for sub-datasets, comma-separated. Do not need to sum to 1.",
         )
         self.parser.add_argument(
             "--dataset.num_data_workers",
@@ -510,6 +512,22 @@ class JobConfig:
             help="Suffix indicator token for FIM training. If not using, leave as -1.",
         )
 
+        # sft dataloader flags
+        self.parser.add_argument(
+            "--dataset.use_sft_dataloader",
+            action="store_true",
+            help="Whether to use the experimental dataloader instead of default HF",
+        )
+        self.parser.add_argument(
+            "--dataset.naive_padding_free",
+            type=bool,
+            default=True,
+        )
+        self.parser.add_argument(
+            "--dataset.max_out_tokens",
+            type=bool,
+            default=True,
+        )
 
         # checkpointing configs
         self.parser.add_argument(

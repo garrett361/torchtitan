@@ -6,10 +6,12 @@
 
 from torchtitan.datasets.experimental_datasets import build_experimental_data_loader
 from torchtitan.datasets.hf_datasets import build_hf_data_loader
+from torchtitan.datasets.sft_dataset import build_sft_data_loader
 from torchtitan.datasets.tokenizer import build_tokenizer
 
 __all__ = [
     "build_experimental_data_loader",
     "build_hf_data_loader",
     "build_tokenizer",
+    "build_sft_data_loader",
 ]
