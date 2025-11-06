@@ -40,16 +40,13 @@ class _TopKScheduler(Stateful, ABC):
             }
 
     @abstractmethod
-    def state_dict(self) -> dict[str, Any]:
-        ...
+    def state_dict(self) -> dict[str, Any]: ...
 
     @abstractmethod
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        ...
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None: ...
 
     @abstractmethod
-    def step(self, loss: float) -> None:
-        ...
+    def step(self, loss: float) -> None: ...
 
 
 class NoOpScheduler(_TopKScheduler):
@@ -185,8 +182,6 @@ class LossBasedScheduler(_TopKScheduler):
             )
             if self._mini_step >= self.top_k_args.min_steps:
                 if self._curr_loss <= self.top_k_args.target_loss:
-                    self._mini_step = 0
-                    self._curr_loss = None
                     layer_idx, moe = self._get_idx_and_moe()
                     if moe is not None:
                         moe.router.top_k -= 1
@@ -198,8 +193,10 @@ class LossBasedScheduler(_TopKScheduler):
                         )
                         # TODO: @goon - DELETE
                         logger.info(
-                            f"{self._mini_step=}, {self._curr_loss=}, {self.top_k_args.target_loss=}"
+                            f"{self._mini_step=}, {self.top_k_args.min_steps=}, {self._curr_loss=}, {self.top_k_args.target_loss=}"
                         )
+                    self._mini_step = 0
+                    self._curr_loss = None
 
 
 def get_top_k_scheduler(
