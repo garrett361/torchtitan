@@ -512,7 +512,7 @@ class JobConfig:
             help="Suffix indicator token for FIM training. If not using, leave as -1.",
         )
 
-        # sft dataloader flags
+        # sft-specific flags
         self.parser.add_argument(
             "--dataset.use_sft_dataloader",
             action="store_true",
@@ -520,13 +520,20 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--dataset.naive_padding_free",
-            type=bool,
-            default=True,
+            action="store_true",
         )
         self.parser.add_argument(
             "--dataset.max_out_tokens",
-            type=bool,
-            default=True,
+            action="store_true",
+        )
+        self.parser.add_argument(
+            "--training.sum_loss",
+            action="store_true",
+        )
+        self.parser.add_argument(
+            "--training.gradient_accumulation_steps",
+            type=int,
+            default=1
         )
 
         # checkpointing configs

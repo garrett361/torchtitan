@@ -22,4 +22,6 @@ class TestData:
             naive_padding_free=self.naive_padding_free,
             max_out_tokens=self.max_out_tokens,
         )
-        data_loader
+        diter =iter(data_loader)
+        out = next(diter)
+        print(f"{len(out)=}")

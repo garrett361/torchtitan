@@ -8,8 +8,19 @@ from datasets import Dataset
 from torchtitan.logging import logger
 
 
+def next_power_of_2(n):
+    out = 2
+    while out < n:
+        out *= 2
+    return out
+
+
 def _round_up_to_zig_zag_padding(num_toks: int, cp_degree: int) -> int:
-    return 2 * cp_degree * ((num_toks + 2 * cp_degree - 1) // (2 * cp_degree))
+    # return 2 * cp_degree * ((num_toks + 2 * cp_degree - 1) // (2 * cp_degree))
+    # NOTE: @goon - getting some weird torch ring attn errors when not rounding up to a power of 2.
+    # Shouldn't have to. Will figure out why.
+    rounded_up = 2 * cp_degree * ((num_toks + 2 * cp_degree - 1) // (2 * cp_degree))
+    return next_power_of_2(rounded_up)
 
 
 class CPDataCollator:
@@ -317,6 +328,13 @@ class InfiniteCPBatchingIter:
             )
         return tok_in_batch_with_new_input > self.max_tokens
 
+    # TODO: @goon - proper state handling.
+    def load_state_dict(self, state_dict):
+        return
+
+    def state_dict(self):
+        return {}
+
 
 class PretokenizedCollator:
     """
@@ -338,7 +356,7 @@ class PretokenizedCollator:
 
 
 def build_sft_data_loader(
-    dataset_path: str,
+    datasets: str,
     dataset_weights: str,
     dp_rank: int,
     dp_degree: int,
@@ -355,10 +373,10 @@ def build_sft_data_loader(
     separator_id: int = -100,
     pin_memory=True,
 ):
-    dataset_path = dataset_path.split(",")
+    dataset_paths = datasets.split(",")
     dataset_weights = [float(w) for w in dataset_weights.split(",")]
     datasets = [
-        Dataset.load_from_disk(path, keep_in_memory=False) for path in dataset_path
+        Dataset.load_from_disk(path, keep_in_memory=False) for path in dataset_paths
     ]
     dataset_lens = [len(d) for d in datasets]
 

@@ -102,9 +102,10 @@ def main(job_config: JobConfig):
 
     # build dataloader
     if job_config.dataset.use_sft_dataloader:
+        tokenizer = AutoTokenizer.from_pretrained(job_config.model.tokenizer_path)
         data_loader = build_sft_data_loader(
-            dataset_path=job_config.dataset.dataset_path,
-            dataset_weights=job_config.dataset_weights,
+            datasets=job_config.dataset.datasets,
+            dataset_weights=job_config.dataset.dataset_weights,
             dp_rank=dp_rank,
             dp_degree=dp_degree,
             cp_rank=cp_rank,
@@ -145,7 +146,10 @@ def main(job_config: JobConfig):
     model_config.norm_type = job_config.model.norm_type
     model_config.vocab_size = (
         len(tokenizer.vocab)
-        if job_config.dataset.use_experimental_dataloader
+        if (
+            job_config.dataset.use_experimental_dataloader
+            or job_config.dataset.use_sft_dataloader
+        )
         else tokenizer.n_words
     )
     model_config.max_seq_len = job_config.training.seq_len
@@ -174,7 +178,9 @@ def main(job_config: JobConfig):
     # loss function to be shared by Pipeline Parallel and SPMD training
     def loss_fn(pred, labels):
         return torch.nn.functional.cross_entropy(
-            pred.flatten(0, 1).float(), labels.flatten(0, 1)
+            pred.flatten(0, 1).float(),
+            labels.flatten(0, 1),
+            reduction="sum" if job_config.training.sum_loss else "mean",
         )
 
     if job_config.training.compile:
@@ -215,6 +221,14 @@ def main(job_config: JobConfig):
         model.train()
 
         model_parts = [model]
+
+    # TODO: @goon - DELETE
+    logger.info(f"{model=}")
+    logger.info(f"{parallel_dims=}")
+    logger.info(f"{dp_degree=}, {cp_degree=}")
+    logger.info(f"{parallel_dims.dp_shard_enabled=}")
+    logger.info(f"{parallel_dims.cp_enabled=}")
+    logger.info(f"{world_mesh['dp_cp']}")
 
     device_mem_stats = device_memory_monitor.get_peak_stats()
     logger.info(
@@ -334,7 +348,18 @@ def main(job_config: JobConfig):
             # get batch
             data_load_start = time.perf_counter()
             batch = next(data_iterator)
-            input_ids, labels = batch
+            if len(batch) == 2:
+                input_ids, labels = batch
+                dataset_stats = batch_size = None
+            else:
+                # SFT path
+                dataset_stats, batch_size, batch_dict = batch
+                input_ids, labels = batch_dict["input_ids"], batch_dict["labels"]
+                # print(f"{input_ids=}")
+                # print(f"{labels=}")
+                # print(f"{dataset_stats=}")
+                # print(f"{batch_size=}")
+                print(f"{input_ids.shape=}")
             ntokens_since_last_log += labels.numel()
             data_loading_times.append(time.perf_counter() - data_load_start)
 
@@ -375,10 +400,16 @@ def main(job_config: JobConfig):
             else:
                 # Non-PP forward / backward
                 with train_context(optional_context_parallel_ctx):
+                    # TODO: @goon - DELETE
+                    print(
+                        f"CP: {parallel_dims.cp_enabled=} {input_ids.shape=} {labels.shape=} {model.freqs_cis.shape=}"
+                    )
+                    # print(f"CP: {input_ids.to_local().shape=} {labels.to_local().shape=} {model.to_local().freqs_cis.shape=}")
                     pred = model(input_ids)
-                    loss = loss_fn(pred, labels)
-                    loss = loss / 4
-                    # pred.shape=(bs, seq_len, vocab_size)
+                    loss = (
+                        loss_fn(pred, labels)
+                        / job_config.training.gradient_accumulation_steps
+                    )
                     # need to free to before bwd to avoid peaking memory
                     del pred
                     loss.backward()
@@ -388,7 +419,7 @@ def main(job_config: JobConfig):
 
             # optimizer step
             checkpoint.maybe_wait_for_staging()
-            if train_state.step % 4 == 0:
+            if train_state.step % job_config.training.gradient_accumulation_steps == 0:
                 # clip gradients
                 gnorm = utils.clip_grad_norm_(
                     [p for m in model_parts for p in m.parameters()],
@@ -410,7 +441,12 @@ def main(job_config: JobConfig):
             # log metrics
             if train_state.step % job_config.metrics.log_freq == 0:
                 losses = [loss.item() for loss in losses_since_last_log]
-                avg_loss, max_loss = sum(losses) / len(losses) * 4, max(losses)
+                avg_loss, max_loss = (
+                    sum(losses)
+                    / len(losses)
+                    * job_config.training.gradient_accumulation_steps,
+                    max(losses),
+                )
                 gnorms = [gnorm.item() for gnorm in gnorms_since_last_log]
                 avg_gnorm = sum(gnorms) / len(gnorms)
                 if parallel_dims.dp_enabled:
