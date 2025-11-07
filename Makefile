@@ -67,10 +67,12 @@ fsdp-8b-sft-cp:
 		--dataset.use_sft_dataloader \
 		--experimental.context_parallel_degree 4 \
 		--model.tokenizer_path meta-llama/Llama-3.1-8B \
+		--optimizer.lr 1e-5 \
 		--training.batch_size 1 \
+		--training.warmup_steps 30 \
 		--training.max_norm 1e8 \
 		--training.seq_len 32768 \
-		--training.epochs 0.1 \
+		--training.epochs 0.01 \
 		--training.sum_loss \
 		# --training.debug \
 		# --checkpoint.warm_start_ckpt_path $(LLAMA_3_8B_DCP_PATH) \

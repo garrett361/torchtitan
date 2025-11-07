@@ -77,13 +77,13 @@ class LambdaLRCustom(LambdaLR):
 def annealing(
     current_step: int, num_steps: int, warmup_steps: int, final_lr_ratio: float
 ) -> float:
-    return min(
-        1 - (1 - min(current_step, warmup_steps) / warmup_steps) ** 2,
-        1
-        - (1 - final_lr_ratio)
-        * (current_step - warmup_steps)
-        / (num_steps - warmup_steps),
-    )
+    if current_step <= warmup_steps:
+        factor =  1 - (1 - current_step / warmup_steps) ** 2
+    else:
+        if num_steps <= warmup_steps:
+            raise ValueError(f"{warmup_steps=} is larger than {num_steps=}, reduce warmup_steps")
+        factor = 1 - (1 - final_lr_ratio) * (current_step - warmup_steps) / (num_steps - warmup_steps)
+    return factor
 
 
 def build_lr_schedulers(optimizers, job_config: JobConfig):

@@ -136,54 +136,6 @@ def reduce_tensor_to_cpu(
     return t_reduced.cpu()
 
 
-def reduce_dataset_stats(
-    dataset_stats: DatasetStats,
-    dp_mesh: DeviceMesh | None,
-) -> DatasetStats:
-    all_fields = {f.name: getattr(dataset_stats, f.name) for f in fields(dataset_stats)}
-    all_fields_reduced = {
-        k: reduce_tensor_to_cpu(v, dp_mesh) for k, v in all_fields.items()
-    }
-    return DatasetStats(**all_fields_reduced)
-
-
-
-
-def get_reduced_tokens_seen(
-    dataset_stats: DatasetStats,
-    dp_mesh,
-) -> torch.LongTensor:
-    """
-    Note: returns a CPU tensor.
-    """
-    if dp_mesh is None:
-        return dataset_stats.tokens_seen
-    reduced_tokens_seen = funcol.all_reduce(
-        dataset_stats.tokens_seen.cuda(),
-        reduceOp="sum",
-        group=dp_mesh.get_group(),
-    )
-    reduced_tokens_seen.wait()
-    return reduced_tokens_seen.cpu()
-
-
-def get_reduced_pred_tokens_seen(
-    dataset_stats: DatasetStats,
-    dp_mesh,
-) -> int:
-    """
-    Note: returns a CPU tensor.
-    """
-    if dp_mesh is None:
-        return dataset_stats.pred_tokens_seen
-    reduced_pred_tokens_seen = funcol.all_reduce(
-        dataset_stats.pred_tokens_seen.cuda(),
-        reduceOp="sum",
-        group=dp_mesh.get_group(),
-    )
-    reduced_pred_tokens_seen.wait()
-    return reduced_pred_tokens_seen.cpu()
-
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
 def main(job_config: JobConfig):
@@ -447,6 +399,7 @@ def main(job_config: JobConfig):
     # variables used to keep info for metrics logging
     losses_since_last_log = []
     gnorms_since_last_log = []
+    nexamples_seen = 0
     ntokens_seen = 0
     npred_tokens_seen = 0
     data_loading_times = []
@@ -548,6 +501,7 @@ def main(job_config: JobConfig):
                     del pred
                     loss.backward()
 
+            losses_since_last_log.append(loss)
             # sync float8 amaxes and scales
             float8_handler.sync_float8_amax_and_scale_history(model_parts)
 
@@ -580,7 +534,6 @@ def main(job_config: JobConfig):
             # it issues a single all-reduce for all parameters at once for better performance
             float8_handler.precompute_float8_dynamic_scale_for_fsdp(model_parts)
 
-            losses_since_last_log.append(loss)
 
             # log metrics
             if optim_step_idx % job_config.metrics.log_freq == 0:
@@ -612,19 +565,60 @@ def main(job_config: JobConfig):
                 time_delta = time.perf_counter() - time_last_log
 
                 # Global Tokens-seen stats
-                dataset_stats_reduced = reduce_dataset_stats(dataset_stats, dp_mesh)
-                curr_ntokens_seen = dataset_stats_reduced.tokens_seen.sum().item()
-                curr_npred_tokens_seen = dataset_stats_reduced.pred_tokens_seen.sum().item()
-
-                new_tokens_seen = curr_ntokens_seen - ntokens_seen
-                new_pred_tokens_seen = curr_npred_tokens_seen - npred_tokens_seen
-
-                loss_per_token = global_avg_loss / (
-                    new_tokens_seen / dp_degree / job_config.metrics.log_freq
+                examples_seen_reduced_t = reduce_tensor_to_cpu(
+                    dataset_stats.examples_seen, dp_mesh
                 )
-                loss_per_pred_token = global_avg_loss / (
-                    new_pred_tokens_seen / dp_degree / job_config.metrics.log_freq
+                tokens_seen_reduced_t = reduce_tensor_to_cpu(
+                    dataset_stats.tokens_seen, dp_mesh
                 )
+                pred_tokens_seen_reduced_t = reduce_tensor_to_cpu(
+                    dataset_stats.pred_tokens_seen, dp_mesh
+                )
+
+                curr_examples_seen = examples_seen_reduced_t.sum().item()
+                curr_tokens_seen = tokens_seen_reduced_t.sum().item()
+                curr_pred_tokens_seen = pred_tokens_seen_reduced_t.sum().item()
+
+                new_examples_seen = curr_examples_seen - nexamples_seen
+                new_tokens_seen = curr_tokens_seen - ntokens_seen
+                new_pred_tokens_seen = curr_pred_tokens_seen - npred_tokens_seen
+
+                new_optim_steps = job_config.metrics.log_freq
+                new_fwd_bwd_passes = (
+                    new_optim_steps * job_config.training.gradient_accumulation_steps
+                )
+
+                avg_tok_per_fwd_per_gpu = new_tokens_seen / (
+                    new_fwd_bwd_passes * world_mesh.size()
+                )
+                avg_pred_tok_per_fwd_per_gpu = new_pred_tokens_seen / (
+                    new_fwd_bwd_passes * world_mesh.size()
+                )
+                avg_tok_per_optim_step_per_gpu = new_tokens_seen / (
+                    new_optim_steps * world_mesh.size()
+                )
+                avg_pred_tok_per_optim_step_per_gpu = new_pred_tokens_seen / (
+                    new_optim_steps * world_mesh.size()
+                )
+
+                avg_loss_per_token = global_avg_loss / avg_tok_per_fwd_per_gpu
+                avg_loss_per_pred_token = global_avg_loss / avg_pred_tok_per_fwd_per_gpu
+                avg_gnorm_per_token = global_avg_gnorm / avg_tok_per_optim_step_per_gpu
+                avg_gnorm_per_pred_token = (
+                    global_avg_gnorm / avg_pred_tok_per_optim_step_per_gpu
+                )
+
+                examples_per_optim_step = (
+                    new_examples_seen / job_config.training.gradient_accumulation_steps
+                )
+                tokens_per_optim_step = (
+                    new_tokens_seen / job_config.training.gradient_accumulation_steps
+                )
+                pred_tokens_per_optim_step = (
+                    new_pred_tokens_seen
+                    / job_config.training.gradient_accumulation_steps
+                )
+
                 sec_per_step = time_delta / job_config.metrics.log_freq
                 remaining_secs = sec_per_step * approx_remaining_steps(
                     optim_step_idx,
@@ -633,12 +627,9 @@ def main(job_config: JobConfig):
                     dp_mesh,
                 )
                 time_remaining =timedelta(seconds=remaining_secs)
-                print(f"Approx. time remaining: {timedelta(seconds=remaining_secs)}")
 
-                logger.info(f"Tok per dataset: {dataset_stats_reduced.tokens_seen }")
-                logger.info(f"Pred tok per dataset: {dataset_stats_reduced.pred_tokens_seen }")
-                logger.info(f"Loss per tok: {loss_per_token}")
-                logger.info(f"Loss per pred tok: {loss_per_pred_token}")
+                logger.info(f"Tok per dataset: {tokens_seen_reduced_t}")
+                logger.info(f"Pred tok per dataset: {pred_tokens_seen_reduced_t}")
 
                 # tokens per second per device, abbreviated as tps
                 tps = new_tokens_seen / (time_delta * world_mesh.size())
@@ -674,8 +665,11 @@ def main(job_config: JobConfig):
                         # for wandb, we track a different set of metrics
                         wandb_metrics = {
                             "loss": global_avg_loss,
-                            "loss_per_token": loss_per_token,
-                            "loss_per_pred_token": loss_per_pred_token,
+                            "loss_per_token": avg_loss_per_token,
+                            "loss_per_pred_token": avg_loss_per_pred_token,
+                            "examples_per_step": examples_per_optim_step,
+                            "tokens_per_step": tokens_per_optim_step,
+                            "pred_tokens_per_step": pred_tokens_per_optim_step,
                             "gradient norm": global_avg_gnorm,
                             "learning rate": lr_schedulers.schedulers[0].get_last_lr()[0],
                             "num tokens seen": train_state.ntokens,
@@ -690,23 +684,28 @@ def main(job_config: JobConfig):
                 logger.info(
                     f"{color.cyan}step: {train_state.step:2}  "
                     f"{color.green}loss: {global_avg_loss:7.4f}  "
-                    f"{color.magenta}loss_per_token: {loss_per_token:7.4f}  "
-                    f"{color.white}loss_per_pred_token: {loss_per_pred_token:7.4f}  "
+                    f"{color.magenta}loss_per_token: {avg_loss_per_token:7.4f}  "
+                    f"{color.white}loss_per_pred_token: {avg_loss_per_pred_token:7.4f}  "
                     f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
                     f"({device_mem_stats.max_reserved_pct:.2f}%)  "
                     f"{color.blue}tps: {round(tps):,}  "
                     f"{color.magenta}mfu: {mfu:.2f}%  "
                     f"{color.yellow}gnorm: {global_avg_gnorm}  "
-                    f"{color.red}{100*frac_complete:.2f}% complete  "
+                    f"{color.white}gnorm/token: {avg_gnorm_per_token}  "
+                    f"{color.red}gnorm/pred_token: {avg_gnorm_per_pred_token}  "
+                    f"{color.green}examples/optim_step: {examples_per_optim_step}  "
+                    f"{color.blue}tok/optim_step: {tokens_per_optim_step}  "
+                    f"{color.magenta}pred_tok/optim_step: {pred_tokens_per_optim_step}  "
+                    f"{color.red}{100 * frac_complete:.2f}% complete  "
                     f"{color.cyan}{time_remaining} remaining  "
                     f"{color.yellow}lr: {lr_schedulers.schedulers[0].get_last_lr()[0]}{color.reset}"
                 )
 
                 losses_since_last_log.clear()
                 gnorms_since_last_log.clear()
-                # The global number of tokens and pred tokens seen across the world:
-                ntokens_seen = curr_ntokens_seen
-                npred_tokens_seen = curr_npred_tokens_seen
+                # The global number of tokens, pred tokens, etc seen across the world:
+                ntokens_seen = curr_tokens_seen
+                npred_tokens_seen = curr_pred_tokens_seen
                 data_loading_times.clear()
                 time_last_log = time.perf_counter()
                 device_memory_monitor.reset_peak_stats()
