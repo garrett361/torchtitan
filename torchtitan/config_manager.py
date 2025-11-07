@@ -415,11 +415,6 @@ class JobConfig:
 
         # sft-specific flags, and other custom additions
         self.parser.add_argument(
-            "--dataset.use_sft_dataloader",
-            action="store_true",
-            help="Whether to use the SFT dataloader instead of default HF",
-        )
-        self.parser.add_argument(
             "--dataset.datasets",
             type=str,
             default="c4_mini",
@@ -430,14 +425,6 @@ class JobConfig:
             type=str,
             default="1",
             help="Sampling ratios for sub-datasets, comma-separated. Do not need to sum to 1.",
-        )
-        self.parser.add_argument(
-            "--dataset.naive_padding_free",
-            action="store_true",
-        )
-        self.parser.add_argument(
-            "--dataset.max_out_tokens",
-            action="store_true",
         )
         self.parser.add_argument(
             "--training.sum_loss",

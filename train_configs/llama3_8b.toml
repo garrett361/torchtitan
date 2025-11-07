@@ -44,9 +44,6 @@ dataset = "c4_test"
 sum_loss = true
 
 [dataset]
-use_sft_dataloader = true
-naive_padding_free = true
-max_out_tokens = true
 datasets = "/gpfs/goon/data/open_instruct/llama_3p1_8b_tulu/4ba4a38f44_filtered"
 dataset_weights = 1.0
 

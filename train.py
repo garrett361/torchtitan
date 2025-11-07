@@ -200,9 +200,7 @@ def main(job_config: JobConfig):
 
     model_name = job_config.model.name
 
-    # build dataloader
-    if not job_config.dataset.use_sft_dataloader:
-        raise ValueError("Script assumes SFT")
+    # build SFT dataloader
     tokenizer = AutoTokenizer.from_pretrained(job_config.model.tokenizer_path)
     data_loader = build_sft_data_loader(
         datasets=job_config.dataset.datasets,
@@ -213,8 +211,8 @@ def main(job_config: JobConfig):
         cp_degree=cp_degree,
         batch_size=job_config.training.batch_size,
         seq_len=job_config.training.seq_len,
-        naive_padding_free=job_config.dataset.naive_padding_free,
-        max_out_tokens=job_config.dataset.max_out_tokens,
+        naive_padding_free=True,
+        max_out_tokens=True,
     )
 
     # build model (using meta init)

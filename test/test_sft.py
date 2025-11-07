@@ -19,8 +19,8 @@ class TestData:
             cp_degree=1,
             batch_size=self.batch_size,
             seq_len=self.seq_len,
-            naive_padding_free=self.naive_padding_free,
-            max_out_tokens=self.max_out_tokens,
+            naive_padding_free=True,
+            max_out_tokens=True,
         )
         diter =iter(data_loader)
         out = next(diter)
