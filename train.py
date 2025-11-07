@@ -434,7 +434,7 @@ def main(job_config: JobConfig):
                 gnorms_since_last_log.append(gnorm)
                 optimizers.step()
                 optimizers.zero_grad()
-            lr_schedulers.step()
+            lr_schedulers.step(num_steps=job_config.training.steps)
 
             # calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance

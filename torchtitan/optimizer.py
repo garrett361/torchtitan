@@ -56,35 +56,43 @@ def build_optimizers(model_parts, job_config: JobConfig):
 
     return OptimizersContainer([_build_optimizer(model) for model in model_parts])
 
-
-def linear_warmup_linear_decay(
-    warmup_steps: int, decay_steps: int, current_step: int
-) -> float:
-    """Computes linear warmup followed by linear decay.
-    Per LambdaLR requirement, this is accomplished by returning
-    a multiplicative factor to adjust the learning rate to
-    create the desired schedule.
+class LambdaLRCustom(LambdaLR):
     """
-    if current_step < warmup_steps:
-        # linear warmup
-        # 0-indexed step, hence + 1 adjustments
-        current_step += 1
-        curr_adjustment = float(current_step / (warmup_steps + 1))
+    Customized lr scheduler which lets the scheduler lambda take on two args.
+    """
 
-    else:
-        curr_adjustment = 1
-    return curr_adjustment
+    def step(self, epoch: int | None = None, num_steps: int = 10000) -> None:
+        # HACK: @goon - the num_steps default is a placeholder needed so that the initial step
+        # during init doesn't error. Only affects the very first step.
+        self.num_steps = num_steps
+        super().step(epoch=epoch)
+
+    def get_lr(self) -> list[float | torch.Tensor]:
+        return [
+            base_lr * lmbda(self.last_epoch, self.num_steps)
+            for lmbda, base_lr in zip(self.lr_lambdas, self.base_lrs)
+        ]
+
+
+def annealing(
+    current_step: int, num_steps: int, warmup_steps: int, final_lr_ratio: float
+) -> float:
+    return min(
+        1 - (1 - min(current_step, warmup_steps) / warmup_steps) ** 2,
+        1
+        - (1 - final_lr_ratio)
+        * (current_step - warmup_steps)
+        / (num_steps - warmup_steps),
+    )
 
 
 def build_lr_schedulers(optimizers, job_config: JobConfig):
     def _build_lr_scheduler(optimizer):
-        """Build a linear warmup and linear decay scheduler"""
         warmup_steps = int(job_config.training.warmup_steps)
-        decay_steps = float(max(1, job_config.training.steps - warmup_steps))
         lr_lambda = functools.partial(
-            linear_warmup_linear_decay, warmup_steps, decay_steps
+            annealing, warmup_steps=warmup_steps, final_lr_ratio=job_config.training.final_lr_ratio
         )
-        warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+        warmup_scheduler = LambdaLRCustom(optimizer, lr_lambda=lr_lambda)
         return warmup_scheduler
 
     class SchedulersContainer:
@@ -93,9 +101,9 @@ def build_lr_schedulers(optimizers, job_config: JobConfig):
         def __init__(self, schedulers):
             self.schedulers = schedulers
 
-        def step(self):
+        def step(self, num_steps: int):
             for schedulers in self.schedulers:
-                schedulers.step()
+                schedulers.step(num_steps=num_steps)
 
     return SchedulersContainer(
         [_build_lr_scheduler(optimizer) for optimizer in optimizers]
