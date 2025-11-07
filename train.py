@@ -507,7 +507,10 @@ def main(job_config: JobConfig):
                     pp_mesh=pp_mesh if parallel_dims.pp_enabled else None,
                 )
                 gnorms_since_last_log.append(gnorm)
-                optimizers.step()
+                if not any(torch.isnan(g) for g in gnorms_since_last_log):
+                    optimizers.step()
+                else:
+                    logger.info("Skippping optim step due to nan grads.")
                 optimizers.zero_grad()
 
             optim_step_idx = (
