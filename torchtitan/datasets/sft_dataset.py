@@ -8,19 +8,8 @@ from datasets import Dataset
 from torchtitan.logging import logger
 
 
-def next_power_of_2(n):
-    out = 2
-    while out < n:
-        out *= 2
-    return out
-
-
 def _round_up_to_zig_zag_padding(num_toks: int, cp_degree: int) -> int:
-    # return 2 * cp_degree * ((num_toks + 2 * cp_degree - 1) // (2 * cp_degree))
-    # NOTE: @goon - getting some weird torch ring attn errors when not rounding up to a power of 2.
-    # Shouldn't have to. Will figure out why.
-    rounded_up = 2 * cp_degree * ((num_toks + 2 * cp_degree - 1) // (2 * cp_degree))
-    return next_power_of_2(rounded_up)
+    return 2 * cp_degree * ((num_toks + 2 * cp_degree - 1) // (2 * cp_degree))
 
 
 class CPDataCollator:
