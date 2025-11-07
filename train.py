@@ -492,7 +492,7 @@ def main(job_config: JobConfig):
                     del pred
                     loss.backward()
 
-            losses_since_last_log.append(loss)
+            losses_since_last_log.append(loss.detach().clone())
             # sync float8 amaxes and scales
             float8_handler.sync_float8_amax_and_scale_history(model_parts)
 
@@ -575,9 +575,7 @@ def main(job_config: JobConfig):
                 new_pred_tokens_seen = curr_pred_tokens_seen - npred_tokens_seen
 
                 new_optim_steps = job_config.metrics.log_freq
-                new_fwd_bwd_passes = (
-                    new_optim_steps * job_config.training.gradient_accumulation_steps
-                )
+                new_fwd_bwd_passes = len(losses)
 
                 avg_tok_per_fwd_per_gpu = new_tokens_seen / (
                     new_fwd_bwd_passes * world_mesh.size()

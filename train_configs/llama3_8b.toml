@@ -44,7 +44,7 @@ dataset = "c4_test"
 sum_loss = true
 
 [dataset]
-datasets = "/gpfs/goon/data/open_instruct/llama_3p1_8b_tulu/4ba4a38f44_filtered"
+datasets = "/gpfs/goon/data/open_instruct/llama_3p1_8b_tulu/90f324b6ba"
 dataset_weights = 1.0
 
 [experimental]
