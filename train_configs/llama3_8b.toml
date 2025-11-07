@@ -30,11 +30,12 @@ name = "AdamW"
 lr = 3e-4
 
 [training]
+seed = 2024
 batch_size = 1
 seq_len = 8192
 warmup_steps = 200  # lr scheduler warm up
 max_norm = 1.0  # grad norm clipping
-steps = 1000
+epochs=1.0
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 tensor_parallel_degree = 1
@@ -46,7 +47,7 @@ sum_loss = true
 use_sft_dataloader = true
 naive_padding_free = true
 max_out_tokens = true
-datasets = "/gpfs/goon/data/open_instruct/llama_3p1_8b_tulu/4ba4a38f44"
+datasets = "/gpfs/goon/data/open_instruct/llama_3p1_8b_tulu/4ba4a38f44_filtered"
 dataset_weights = 1.0
 
 [experimental]
