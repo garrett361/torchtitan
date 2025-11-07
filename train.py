@@ -661,7 +661,8 @@ def main(job_config: JobConfig):
                             "pred_tokens_per_step": pred_tokens_per_optim_step,
                             "gradient norm": global_avg_gnorm,
                             "learning rate": lr_schedulers.schedulers[0].get_last_lr()[0],
-                            "num tokens seen": train_state.ntokens,
+                            "num tokens seen": curr_tokens_seen,
+                            "num pred tokens seen": curr_pred_tokens_seen,
                             "current throughput": tps,
                             "mfu": mfu,
                         }
