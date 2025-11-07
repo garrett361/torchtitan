@@ -9,9 +9,8 @@ import time
 from datetime import timedelta
 
 import torch
+
 from torch.distributed.elastic.multiprocessing.errors import record
-from torchao.float8.fsdp_utils import WeightWithDynamicFloat8CastTensor
-from transformers import AutoTokenizer
 
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
@@ -28,15 +27,17 @@ from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.parallelisms import (
-    ParallelDims,
     models_parallelize_fns,
     models_pipelining_fns,
+    ParallelDims,
 )
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 from torchtitan.utils import device_module, device_type
 
-torch.serialization.add_safe_globals([WeightWithDynamicFloat8CastTensor])
+from transformers import AutoTokenizer
 
+from torchao.float8.fsdp_utils import WeightWithDynamicFloat8CastTensor
+torch.serialization.add_safe_globals([WeightWithDynamicFloat8CastTensor])
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
@@ -121,7 +122,7 @@ def main(job_config: JobConfig):
             job_config,
             dp_rank,
             dp_degree,
-            None if job_config.dataset.file_type == "arrow" else tokenizer,
+            None if job_config.dataset.file_type=="arrow" else tokenizer,
         )
     else:
         tokenizer_type = model_name_to_tokenizer[model_name]
@@ -223,12 +224,15 @@ def main(job_config: JobConfig):
         model_parts = [model]
 
     # TODO: @goon - DELETE
-    logger.info(f"{model=}")
-    logger.info(f"{parallel_dims=}")
-    logger.info(f"{dp_degree=}, {cp_degree=}")
-    logger.info(f"{parallel_dims.dp_shard_enabled=}")
-    logger.info(f"{parallel_dims.cp_enabled=}")
-    logger.info(f"{world_mesh['dp_cp']}")
+    if job_config.training.debug:
+        logger.info(f"{model=}")
+        logger.info(f"{model.tok_embeddings.weight.shape=}")
+        if "dp_cp" in world_mesh.mesh_dim_names:
+            logger.info(f"{world_mesh['dp_cp']=}")
+        logger.info(f"{parallel_dims=}")
+        logger.info(f"{dp_degree=}, {cp_degree=}")
+        logger.info(f"{parallel_dims.dp_shard_enabled=}")
+        logger.info(f"{parallel_dims.cp_enabled=}")
 
     device_mem_stats = device_memory_monitor.get_peak_stats()
     logger.info(
@@ -254,9 +258,9 @@ def main(job_config: JobConfig):
     )
 
     if job_config.checkpoint.create_seed_checkpoint:
-        assert world_size == 1, (
-            "Must create seed-checkpoint using one gpu, to disable sharding"
-        )
+        assert (
+            world_size == 1
+        ), "Must create seed-checkpoint using one gpu, to disable sharding"
         checkpoint.save(curr_step=0, force=True)
         logger.info("Created seed checkpoint")
         return
@@ -277,9 +281,7 @@ def main(job_config: JobConfig):
         try:
             import wandb  # type: ignore
         except ImportError:
-            raise ImportError(
-                "wandb is enabled in the config but wandb is not installed."
-            )
+            raise ImportError("wandb is enabled in the config but wandb is not installed.")
         if torch.distributed.get_rank() == 0:
             logger.info("wandb is enabled!")
             try:
@@ -340,9 +342,7 @@ def main(job_config: JobConfig):
     ) as memory_profiler:
         while train_state.step < job_config.training.steps:
             train_state.step += 1
-            train_state.ntokens += (
-                job_config.training.batch_size * dp_degree * job_config.training.seq_len
-            )
+            train_state.ntokens += job_config.training.batch_size * dp_degree * job_config.training.seq_len
             gc_handler.run(train_state.step)
 
             # get batch
@@ -355,11 +355,14 @@ def main(job_config: JobConfig):
                 # SFT path
                 dataset_stats, batch_size, batch_dict = batch
                 input_ids, labels = batch_dict["input_ids"], batch_dict["labels"]
-                # print(f"{input_ids=}")
-                # print(f"{labels=}")
-                # print(f"{dataset_stats=}")
-                # print(f"{batch_size=}")
-                print(f"{input_ids.shape=}")
+                if job_config.training.debug:
+                    # TODO: @goon - DELETE
+                    # print(f"{input_ids=}")
+                    # print(f"{labels=}")
+                    # print(f"{dataset_stats=}")
+                    # print(f"{batch_size=}")
+                    print(f"{input_ids.shape=}")
+                    print(f"{input_ids.max()=}")
             ntokens_since_last_log += labels.numel()
             data_loading_times.append(time.perf_counter() - data_load_start)
 
@@ -400,11 +403,12 @@ def main(job_config: JobConfig):
             else:
                 # Non-PP forward / backward
                 with train_context(optional_context_parallel_ctx):
-                    # TODO: @goon - DELETE
-                    print(
-                        f"CP: {parallel_dims.cp_enabled=} {input_ids.shape=} {labels.shape=} {model.freqs_cis.shape=}"
-                    )
-                    # print(f"CP: {input_ids.to_local().shape=} {labels.to_local().shape=} {model.to_local().freqs_cis.shape=}")
+                    if job_config.training.debug:
+                        # TODO: @goon - DELETE
+                        print(
+                            f"CP: {parallel_dims.cp_enabled=} {input_ids.shape=} {labels.shape=} {model.freqs_cis.shape=}"
+                        )
+                        # print(f"CP: {input_ids.to_local().shape=} {labels.to_local().shape=} {model.to_local().freqs_cis.shape=}")
                     pred = model(input_ids)
                     loss = (
                         loss_fn(pred, labels)
@@ -503,9 +507,7 @@ def main(job_config: JobConfig):
                         wandb_metrics = {
                             "loss": global_avg_loss,
                             "gradient norm": global_avg_gnorm,
-                            "learning rate": lr_schedulers.schedulers[0].get_last_lr()[
-                                0
-                            ],
+                            "learning rate": lr_schedulers.schedulers[0].get_last_lr()[0],
                             "num tokens seen": train_state.ntokens,
                             "current throughput": tps,
                             "mfu": mfu,
