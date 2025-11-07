@@ -413,7 +413,12 @@ class JobConfig:
             help="Implement reproducibility by setting a Python, PyTorch and CUDA seed",
         )
 
-        # common flags for experimental and sft dataloaders
+        # sft-specific flags, and other custom additions
+        self.parser.add_argument(
+            "--dataset.use_sft_dataloader",
+            action="store_true",
+            help="Whether to use the SFT dataloader instead of default HF",
+        )
         self.parser.add_argument(
             "--dataset.datasets",
             type=str,
@@ -425,92 +430,6 @@ class JobConfig:
             type=str,
             default="1",
             help="Sampling ratios for sub-datasets, comma-separated. Do not need to sum to 1.",
-        )
-
-        # experimental dataloader flags
-        self.parser.add_argument(
-            "--dataset.use_experimental_dataloader",
-            action="store_true",
-            help="Whether to use the experimental dataloader instead of default HF",
-        )
-        self.parser.add_argument(
-            "--dataset.data_logical_shards",
-            type=int,
-            default=768,
-            help="Dataloader logical shards. All divisors are possible world sizes.",
-        )
-        self.parser.add_argument(
-            "--dataset.bos_token",
-            type=int,
-            default=-1,
-            help="BOS token index value. If not using, leave as -1.",
-        )
-        self.parser.add_argument(
-            "--dataset.eos_token",
-            type=int,
-            default=0,
-            help="EOS or SEP token index value.",
-        )
-        self.parser.add_argument(
-            "--dataset.drop_tokens",
-            type=str,
-            default="",
-            help="Dummy token values to drop from begin/end of sequences (comma-separated ints)",
-        )
-        self.parser.add_argument(
-            "--dataset.num_data_workers",
-            type=int,
-            default=1,
-            help="Number of parallel dataloader processes per device.",
-        )
-        self.parser.add_argument(
-            "--dataset.file_type",
-            type=str,
-            default="arrow",
-            help="Shard file format. Current options are pretokenized 'arrow', raw text 'hf_parquet', auto-detect 'auto'.",
-        )
-        self.parser.add_argument(
-            "--dataset.col_name",
-            type=str,
-            default="tokens",
-            help="Which column/field of the file shard contains the readable data.",
-        )
-        self.parser.add_argument(
-            "--dataset.spm_rate",
-            type=float,
-            default=0.0,
-            help="Proportion of docs to split into suffix-prefix-middle order for FIM training.",
-        )
-        self.parser.add_argument(
-            "--dataset.psm_rate",
-            type=float,
-            default=0.0,
-            help="Proportion of docs to split into prefix-suffix-middle order for FIM training.",
-        )
-        self.parser.add_argument(
-            "--dataset.fim_pre",
-            type=int,
-            default=-1,
-            help="Prefix indicator token for FIM training. If not using, leave as -1.",
-        )
-        self.parser.add_argument(
-            "--dataset.fim_mid",
-            type=int,
-            default=-1,
-            help="Middle span indicator token for FIM training. If not using, leave as -1.",
-        )
-        self.parser.add_argument(
-            "--dataset.fim_suf",
-            type=int,
-            default=-1,
-            help="Suffix indicator token for FIM training. If not using, leave as -1.",
-        )
-
-        # sft-specific flags, and other custom additions
-        self.parser.add_argument(
-            "--dataset.use_sft_dataloader",
-            action="store_true",
-            help="Whether to use the SFT dataloader instead of default HF",
         )
         self.parser.add_argument(
             "--dataset.naive_padding_free",
