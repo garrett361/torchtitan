@@ -9,18 +9,15 @@ import time
 from datetime import timedelta
 
 import torch
+import torch.distributed as dist
+import torch.distributed._functional_collectives as funcol
 
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
-from torchtitan.datasets import (
-    build_experimental_data_loader,
-    build_hf_data_loader,
-    build_sft_data_loader,
-    build_tokenizer,
-)
+from torchtitan.datasets import DatasetStats, build_sft_data_loader
 from torchtitan.float8 import Float8Handler
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
@@ -38,6 +35,88 @@ from transformers import AutoTokenizer
 
 from torchao.float8.fsdp_utils import WeightWithDynamicFloat8CastTensor
 torch.serialization.add_safe_globals([WeightWithDynamicFloat8CastTensor])
+
+
+def num_epochs_completed(
+    job_config: JobConfig,
+    dataset_stats: DatasetStats,
+    dp_mesh,
+) -> float:
+    """
+    Working def for number of completed epochs:
+    * All-reduce sum the number of examples seen for each dataset.
+    * Divide by number of expected examples per epoch per dataset, accounting for weights
+    * Take the minimum (but non-zero value) over datasets, so that we don't cut short.
+    """
+    weights_t = torch.tensor(
+        [float(w) for w in job_config.dataset.dataset_weights.split(",")],
+        dtype=torch.float32,
+        device="cuda",
+    )
+    # Normalize weights so that the largest weight is 1, so that these weights multiplied by the
+    # dataset length give the natural definition for the number of examples per epoch per dataset.
+    weights_t /= weights_t.max()
+    examples_per_epoch = dataset_stats.dataset_lens.cuda() * weights_t
+    if dp_mesh is not None:
+        examples_seen_t = funcol.all_reduce(
+            dataset_stats.examples_seen.cuda(),
+            reduceOp="sum",
+            group=dp_mesh.get_group(),
+        )
+        examples_seen_t.wait()
+    else:
+        examples_seen_t = dataset_stats.examples_seen.cuda()
+    epochs_completed_per_dataset = examples_seen_t / examples_per_epoch
+    # Get the minimum of the non-zero entries. Avoiding the non-zero cases to avoid later divisions
+    # by zero. This can only happen super early in training, for typical cases.
+    epochs_completed = (
+        epochs_completed_per_dataset[epochs_completed_per_dataset > 0].min().item()
+    )
+    return epochs_completed
+
+
+def should_stop_training(
+    job_config: JobConfig,
+    dataset_stats: DatasetStats,
+    dp_mesh,
+) -> bool:
+    return (
+        num_epochs_completed(job_config, dataset_stats, dp_mesh) > job_config.training.epochs
+    )
+
+
+def approx_remaining_steps(
+    step_idx: int,
+    job_config: JobConfig,
+    dataset_stats: DatasetStats,
+    dp_mesh,
+) -> int:
+    approx_epochs_seen = num_epochs_completed(job_config, dataset_stats, dp_mesh)
+    remaining_epochs = job_config.training.epochs - approx_epochs_seen
+    approx_steps_per_epoch = step_idx / approx_epochs_seen
+    approx_remaining_steps = int(remaining_epochs * approx_steps_per_epoch)
+    return approx_remaining_steps
+
+
+def approx_total_train_steps(
+    step_idx: int,
+    job_config: JobConfig,
+    dataset_stats: DatasetStats,
+    dp_mesh,
+) -> int:
+    return step_idx + approx_remaining_steps(
+        step_idx, job_config, dataset_stats, dp_mesh
+    )
+
+
+def approx_frac_training_complete(
+    job_config: JobConfig,
+    dataset_stats: DatasetStats,
+    dp_mesh,
+) -> float:
+    approx_epochs_seen = num_epochs_completed(job_config, dataset_stats, dp_mesh)
+    return approx_epochs_seen / job_config.training.epochs
+
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
@@ -88,12 +167,14 @@ def main(job_config: JobConfig):
         dp_mesh = world_mesh["dp"]
         dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
     else:
+        dp_mesh = None
         dp_degree, dp_rank = 1, 0
 
     if parallel_dims.cp_enabled:
         cp_mesh = world_mesh["cp"]
         cp_degree, cp_rank = cp_mesh.size(), cp_mesh.get_local_rank()
     else:
+        cp_mesh = None
         cp_degree, cp_rank = 1, 0
 
     if parallel_dims.pp_enabled:
@@ -102,40 +183,21 @@ def main(job_config: JobConfig):
     model_name = job_config.model.name
 
     # build dataloader
-    if job_config.dataset.use_sft_dataloader:
-        tokenizer = AutoTokenizer.from_pretrained(job_config.model.tokenizer_path)
-        data_loader = build_sft_data_loader(
-            datasets=job_config.dataset.datasets,
-            dataset_weights=job_config.dataset.dataset_weights,
-            dp_rank=dp_rank,
-            dp_degree=dp_degree,
-            cp_rank=cp_rank,
-            cp_degree=cp_degree,
-            batch_size=job_config.training.batch_size,
-            seq_len=job_config.training.seq_len,
-            naive_padding_free=job_config.dataset.naive_padding_free,
-            max_out_tokens=job_config.dataset.max_out_tokens,
-        )
-    elif job_config.dataset.use_experimental_dataloader:
-        tokenizer = AutoTokenizer.from_pretrained(job_config.model.tokenizer_path)
-        data_loader = build_experimental_data_loader(
-            job_config,
-            dp_rank,
-            dp_degree,
-            None if job_config.dataset.file_type=="arrow" else tokenizer,
-        )
-    else:
-        tokenizer_type = model_name_to_tokenizer[model_name]
-        tokenizer = build_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
-        data_loader = build_hf_data_loader(
-            job_config.training.dataset,
-            job_config.training.dataset_path,
-            tokenizer,
-            job_config.training.batch_size,
-            job_config.training.seq_len,
-            dp_degree,
-            dp_rank,
-        )
+    if not job_config.dataset.use_sft_dataloader:
+        raise ValueError("Script assumes SFT")
+    tokenizer = AutoTokenizer.from_pretrained(job_config.model.tokenizer_path)
+    data_loader = build_sft_data_loader(
+        datasets=job_config.dataset.datasets,
+        dataset_weights=job_config.dataset.dataset_weights,
+        dp_rank=dp_rank,
+        dp_degree=dp_degree,
+        cp_rank=cp_rank,
+        cp_degree=cp_degree,
+        batch_size=job_config.training.batch_size,
+        seq_len=job_config.training.seq_len,
+        naive_padding_free=job_config.dataset.naive_padding_free,
+        max_out_tokens=job_config.dataset.max_out_tokens,
+    )
 
     # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
@@ -332,15 +394,16 @@ def main(job_config: JobConfig):
         f"with local batch size {job_config.training.batch_size}, "
         f"global batch size {job_config.training.batch_size * dp_degree}, "
         f"sequence length {job_config.training.seq_len}, "
-        f"total steps {job_config.training.steps} "
-        f"(warmup {job_config.training.warmup_steps})"
+        f"total epochs {job_config.training.epochs} "
+        f"(warmup {job_config.training.warmup_steps} steps)"
     )
     with maybe_enable_profiling(
         job_config, global_step=train_state.step
     ) as torch_profiler, maybe_enable_memory_snapshot(
         job_config, global_step=train_state.step
     ) as memory_profiler:
-        while train_state.step < job_config.training.steps:
+        should_keep_training = True
+        while should_keep_training:
             train_state.step += 1
             train_state.ntokens += job_config.training.batch_size * dp_degree * job_config.training.seq_len
             gc_handler.run(train_state.step)
@@ -363,6 +426,7 @@ def main(job_config: JobConfig):
                     # print(f"{batch_size=}")
                     print(f"{input_ids.shape=}")
                     print(f"{input_ids.max()=}")
+                    print(f"{lr_schedulers.schedulers[0].get_last_lr()[0]=}")
             ntokens_since_last_log += labels.numel()
             data_loading_times.append(time.perf_counter() - data_load_start)
 
@@ -434,7 +498,15 @@ def main(job_config: JobConfig):
                 gnorms_since_last_log.append(gnorm)
                 optimizers.step()
                 optimizers.zero_grad()
-            lr_schedulers.step(num_steps=job_config.training.steps)
+
+            lr_schedulers.step(
+                num_steps=approx_remaining_steps(
+                    train_state.step // job_config.training.gradient_accumulation_steps,
+                    job_config,
+                    dataset_stats,
+                    dp_mesh,
+                )
+            )
 
             # calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
@@ -532,9 +604,10 @@ def main(job_config: JobConfig):
                 time_last_log = time.perf_counter()
                 device_memory_monitor.reset_peak_stats()
 
-            checkpoint.save(
-                train_state.step, force=(train_state.step == job_config.training.steps)
+            should_keep_training = not should_stop_training(
+                job_config, dataset_stats, dp_mesh
             )
+            checkpoint.save(train_state.step, force=should_keep_training)
 
             # signal the profiler that the next profiling step has started
             if torch_profiler:
@@ -549,6 +622,7 @@ def main(job_config: JobConfig):
                     timeout=timedelta(seconds=job_config.comm.train_timeout_seconds),
                     world_mesh=world_mesh,
                 )
+
 
     if torch.distributed.get_rank() == 0:
         logger.info("Sleeping 2 seconds for other ranks to complete")

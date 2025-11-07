@@ -179,6 +179,8 @@ class DatasetStats:
     dataset_lens: torch.LongTensor = field(default_factory=list)
 
 
+
+
 class InfiniteCPBatchingIter:
     """
     Infinite data iterator.
@@ -427,3 +429,120 @@ def build_sft_data_loader(
         weight_by=weight_by,
     )
     return train_loader
+
+
+# TODO: @goon - cache this value
+# def num_epochs_completed(
+#     cfg: config.train_config,
+#     dataset_stats: DatasetStats,
+#     local_rank: int,
+#     dp_mesh,
+# ) -> float:
+#     """
+#     Working def for number of completed epochs:
+#     * All-reduce sum the number of examples seen for each dataset.
+#     * Divide by number of expected examples per epoch per dataset, accounting for weights
+#     * Take the minimum (but non-zero value) over datasets, so that we don't cut short.
+#     """
+#
+#     weights_t = torch.tensor(parse_args(cfg.weights), dtype=torch.float32).to(
+#         local_rank
+#     )
+#     # Normalize weights so that the largest weight is 1, so that these weights multiplied by the
+#     # dataset length give the natural definition for the number of examples per epoch per dataset.
+#     weights_t /= weights_t.max()
+#     examples_per_epoch = dataset_stats.dataset_lens.to(local_rank) * weights_t
+#     if dp_mesh is not None:
+#         examples_seen_t = funcol.all_reduce(
+#             dataset_stats.examples_seen.to(local_rank),
+#             reduceOp="sum",
+#             group=dp_mesh.get_group(),
+#         )
+#         examples_seen_t.wait()
+#     else:
+#         examples_seen_t = dataset_stats.examples_seen.to(local_rank)
+#     epochs_completed_per_dataset = examples_seen_t / examples_per_epoch
+#     # Get the minimum of the non-zero entries. Avoiding the non-zero cases to avoid later divisions
+#     # by zero. This can only happen super early in training, for typical cases.
+#     epochs_completed = (
+#         epochs_completed_per_dataset[epochs_completed_per_dataset > 0].min().item()
+#     )
+#     return epochs_completed
+#
+#
+# def should_stop_training(
+#     step_idx: int,
+#     cfg: config.train_config,
+#     dataset_stats: DatasetStats,
+#     local_rank: int,
+#     dp_mesh,
+# ) -> bool:
+#     if cfg.num_steps is not None:
+#         return step_idx > cfg.num_steps
+#     if cfg.num_epochs is not None:
+#         return (
+#             num_epochs_completed(cfg, dataset_stats, local_rank, dp_mesh)
+#             > cfg.num_epochs
+#         )
+#     raise ValueError(
+#         f"Exactly one of {cfg.num_steps=} and {cfg.num_epochs=} must be non-None"
+#     )
+#
+#
+# def approx_remaining_steps(
+#     step_idx: int,
+#     cfg: config.train_config,
+#     dataset_stats: DatasetStats,
+#     local_rank: int,
+#     dp_mesh,
+# ) -> int:
+#     if cfg.num_steps is not None:
+#         return cfg.num_steps - step_idx + 1
+#     if cfg.num_epochs is not None:
+#         approx_epochs_seen = num_epochs_completed(
+#             cfg, dataset_stats, local_rank, dp_mesh
+#         )
+#         remaining_epochs = cfg.num_epochs - approx_epochs_seen
+#         approx_steps_per_epoch = step_idx / approx_epochs_seen
+#         approx_remaining_steps = int(remaining_epochs * approx_steps_per_epoch)
+#         return approx_remaining_steps
+#     raise ValueError(
+#         f"Exactly one of {cfg.num_steps=} and {cfg.num_epochs=} must be non-None"
+#     )
+#
+#
+# def approx_total_train_steps(
+#     step_idx: int,
+#     cfg: config.train_config,
+#     dataset_stats: DatasetStats,
+#     local_rank: int,
+#     dp_mesh,
+# ) -> int:
+#     if cfg.num_steps is not None:
+#         return cfg.num_steps
+#     if cfg.num_epochs is not None:
+#         return step_idx + approx_remaining_steps(
+#             step_idx, cfg, dataset_stats, local_rank, dp_mesh
+#         )
+#     raise ValueError(
+#         f"Exactly one of {cfg.num_steps=} and {cfg.num_epochs=} must be non-None"
+#     )
+#
+#
+# def approx_frac_training_complete(
+#     step_idx: int,
+#     cfg: config.train_config,
+#     dataset_stats: DatasetStats,
+#     local_rank: int,
+#     dp_mesh,
+# ) -> float:
+#     if cfg.num_steps is not None:
+#         return step_idx / cfg.num_steps
+#     if cfg.num_epochs is not None:
+#         approx_epochs_seen = num_epochs_completed(
+#             cfg, dataset_stats, local_rank, dp_mesh
+#         )
+#         return approx_epochs_seen / cfg.num_epochs
+#     raise ValueError(
+#         f"Exactly one of {cfg.num_steps=} and {cfg.num_epochs=} must be non-None"
+#     )

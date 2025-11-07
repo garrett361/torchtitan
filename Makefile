@@ -24,7 +24,7 @@ OI_CACHE_DATASET_FLAGS = \
     --chat_template_name tulu \
 	--dataset_transform_fn sft_tulu_tokenize_and_truncate_v1 sft_tulu_filter_v1
 
-SFT_DATA_PATH=/proj/data-eng/goon/garrett361/torchtitan-yarn-sft/data/1b8d0c88fe
+SFT_DATA_PATH=/proj/data-eng/goon/garrett361/torchtitan-yarn-sft/data/llama_3p1_8b_tulu
 LLAMA_3_8B_DCP_PATH=/proj/data-eng/goon/garrett361/torchtitan-yarn-sft/data/llama_3_8b_dcp
 
 # NOTE: @goon - no need for sft_tulu_filter_truncated_v1 when running without a max len
@@ -43,7 +43,10 @@ tokenize-tulu:
 fsdp-8b:
 	torchrun --nproc-per-node 8 train.py --job.config_file ./train_configs/llama3_8b.toml
 
-# NOTE: @goon -  must enable_checkpoint to have loading work
+# NOTE: @goon
+# -  must enable_checkpoint to have loading work
+# -  context_parallel_degree=world_size disables CP!
+# -  want huge max norm for sum loss
 fsdp-8b-sft:
 	torchrun --nproc-per-node 8 train.py --job.config_file ./train_configs/llama3_8b.toml \
 		--dataset.use_sft_dataloader --training.batch_size 1 --dataset.datasets $(SFT_DATA_PATH) \
@@ -57,15 +60,19 @@ fsdp-8b-sft:
 
 fsdp-8b-sft-cp:
 	torchrun --nproc-per-node 8 train.py --job.config_file ./train_configs/llama3_8b.toml \
-		--dataset.use_sft_dataloader --training.batch_size 1 --dataset.datasets $(SFT_DATA_PATH) \
 		--dataset.dataset_weights 1.0 \
-		--model.tokenizer_path meta-llama/Llama-3.1-8B \
-		--dataset.naive_padding_free \
+		--dataset.datasets $(SFT_DATA_PATH) \
 		--dataset.max_out_tokens \
+		--dataset.naive_padding_free \
+		--dataset.use_sft_dataloader \
+		--experimental.context_parallel_degree 4 \
+		--model.tokenizer_path meta-llama/Llama-3.1-8B \
+		--training.batch_size 1 \
+		--training.max_norm 1e8 \
+		--training.seq_len 32768 \
+		--training.epochs 0.1 \
 		--training.sum_loss \
-		--experimental.context_parallel_degree 8 \
-		--training.seq_len 8192 \
-		--training.batch_size 1
+		# --training.debug \
 		# --checkpoint.warm_start_ckpt_path $(LLAMA_3_8B_DCP_PATH) \
 		# --checkpoint.enable_checkpoint
 

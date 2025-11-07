@@ -246,15 +246,9 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--training.max_norm",
-            type=Union[float, int],
+            type=float,
             default=1.0,
             help="Max norm for gradient clipping",
-        )
-        self.parser.add_argument(
-            "--training.steps",
-            type=int,
-            default=10000,
-            help="How many train steps to run",
         )
         self.parser.add_argument(
             "--training.data_parallel_replicate_degree",
@@ -516,7 +510,7 @@ class JobConfig:
         self.parser.add_argument(
             "--dataset.use_sft_dataloader",
             action="store_true",
-            help="Whether to use the experimental dataloader instead of default HF",
+            help="Whether to use the SFT dataloader instead of default HF",
         )
         self.parser.add_argument(
             "--dataset.naive_padding_free",
@@ -538,6 +532,12 @@ class JobConfig:
             action="store_true",
         )
         self.parser.add_argument("--training.final_lr_ratio", type=float, default=0.0)
+        self.parser.add_argument(
+            "--training.epochs",
+            type=float,
+            default=1.0,
+            help="How many epochs to run",
+        )
 
         # checkpointing configs
         self.parser.add_argument(
