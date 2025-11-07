@@ -7,10 +7,12 @@
 import os
 import time
 from datetime import timedelta
+from dataclasses import fields
 
 import torch
 import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
+from torch.distributed import DeviceMesh
 
 from torch.distributed.elastic.multiprocessing.errors import record
 
@@ -40,7 +42,7 @@ torch.serialization.add_safe_globals([WeightWithDynamicFloat8CastTensor])
 def num_epochs_completed(
     job_config: JobConfig,
     dataset_stats: DatasetStats,
-    dp_mesh,
+    dp_mesh: DeviceMesh | None,
 ) -> float:
     """
     Working def for number of completed epochs:
@@ -78,45 +80,109 @@ def num_epochs_completed(
 def should_stop_training(
     job_config: JobConfig,
     dataset_stats: DatasetStats,
-    dp_mesh,
+    dp_mesh: DeviceMesh | None,
 ) -> bool:
     return (
-        num_epochs_completed(job_config, dataset_stats, dp_mesh) > job_config.training.epochs
+        num_epochs_completed(job_config, dataset_stats, dp_mesh)
+        > job_config.training.epochs
     )
 
 
 def approx_remaining_steps(
-    step_idx: int,
+    optim_step_idx: int,
     job_config: JobConfig,
     dataset_stats: DatasetStats,
-    dp_mesh,
+    dp_mesh: DeviceMesh | None,
 ) -> int:
     approx_epochs_seen = num_epochs_completed(job_config, dataset_stats, dp_mesh)
     remaining_epochs = job_config.training.epochs - approx_epochs_seen
-    approx_steps_per_epoch = step_idx / approx_epochs_seen
+    approx_steps_per_epoch = optim_step_idx / approx_epochs_seen
     approx_remaining_steps = int(remaining_epochs * approx_steps_per_epoch)
     return approx_remaining_steps
 
 
 def approx_total_train_steps(
-    step_idx: int,
+    optim_step_idx: int,
     job_config: JobConfig,
     dataset_stats: DatasetStats,
-    dp_mesh,
+    dp_mesh: DeviceMesh | None,
 ) -> int:
-    return step_idx + approx_remaining_steps(
-        step_idx, job_config, dataset_stats, dp_mesh
+    return optim_step_idx + approx_remaining_steps(
+        optim_step_idx, job_config, dataset_stats, dp_mesh
     )
 
 
 def approx_frac_training_complete(
     job_config: JobConfig,
     dataset_stats: DatasetStats,
-    dp_mesh,
+    dp_mesh: DeviceMesh | None,
 ) -> float:
     approx_epochs_seen = num_epochs_completed(job_config, dataset_stats, dp_mesh)
     return approx_epochs_seen / job_config.training.epochs
 
+
+def reduce_tensor_to_cpu(
+    t: torch.Tensor,
+    dp_mesh: DeviceMesh | None,
+) -> torch.Tensor:
+    if dp_mesh is None:
+        return t
+    t_reduced = funcol.all_reduce(
+        t.cuda(),
+        reduceOp="sum",
+        group=dp_mesh.get_group(),
+    )
+    t_reduced.wait()
+    return t_reduced.cpu()
+
+
+def reduce_dataset_stats(
+    dataset_stats: DatasetStats,
+    dp_mesh: DeviceMesh | None,
+) -> DatasetStats:
+    all_fields = {f.name: getattr(dataset_stats, f.name) for f in fields(dataset_stats)}
+    all_fields_reduced = {
+        k: reduce_tensor_to_cpu(v, dp_mesh) for k, v in all_fields.items()
+    }
+    return DatasetStats(**all_fields_reduced)
+
+
+
+
+def get_reduced_tokens_seen(
+    dataset_stats: DatasetStats,
+    dp_mesh,
+) -> torch.LongTensor:
+    """
+    Note: returns a CPU tensor.
+    """
+    if dp_mesh is None:
+        return dataset_stats.tokens_seen
+    reduced_tokens_seen = funcol.all_reduce(
+        dataset_stats.tokens_seen.cuda(),
+        reduceOp="sum",
+        group=dp_mesh.get_group(),
+    )
+    reduced_tokens_seen.wait()
+    return reduced_tokens_seen.cpu()
+
+
+def get_reduced_pred_tokens_seen(
+    dataset_stats: DatasetStats,
+    dp_mesh,
+) -> int:
+    """
+    Note: returns a CPU tensor.
+    """
+    if dp_mesh is None:
+        return dataset_stats.pred_tokens_seen
+    reduced_pred_tokens_seen = funcol.all_reduce(
+        dataset_stats.pred_tokens_seen.cuda(),
+        reduceOp="sum",
+        group=dp_mesh.get_group(),
+    )
+    reduced_pred_tokens_seen.wait()
+    return reduced_pred_tokens_seen.cpu()
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
@@ -381,7 +447,8 @@ def main(job_config: JobConfig):
     # variables used to keep info for metrics logging
     losses_since_last_log = []
     gnorms_since_last_log = []
-    ntokens_since_last_log = 0
+    ntokens_seen = 0
+    npred_tokens_seen = 0
     data_loading_times = []
     time_last_log = time.perf_counter()
     device_memory_monitor.reset_peak_stats()
@@ -427,7 +494,6 @@ def main(job_config: JobConfig):
                     print(f"{input_ids.shape=}")
                     print(f"{input_ids.max()=}")
                     print(f"{lr_schedulers.schedulers[0].get_last_lr()[0]=}")
-            ntokens_since_last_log += labels.numel()
             data_loading_times.append(time.perf_counter() - data_load_start)
 
             input_ids = input_ids.to(device_type)
@@ -499,14 +565,16 @@ def main(job_config: JobConfig):
                 optimizers.step()
                 optimizers.zero_grad()
 
-            lr_schedulers.step(
-                num_steps=approx_remaining_steps(
-                    train_state.step // job_config.training.gradient_accumulation_steps,
-                    job_config,
-                    dataset_stats,
-                    dp_mesh,
-                )
+            optim_step_idx = (
+                train_state.step // job_config.training.gradient_accumulation_steps
             )
+            num_steps = approx_total_train_steps(
+                optim_step_idx,
+                job_config,
+                dataset_stats,
+                dp_mesh,
+            )
+            lr_schedulers.step(num_steps=num_steps)
 
             # calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
@@ -515,7 +583,8 @@ def main(job_config: JobConfig):
             losses_since_last_log.append(loss)
 
             # log metrics
-            if train_state.step % job_config.metrics.log_freq == 0:
+            if optim_step_idx % job_config.metrics.log_freq == 0:
+
                 losses = [loss.item() for loss in losses_since_last_log]
                 avg_loss, max_loss = (
                     sum(losses)
@@ -542,10 +611,37 @@ def main(job_config: JobConfig):
 
                 time_delta = time.perf_counter() - time_last_log
 
-                # tokens per second per device, abbreviated as tps
-                tps = ntokens_since_last_log / (
-                    time_delta * parallel_dims.non_data_parallel_size
+                # Global Tokens-seen stats
+                dataset_stats_reduced = reduce_dataset_stats(dataset_stats, dp_mesh)
+                curr_ntokens_seen = dataset_stats_reduced.tokens_seen.sum().item()
+                curr_npred_tokens_seen = dataset_stats_reduced.pred_tokens_seen.sum().item()
+
+                new_tokens_seen = curr_ntokens_seen - ntokens_seen
+                new_pred_tokens_seen = curr_npred_tokens_seen - npred_tokens_seen
+
+                loss_per_token = global_avg_loss / (
+                    new_tokens_seen / dp_degree / job_config.metrics.log_freq
                 )
+                loss_per_pred_token = global_avg_loss / (
+                    new_pred_tokens_seen / dp_degree / job_config.metrics.log_freq
+                )
+                sec_per_step = time_delta / job_config.metrics.log_freq
+                remaining_secs = sec_per_step * approx_remaining_steps(
+                    optim_step_idx,
+                    job_config,
+                    dataset_stats,
+                    dp_mesh,
+                )
+                time_remaining =timedelta(seconds=remaining_secs)
+                print(f"Approx. time remaining: {timedelta(seconds=remaining_secs)}")
+
+                logger.info(f"Tok per dataset: {dataset_stats_reduced.tokens_seen }")
+                logger.info(f"Pred tok per dataset: {dataset_stats_reduced.pred_tokens_seen }")
+                logger.info(f"Loss per tok: {loss_per_token}")
+                logger.info(f"Loss per pred tok: {loss_per_pred_token}")
+
+                # tokens per second per device, abbreviated as tps
+                tps = new_tokens_seen / (time_delta * world_mesh.size())
                 # model FLOPS utilization
                 # For its definition and calculation, please refer to the PaLM paper:
                 # https://arxiv.org/abs/2204.02311
@@ -578,6 +674,8 @@ def main(job_config: JobConfig):
                         # for wandb, we track a different set of metrics
                         wandb_metrics = {
                             "loss": global_avg_loss,
+                            "loss_per_token": loss_per_token,
+                            "loss_per_pred_token": loss_per_pred_token,
                             "gradient norm": global_avg_gnorm,
                             "learning rate": lr_schedulers.schedulers[0].get_last_lr()[0],
                             "num tokens seen": train_state.ntokens,
@@ -586,20 +684,29 @@ def main(job_config: JobConfig):
                         }
                         wandb.log(wandb_metrics, step=train_state.step)
 
+                frac_complete = approx_frac_training_complete(
+                    job_config, dataset_stats, dp_mesh
+                )
                 logger.info(
                     f"{color.cyan}step: {train_state.step:2}  "
                     f"{color.green}loss: {global_avg_loss:7.4f}  "
+                    f"{color.magenta}loss_per_token: {loss_per_token:7.4f}  "
+                    f"{color.white}loss_per_pred_token: {loss_per_pred_token:7.4f}  "
                     f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
                     f"({device_mem_stats.max_reserved_pct:.2f}%)  "
                     f"{color.blue}tps: {round(tps):,}  "
                     f"{color.magenta}mfu: {mfu:.2f}%  "
                     f"{color.yellow}gnorm: {global_avg_gnorm}  "
+                    f"{color.red}{100*frac_complete:.2f}% complete  "
+                    f"{color.cyan}{time_remaining} remaining  "
                     f"{color.yellow}lr: {lr_schedulers.schedulers[0].get_last_lr()[0]}{color.reset}"
                 )
 
                 losses_since_last_log.clear()
                 gnorms_since_last_log.clear()
-                ntokens_since_last_log = 0
+                # The global number of tokens and pred tokens seen across the world:
+                ntokens_seen = curr_ntokens_seen
+                npred_tokens_seen = curr_npred_tokens_seen
                 data_loading_times.clear()
                 time_last_log = time.perf_counter()
                 device_memory_monitor.reset_peak_stats()
