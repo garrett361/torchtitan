@@ -498,6 +498,9 @@ def main(job_config: JobConfig):
 
             # optimizer step
             checkpoint.maybe_wait_for_staging()
+            optim_step_idx = (
+                train_state.step // job_config.training.gradient_accumulation_steps
+            )
             if train_state.step % job_config.training.gradient_accumulation_steps == 0:
                 # clip gradients
                 gnorm = utils.clip_grad_norm_(
@@ -510,12 +513,9 @@ def main(job_config: JobConfig):
                 if not any(torch.isnan(g) for g in gnorms_since_last_log):
                     optimizers.step()
                 else:
-                    logger.info("Skippping optim step due to nan grads.")
+                    logger.info(f"Skippping optim step {optim_step_idx} due to nan grads.")
                 optimizers.zero_grad()
 
-            optim_step_idx = (
-                train_state.step // job_config.training.gradient_accumulation_steps
-            )
             num_steps = approx_total_train_steps(
                 optim_step_idx,
                 job_config,
