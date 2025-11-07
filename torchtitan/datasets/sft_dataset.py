@@ -9,7 +9,20 @@ from torchtitan.logging import logger
 
 
 def _round_up_to_zig_zag_padding(num_toks: int, cp_degree: int) -> int:
-    return 2 * cp_degree * ((num_toks + 2 * cp_degree - 1) // (2 * cp_degree))
+    """
+    Round up the sequence length so that it is divisible by 2 * cp_degree, as required for zig-zag
+    sharding.
+    """
+    rounded = 2 * cp_degree * ((num_toks + 2 * cp_degree - 1) // (2 * cp_degree))
+
+    # Seems like we also need to have each shard be divisible by 16, as otherwise we can get:
+    # RuntimeError: Expected self.size(1) to be divisible by 16, but got self.size(1)=3908
+    # So enforce that here.
+
+    cp_shard_size = rounded // cp_degree
+    rounded_cp_shard_size = 16 * ((cp_shard_size + 15) // 16)
+    rounded = cp_degree * rounded_cp_shard_size
+    return rounded
 
 
 class CPDataCollator:
