@@ -415,8 +415,8 @@ def main(job_config: JobConfig):
     ) as torch_profiler, maybe_enable_memory_snapshot(
         job_config, global_step=train_state.step
     ) as memory_profiler:
-        should_keep_training = True
-        while should_keep_training:
+        stop_training = False
+        while not stop_training:
             train_state.step += 1
             train_state.ntokens += job_config.training.batch_size * dp_degree * job_config.training.seq_len
             gc_handler.run(train_state.step)
@@ -703,10 +703,10 @@ def main(job_config: JobConfig):
                 time_last_log = time.perf_counter()
                 device_memory_monitor.reset_peak_stats()
 
-            should_keep_training = not should_stop_training(
+            stop_training = should_stop_training(
                 job_config, dataset_stats, dp_mesh
             )
-            checkpoint.save(train_state.step, force=should_keep_training)
+            checkpoint.save(train_state.step, force=stop_training)
 
             # signal the profiler that the next profiling step has started
             if torch_profiler:
