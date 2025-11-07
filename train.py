@@ -620,9 +620,6 @@ def main(job_config: JobConfig):
                 )
                 time_remaining =timedelta(seconds=remaining_secs)
 
-                logger.info(f"Tok per dataset: {tokens_seen_reduced_t}")
-                logger.info(f"Pred tok per dataset: {pred_tokens_seen_reduced_t}")
-
                 # tokens per second per device, abbreviated as tps
                 tps = new_tokens_seen / (time_delta * world_mesh.size())
                 # model FLOPS utilization
@@ -690,7 +687,9 @@ def main(job_config: JobConfig):
                     f"{color.blue}tok/optim_step: {tokens_per_optim_step}  "
                     f"{color.magenta}pred_tok/optim_step: {pred_tokens_per_optim_step}  "
                     f"{color.red}{100 * frac_complete:.2f}% complete  "
-                    f"{color.cyan}{time_remaining} remaining  "
+                    f"{color.cyan}Tok per dataset: {tokens_seen_reduced_t}  "
+                    f"{color.green}Pred tok per dataset: {pred_tokens_seen_reduced_t}  "
+                    f"{color.white}{time_remaining} remaining  "
                     f"{color.yellow}lr: {lr_schedulers.schedulers[0].get_last_lr()[0]}{color.reset}"
                 )
 
