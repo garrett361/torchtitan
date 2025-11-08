@@ -600,16 +600,9 @@ def main(job_config: JobConfig):
                     global_avg_gnorm / avg_pred_tok_per_optim_step_per_gpu
                 )
 
-                examples_per_optim_step = (
-                    new_examples_seen / job_config.training.gradient_accumulation_steps
-                )
-                tokens_per_optim_step = (
-                    new_tokens_seen / job_config.training.gradient_accumulation_steps
-                )
-                pred_tokens_per_optim_step = (
-                    new_pred_tokens_seen
-                    / job_config.training.gradient_accumulation_steps
-                )
+                examples_per_optim_step = new_examples_seen / new_optim_steps
+                tokens_per_optim_step = new_tokens_seen / new_optim_steps
+                pred_tokens_per_optim_step = new_pred_tokens_seen / new_optim_steps
 
                 sec_per_step = time_delta / job_config.metrics.log_freq
                 remaining_secs = sec_per_step * approx_remaining_steps(

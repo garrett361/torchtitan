@@ -71,7 +71,7 @@ fsdp-8b-sft-cp:
 		--training.seq_len 32768 \
 		--training.epochs 0.05 \
 		--training.sum_loss \
-		--training.debug \
+		# --training.debug \
 		# --checkpoint.warm_start_ckpt_path $(LLAMA_3_8B_DCP_PATH) \
 		# --checkpoint.enable_checkpoint
 
