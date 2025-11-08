@@ -610,8 +610,7 @@ def main(job_config: JobConfig):
                     "memory/num_ooms": device_mem_stats.num_ooms,
                 }
                 metric_logger.log(metrics, step=train_state.step)
-                if job_config.metrics.enable_ibm_wandb:
-                    if torch.distributed.get_rank() == 0:
+                if job_config.metrics.enable_ibm_wandb and torch.distributed.get_rank() == 0:
                         # for wandb, we track a different set of metrics
                         wandb_metrics = {
                             "loss": global_avg_loss,
