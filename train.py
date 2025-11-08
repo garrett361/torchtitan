@@ -668,7 +668,7 @@ def main(job_config: JobConfig):
                     job_config, dataset_stats, dp_mesh
                 )
                 logger.info(
-                    f"{color.cyan}step: {train_state.step:2}  "
+                    f"\n{color.cyan}step: {train_state.step:2}  "
                     f"{color.green}loss: {global_avg_loss:7.4f}  "
                     f"{color.magenta}loss_per_token: {avg_loss_per_token:7.4f}  "
                     f"{color.white}loss_per_pred_token: {avg_loss_per_pred_token:7.4f}  "
