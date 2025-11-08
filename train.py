@@ -605,13 +605,14 @@ def main(job_config: JobConfig):
                 pred_tokens_per_optim_step = new_pred_tokens_seen / new_optim_steps
 
                 sec_per_step = time_delta / job_config.metrics.log_freq
-                remaining_secs = sec_per_step * approx_remaining_steps(
+                approx_optim_steps_remaining = approx_remaining_steps(
                     optim_step_idx,
                     job_config,
                     dataset_stats,
                     dp_mesh,
                 )
-                time_remaining =timedelta(seconds=remaining_secs)
+                remaining_secs = sec_per_step * approx_optim_steps_remaining
+                time_remaining = timedelta(seconds=remaining_secs)
 
                 # tokens per second per device, abbreviated as tps
                 tps = new_tokens_seen / (time_delta * world_mesh.size())
@@ -685,6 +686,7 @@ def main(job_config: JobConfig):
                     f"{color.cyan}Tok per dataset: {tokens_seen_reduced_t}  "
                     f"{color.green}Pred tok per dataset: {pred_tokens_seen_reduced_t}  "
                     f"{color.white}{time_remaining} remaining  "
+                    f"{color.blue}{approx_optim_steps_remaining} optim steps remaining  "
                     f"{color.yellow}lr: {lr_schedulers.schedulers[0].get_last_lr()[0]}{color.reset}"
                 )
 
