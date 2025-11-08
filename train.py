@@ -619,6 +619,7 @@ def main(job_config: JobConfig):
                             "loss_per_pred_token": avg_loss_per_pred_token,
                             "examples_per_step": examples_per_optim_step,
                             "tokens_per_step": tokens_per_optim_step,
+                            "epochs": num_epochs,
                             "pred_tokens_per_step": pred_tokens_per_optim_step,
                             "gradient norm": global_avg_gnorm,
                             "gradient norm per token": avg_gnorm_per_token,
@@ -648,6 +649,7 @@ def main(job_config: JobConfig):
                     f"{color.blue}tok/optim_step: {tokens_per_optim_step}  "
                     f"{color.magenta}pred_tok/optim_step: {pred_tokens_per_optim_step}  "
                     f"{color.red}{100 * frac_complete:.2f}% complete  "
+                    f"{color.yellow}{num_epochs:.2f} epochs complete  "
                     f"{color.cyan}Tok per dataset: {tokens_seen_reduced_t}  "
                     f"{color.green}Pred tok per dataset: {pred_tokens_seen_reduced_t}  "
                     f"{color.white}{time_remaining} remaining  "
