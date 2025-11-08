@@ -251,6 +251,7 @@ class InfiniteCPBatchingIter:
             separator_id=separator_id,
             naive_padding_free=naive_padding_free,
         )
+        self._yielded_batches = 0
 
     def __iter__(self) -> Iterator[tuple[DatasetStats, int, dict[str, torch.Tensor]]]:
         return self
@@ -303,6 +304,7 @@ class InfiniteCPBatchingIter:
                 batch_size = len(self._batch)
                 self._batch.clear()
                 self._batch.extend(item)
+                self._yielded_batches += 1
                 return self._stats, batch_size, self.cp_processed_batch
 
     def _should_yield_batch(self, n_tok_next_item: int) -> bool:
@@ -330,12 +332,13 @@ class InfiniteCPBatchingIter:
             )
         return tok_in_batch_with_new_input > self.max_tokens
 
-    # TODO: @goon - proper state handling.
     def load_state_dict(self, state_dict):
-        return
+        # Dumb state restoration: just burn through all previously yielded batches:
+        while self._yielded_batches < state_dict["_yielded_batches"]:
+            next(self)
 
     def state_dict(self):
-        return {}
+        return {"_yielded_batches": self._yielded_batches}
 
 
 class PretokenizedCollator:
