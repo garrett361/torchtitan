@@ -39,6 +39,21 @@ from torchao.float8.fsdp_utils import WeightWithDynamicFloat8CastTensor
 torch.serialization.add_safe_globals([WeightWithDynamicFloat8CastTensor])
 
 
+def reduce_tensor_to_cpu(
+    t: torch.Tensor,
+    dp_mesh: DeviceMesh | None,
+) -> torch.Tensor:
+    if dp_mesh is None:
+        return t
+    t_reduced = funcol.all_reduce(
+        t.cuda(),
+        reduceOp="sum",
+        group=dp_mesh.get_group(),
+    )
+    t_reduced.wait()
+    return t_reduced.cpu()
+
+
 def num_epochs_completed(
     job_config: JobConfig,
     dataset_stats: DatasetStats,
@@ -53,22 +68,13 @@ def num_epochs_completed(
     weights_t = torch.tensor(
         [float(w) for w in job_config.dataset.dataset_weights.split(",")],
         dtype=torch.float32,
-        device="cuda",
     )
     # Normalize weights so that the largest weight is 1, so that these weights multiplied by the
     # dataset length give the natural definition for the number of examples per epoch per dataset.
     weights_t /= weights_t.max()
-    examples_per_epoch = dataset_stats.dataset_lens.cuda() * weights_t
-    if dp_mesh is not None:
-        examples_seen_t = funcol.all_reduce(
-            dataset_stats.examples_seen.cuda(),
-            reduceOp="sum",
-            group=dp_mesh.get_group(),
-        )
-        examples_seen_t.wait()
-    else:
-        examples_seen_t = dataset_stats.examples_seen.cuda()
-    epochs_completed_per_dataset = examples_seen_t / examples_per_epoch
+    examples_per_epoch = dataset_stats.dataset_lens * weights_t
+    examples_seen_reduced = reduce_tensor_to_cpu(dataset_stats.examples_seen, dp_mesh)
+    epochs_completed_per_dataset = examples_seen_reduced / examples_per_epoch
     # Get the minimum of the non-zero entries. Avoiding the non-zero cases to avoid later divisions
     # by zero. This can only happen super early in training, for typical cases.
     epochs_completed = (
@@ -77,63 +83,25 @@ def num_epochs_completed(
     return epochs_completed
 
 
-def should_stop_training(
-    job_config: JobConfig,
-    dataset_stats: DatasetStats,
-    dp_mesh: DeviceMesh | None,
-) -> bool:
-    return (
-        num_epochs_completed(job_config, dataset_stats, dp_mesh)
-        > job_config.training.epochs
-    )
-
-
 def approx_remaining_steps(
     optim_step_idx: int,
     job_config: JobConfig,
-    dataset_stats: DatasetStats,
-    dp_mesh: DeviceMesh | None,
+    num_epochs: float,
 ) -> int:
-    approx_epochs_seen = num_epochs_completed(job_config, dataset_stats, dp_mesh)
-    remaining_epochs = job_config.training.epochs - approx_epochs_seen
-    approx_steps_per_epoch = optim_step_idx / approx_epochs_seen
-    approx_remaining_steps = int(remaining_epochs * approx_steps_per_epoch)
-    return approx_remaining_steps
+    remaining_epochs = job_config.training.epochs - num_epochs
+    approx_steps_per_epoch = optim_step_idx / num_epochs
+    approx__steps = int(remaining_epochs * approx_steps_per_epoch)
+    return approx__steps
 
 
 def approx_total_train_steps(
     optim_step_idx: int,
     job_config: JobConfig,
-    dataset_stats: DatasetStats,
-    dp_mesh: DeviceMesh | None,
+    num_epochs: float,
 ) -> int:
     return optim_step_idx + approx_remaining_steps(
-        optim_step_idx, job_config, dataset_stats, dp_mesh
+        optim_step_idx, job_config, num_epochs
     )
-
-
-def approx_frac_training_complete(
-    job_config: JobConfig,
-    dataset_stats: DatasetStats,
-    dp_mesh: DeviceMesh | None,
-) -> float:
-    approx_epochs_seen = num_epochs_completed(job_config, dataset_stats, dp_mesh)
-    return approx_epochs_seen / job_config.training.epochs
-
-
-def reduce_tensor_to_cpu(
-    t: torch.Tensor,
-    dp_mesh: DeviceMesh | None,
-) -> torch.Tensor:
-    if dp_mesh is None:
-        return t
-    t_reduced = funcol.all_reduce(
-        t.cuda(),
-        reduceOp="sum",
-        group=dp_mesh.get_group(),
-    )
-    t_reduced.wait()
-    return t_reduced.cpu()
 
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
@@ -501,6 +469,7 @@ def main(job_config: JobConfig):
             optim_step_idx = (
                 train_state.step // job_config.training.gradient_accumulation_steps
             )
+            num_epochs = num_epochs_completed(job_config, dataset_stats, dp_mesh)
             if train_state.step % job_config.training.gradient_accumulation_steps == 0:
                 # clip gradients
                 gnorm = utils.clip_grad_norm_(
@@ -519,8 +488,7 @@ def main(job_config: JobConfig):
             num_steps = approx_total_train_steps(
                 optim_step_idx,
                 job_config,
-                dataset_stats,
-                dp_mesh,
+                num_epochs
             )
             lr_schedulers.step(num_steps=num_steps)
 
@@ -608,8 +576,7 @@ def main(job_config: JobConfig):
                 approx_optim_steps_remaining = approx_remaining_steps(
                     optim_step_idx,
                     job_config,
-                    dataset_stats,
-                    dp_mesh,
+                    num_epochs
                 )
                 remaining_secs = sec_per_step * approx_optim_steps_remaining
                 time_remaining = timedelta(seconds=remaining_secs)
@@ -664,9 +631,7 @@ def main(job_config: JobConfig):
                         }
                         wandb.log(wandb_metrics, step=train_state.step)
 
-                frac_complete = approx_frac_training_complete(
-                    job_config, dataset_stats, dp_mesh
-                )
+                frac_complete = num_epochs / job_config.training.epochs
                 logger.info(
                     f"\n{color.cyan}step: {train_state.step:2}  "
                     f"{color.green}loss: {global_avg_loss:7.4f}  "
@@ -699,9 +664,7 @@ def main(job_config: JobConfig):
                 time_last_log = time.perf_counter()
                 device_memory_monitor.reset_peak_stats()
 
-            stop_training = should_stop_training(
-                job_config, dataset_stats, dp_mesh
-            )
+            stop_training = num_epochs > job_config.training.epochs
             checkpoint.save(train_state.step, force=stop_training)
 
             # signal the profiler that the next profiling step has started
