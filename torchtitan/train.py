@@ -274,7 +274,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 ):
                     for maybe_router_mod in m.modules():
                         if isinstance(maybe_router_mod, TokenChoiceTopKRouter):
-                            nn.init.normal_(maybe_router_mod.gate.weight, std=std)
+                            nn.init.trunc_normal_(maybe_router_mod.gate.weight, std=std)
 
             # confirm that user will be able to view loss metrics on the console
             ensure_pp_loss_visible(parallel_dims, job_config, color)
