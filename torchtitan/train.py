@@ -286,6 +286,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             model.to_empty(device=init_device)
             with torch.no_grad():
                 model.init_weights(buffer_device=buffer_device)
+            if (
+                hasattr(job_config, "moe_overrides")
+                and (std := job_config.moe_overrides.router_init_std)
+                is not None
+            ):
+                logger.info(f"Intializing router weights with {std=}")
+                for maybe_router_mod in model.modules():
+                    if isinstance(maybe_router_mod, TokenChoiceTopKRouter):
+                        nn.init.trunc_normal_(maybe_router_mod.gate.weight, std=std)
             model.train()
 
             self.model_parts = [model]
