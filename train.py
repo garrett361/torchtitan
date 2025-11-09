@@ -609,7 +609,7 @@ def main(job_config: JobConfig):
                     "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
                     "memory/num_ooms": device_mem_stats.num_ooms,
                 }
-                metric_logger.log(metrics, step=train_state.step)
+                metric_logger.log(metrics, step=optim_step_idx)
                 if job_config.metrics.enable_ibm_wandb and torch.distributed.get_rank() == 0:
                         # for wandb, we track a different set of metrics
                         wandb_metrics = {
@@ -629,11 +629,11 @@ def main(job_config: JobConfig):
                             "current throughput": tps,
                             "mfu": mfu,
                         }
-                        wandb.log(wandb_metrics, step=train_state.step)
+                        wandb.log(wandb_metrics, step=optim_step_idx)
 
                 frac_complete = num_epochs / job_config.training.epochs
                 logger.info(
-                    f"\n{color.cyan}step: {train_state.step:2}  "
+                    f"\n{color.cyan}optim step: {optim_step_idx:2}  "
                     f"{color.green}loss: {global_avg_loss:7.4f}  "
                     f"{color.magenta}loss_per_token: {avg_loss_per_token:7.4f}  "
                     f"{color.white}loss_per_pred_token: {avg_loss_per_pred_token:7.4f}  "
