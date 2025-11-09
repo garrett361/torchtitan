@@ -180,23 +180,24 @@ class LossBasedScheduler(_TopKScheduler):
                 else (self.top_k_args.beta * self._curr_loss)
                 + (1 - self.top_k_args.beta) * loss
             )
-            if self._mini_step >= self.top_k_args.min_steps:
-                if self._curr_loss <= self.top_k_args.target_loss:
-                    layer_idx, moe = self._get_idx_and_moe()
-                    if moe is not None:
-                        moe.router.top_k -= 1
-                        moe.reorderer.top_k -= 1
-                        self.layer_idx_to_top_k[layer_idx] -= 1
-                        new_top_k = self.layer_idx_to_top_k[layer_idx]
-                        logger.info(
-                            f"Reducing top_k on {layer_idx=} MoE from {new_top_k + 1} -> {new_top_k}."
-                        )
-                        # TODO: @goon - DELETE
-                        logger.info(
-                            f"{self._mini_step=}, {self.top_k_args.min_steps=}, {self._curr_loss=}, {self.top_k_args.target_loss=}"
-                        )
-                    self._mini_step = 0
-                    self._curr_loss = None
+            if (self._mini_step >= self.top_k_args.min_steps) and (
+                self._curr_loss <= self.top_k_args.target_loss
+            ):
+                layer_idx, moe = self._get_idx_and_moe()
+                if moe is not None:
+                    moe.router.top_k -= 1
+                    moe.reorderer.top_k -= 1
+                    self.layer_idx_to_top_k[layer_idx] -= 1
+                    new_top_k = self.layer_idx_to_top_k[layer_idx]
+                    logger.info(
+                        f"Reducing top_k on {layer_idx=} MoE from {new_top_k + 1} -> {new_top_k}."
+                    )
+                    # TODO: @goon - DELETE
+                    logger.info(
+                        f"{self._mini_step=}, {self.top_k_args.min_steps=}, {self._curr_loss=}, {self.top_k_args.target_loss=}"
+                    )
+                self._mini_step = 0
+                self._curr_loss = None
 
 
 def get_top_k_scheduler(
