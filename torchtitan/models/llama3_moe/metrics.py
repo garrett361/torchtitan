@@ -83,7 +83,7 @@ class CustomMetricsProcessor(MetricsProcessor):
     def get_expert_group_normalized_group_entropy(
         self, transformer_block: nn.Module, n_expert_groups: int
     ) -> float:
-        tokens_per_expert_group_cumulative_prob = (
+        tokens_per_expert_group_cumulative = (
             transformer_block.moe.tokens_per_expert_cumulative.reshape(
                 n_expert_groups, -1
             ).sum(dim=-1)
