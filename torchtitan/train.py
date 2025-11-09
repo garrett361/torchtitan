@@ -11,8 +11,10 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
+import torch.nn as nn
 from torch.distributed.elastic.multiprocessing.errors import record
 
+from torchtitan.models.moe import TokenChoiceTopKRouter
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager, ModelWrapper
 from torchtitan.components.dataloader import DataloaderExhaustedError
@@ -265,6 +267,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 with torch.no_grad():
                     m.init_weights(buffer_device=buffer_device)
                 m.train()
+                if (
+                    hasattr(job_config, "moe_overrides")
+                    and (std := job_config.moe_overrides.moe_router_init_std)
+                    is not None
+                ):
+                    for maybe_router_mod in m.modules():
+                        if isinstance(maybe_router_mod, TokenChoiceTopKRouter):
+                            nn.init.normal_(maybe_router_mod.gate.weight, std=std)
 
             # confirm that user will be able to view loss metrics on the console
             ensure_pp_loss_visible(parallel_dims, job_config, color)
