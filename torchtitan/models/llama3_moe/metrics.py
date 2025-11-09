@@ -30,14 +30,14 @@ class CustomMetricsProcessor(MetricsProcessor):
             for block_idx, transformer_block in model_part.layers.items():
                 if not transformer_block.moe_enabled:
                     continue
-                moe_metrics[f"moe/layer_{block_idx} moe normalized entropy"] = (
+                moe_metrics[f"moe_entropy/layer_{block_idx}"] = (
                     self.get_normalized_entropy(transformer_block)
                 )
                 if (
                     n_expert_groups := model_part.model_args.moe_args.n_expert_groups
                 ) > 1:
                     moe_metrics[
-                        f"moe/layer_{block_idx} moe expert_group normalized entropy"
+                        f"moe_group_entropy/layer_{block_idx}"
                     ] = self.get_expert_group_normalized_group_entropy(
                         transformer_block, n_expert_groups
                     )
@@ -46,16 +46,16 @@ class CustomMetricsProcessor(MetricsProcessor):
                 router_weight = transformer_block.moe.router.gate.weight
                 if isinstance(router_weight, DTensor):
                     router_weight = router_weight.full_tensor()
-                moe_metrics[f"moe/layer_{block_idx} router abs mean"] = (
+                moe_metrics[f"moe_router/layer_{block_idx} abs mean"] = (
                     router_weight.abs().mean().item()
                 )
-                moe_metrics[f"moe/layer_{block_idx} router std"] = (
+                moe_metrics[f"moe_router/layer_{block_idx} std"] = (
                     router_weight.std().item()
                 )
-                moe_metrics[f"moe/layer_{block_idx} router min"] = (
+                moe_metrics[f"moe_router/layer_{block_idx} min"] = (
                     router_weight.min().item()
                 )
-                moe_metrics[f"moe/layer_{block_idx} router max"] = (
+                moe_metrics[f"moe_router/layer_{block_idx} max"] = (
                     router_weight.max().item()
                 )
 
