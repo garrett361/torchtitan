@@ -62,7 +62,7 @@ class MoEOverrides:
     n_expert_groups: int | None = None
     top_k_group: int | None = None
     # Custom args
-    moe_router_init_std: int | None = None
+    moe_router_init_std: float | None = None
 
 
 @dataclass
