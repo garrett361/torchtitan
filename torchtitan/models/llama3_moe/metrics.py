@@ -82,7 +82,7 @@ class CustomMetricsProcessor(MetricsProcessor):
         self, transformer_block: nn.Module
     ) -> float:
         tokens_per_expert_group_cumulative_prob = (
-            transformer_block.moe.tokens_per_expert_group_cumulative.reshape(
+            transformer_block.moe.tokens_per_expert_cumulative.reshape(
                 n_expert_group_groups, -1
             ).sum(dim=-1)
             + self.eps
