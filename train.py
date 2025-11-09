@@ -610,26 +610,35 @@ def main(job_config: JobConfig):
                     "memory/num_ooms": device_mem_stats.num_ooms,
                 }
                 metric_logger.log(metrics, step=optim_step_idx)
-                if job_config.metrics.enable_ibm_wandb and torch.distributed.get_rank() == 0:
-                        # for wandb, we track a different set of metrics
-                        wandb_metrics = {
-                            "loss": global_avg_loss,
-                            "loss_per_token": avg_loss_per_token,
-                            "loss_per_pred_token": avg_loss_per_pred_token,
-                            "examples_per_step": examples_per_optim_step,
-                            "tokens_per_step": tokens_per_optim_step,
-                            "epochs": num_epochs,
-                            "pred_tokens_per_step": pred_tokens_per_optim_step,
-                            "gradient norm": global_avg_gnorm,
-                            "gradient norm per token": avg_gnorm_per_token,
-                            "gradient norm per pred token": avg_gnorm_per_pred_token,
-                            "learning rate": lr_schedulers.schedulers[0].get_last_lr()[0],
-                            "num tokens seen": curr_tokens_seen,
-                            "num pred tokens seen": curr_pred_tokens_seen,
-                            "current throughput": tps,
-                            "mfu": mfu,
-                        }
-                        wandb.log(wandb_metrics, step=optim_step_idx)
+                if (
+                    job_config.metrics.enable_ibm_wandb
+                    and torch.distributed.get_rank() == 0
+                ):
+                    # for wandb, we track a different set of metrics
+                    wandb_metrics = {
+                        "loss": global_avg_loss,
+                        "loss_per_token": avg_loss_per_token,
+                        "loss_per_pred_token": avg_loss_per_pred_token,
+                        "examples_per_step": examples_per_optim_step,
+                        "tokens_per_step": tokens_per_optim_step,
+                        "epochs": num_epochs,
+                        "pred_tokens_per_step": pred_tokens_per_optim_step,
+                        "gradient norm": global_avg_gnorm,
+                        "gradient norm per token": avg_gnorm_per_token,
+                        "gradient norm per pred token": avg_gnorm_per_pred_token,
+                        "learning rate": lr_schedulers.schedulers[0].get_last_lr()[0],
+                        "num tokens seen": curr_tokens_seen,
+                        "num pred tokens seen": curr_pred_tokens_seen,
+                        "current throughput": tps,
+                        "mfu": mfu,
+                        "memory/max_active(GiB)": device_mem_stats.max_active_gib,
+                        "memory/max_active(%)": device_mem_stats.max_active_pct,
+                        "memory/max_reserved(GiB)": device_mem_stats.max_reserved_gib,
+                        "memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
+                        "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
+                        "memory/num_ooms": device_mem_stats.num_ooms,
+                    }
+                    wandb.log(wandb_metrics, step=optim_step_idx)
 
                 frac_complete = num_epochs / job_config.training.epochs
                 logger.info(
