@@ -33,11 +33,13 @@ class CustomMetricsProcessor(MetricsProcessor):
                 moe_metrics[f"moe/layer_{block_idx} moe normalized entropy"] = (
                     self.get_normalized_entropy(transformer_block)
                 )
-                if model_part.model_args.moe_args.n_expert_groups > 1:
+                if (
+                    n_expert_groups := model_part.model_args.moe_args.n_expert_groups
+                ) > 1:
                     moe_metrics[
                         f"moe/layer_{block_idx} moe expert_group normalized entropy"
                     ] = self.get_expert_group_normalized_group_entropy(
-                        transformer_block
+                        transformer_block, n_expert_groups
                     )
                 # Reset
                 transformer_block.moe.tokens_per_expert_cumulative.zero_()
@@ -79,11 +81,11 @@ class CustomMetricsProcessor(MetricsProcessor):
         return normalized_entropy
 
     def get_expert_group_normalized_group_entropy(
-        self, transformer_block: nn.Module
+        self, transformer_block: nn.Module, n_expert_groups: int
     ) -> float:
         tokens_per_expert_group_cumulative_prob = (
             transformer_block.moe.tokens_per_expert_cumulative.reshape(
-                n_expert_group_groups, -1
+                n_expert_groups, -1
             ).sum(dim=-1)
             + self.eps
         )
