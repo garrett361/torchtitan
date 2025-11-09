@@ -7,6 +7,7 @@
 import math
 from typing import TYPE_CHECKING, Any
 
+import torch
 from torch.distributed.tensor import DTensor
 
 from torchtitan.components.metrics import MetricsProcessor
