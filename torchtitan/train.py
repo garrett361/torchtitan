@@ -269,7 +269,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 m.train()
                 if (
                     hasattr(job_config, "moe_overrides")
-                    and (std := job_config.moe_overrides.moe_router_init_std)
+                    and (std := job_config.moe_overrides.router_init_std)
                     is not None
                 ):
                     logger.info(f"Intializing router weights with {std=}")
