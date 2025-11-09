@@ -8,7 +8,6 @@ import torch
 
 from torchtitan.models.llama3_moe import (
     Llama3MoE,
-    Llama3MoEJobConfig,
     Llama3MoEModelArgs,
     TopKSchedulerArgs,
 )
@@ -16,7 +15,7 @@ from torchtitan.models.llama3_moe.top_k_scheduler import get_top_k_scheduler
 from torchtitan.models.moe import MoE, MoEArgs
 
 
-class TestModel:
+class TestSchedulers:
     # Small Defaults
     dim = 128
     moe_inter_dim = 256
@@ -40,7 +39,6 @@ class TestModel:
 
     def test_no_op(self):
         top_k_args = TopKSchedulerArgs(name="no_op")
-        job_config = Llama3MoEJobConfig(model=self.model_args, top_k_args=top_k_args)
         with torch.device("meta"):
             model = Llama3MoE(self.model_args)
 
@@ -61,7 +59,6 @@ class TestModel:
             step_interval=step_interval,
             min_top_k=min_top_k,
         )
-        job_config = Llama3MoEJobConfig(model=self.model_args, top_k_args=top_k_args)
         with torch.device("meta"):
             model = Llama3MoE(self.model_args)
 
@@ -106,5 +103,56 @@ class TestModel:
             if isinstance(module, MoE):
                 assert module.router.top_k == min_top_k
                 assert module.reorderer.top_k == min_top_k
+
+        top_k_scheduler.load_state_dict(sd)
+
+    def test_loss(self):
+        warmup_steps = 10
+        min_top_k = self.top_k // 2
+        top_k_args = TopKSchedulerArgs(
+            name="loss",
+            warmup_steps=warmup_steps,
+            min_steps=1,
+            target_loss=10.0,
+            beta=0.99,
+            min_top_k=min_top_k,
+        )
+        with torch.device("meta"):
+            model = Llama3MoE(self.model_args)
+
+        top_k_scheduler = get_top_k_scheduler(
+            model_args=self.model_args, top_k_args=top_k_args, model_parts=[model]
+        )
+        assert top_k_scheduler._step == 0
+        assert top_k_scheduler._mini_step == 0
+        assert top_k_scheduler._curr_loss is None
+
+        loss = 0.0
+        for _ in range(warmup_steps + 1):
+            top_k_scheduler.step(loss)
+
+        # Reduce the top_k once
+        assert top_k_scheduler._step == warmup_steps + 1
+        assert (
+            top_k_scheduler.layer_idx_to_top_k[str(self.n_layers - 1)] == self.top_k - 1
+        )
+        for layer_idx, top_k in top_k_scheduler.layer_idx_to_top_k.items():
+            moe = model.layers[str(layer_idx)].moe
+            assert moe.router.top_k == top_k
+            assert moe.reorderer.top_k == top_k
+
+        sd = top_k_scheduler.state_dict()
+
+        # Reduce a second time:
+        for _ in range(1):
+            top_k_scheduler.step(loss)
+        assert top_k_scheduler._step == warmup_steps + 2
+        assert (
+            top_k_scheduler.layer_idx_to_top_k[str(self.n_layers - 1)] == self.top_k - 2
+        )
+        for layer_idx, top_k in top_k_scheduler.layer_idx_to_top_k.items():
+            moe = model.layers[str(layer_idx)].moe
+            assert moe.router.top_k == top_k
+            assert moe.reorderer.top_k == top_k
 
         top_k_scheduler.load_state_dict(sd)

@@ -22,9 +22,14 @@ class Llama3MoECustomArgs:
 @dataclass
 class TopKSchedulerArgs:
     name: str = "no_op"
+    # For constant:
     min_top_k: int | None = None
     step_interval: int | None = None
     warmup_steps: int | None = None
+    # For loss-based:
+    min_steps: int | None = None
+    beta: float | None = None
+    target_loss: float | None = None
 
 
 # Classes for overriding model architecture configurations, which can't be done via the CLI or toml

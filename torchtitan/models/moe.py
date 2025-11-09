@@ -273,6 +273,7 @@ class TokenChoiceTopKRouter(nn.Module):
             )
             scores = scores.masked_fill(~score_mask.bool(), 0.0)
 
+        # NOTE: @goon - not handling this correctly! Need to account for bias before doing n_expert_groups
         # top scores shape (bs*slen, top_k)
         # NOTE: The expert_bias is only used for routing. The gating value
         #       top_scores is still derived from the original scores.
