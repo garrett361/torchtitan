@@ -272,6 +272,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     and (std := job_config.moe_overrides.moe_router_init_std)
                     is not None
                 ):
+                    logger.info(f"Intializing router weights with {std=}")
                     for maybe_router_mod in m.modules():
                         if isinstance(maybe_router_mod, TokenChoiceTopKRouter):
                             nn.init.trunc_normal_(maybe_router_mod.gate.weight, std=std)
