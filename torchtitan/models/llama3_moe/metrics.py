@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from typing import TYPE_CHECKING, Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -30,9 +30,9 @@ class CustomMetricsProcessor(MetricsProcessor):
             for block_idx, transformer_block in model_part.layers.items():
                 if not transformer_block.moe_enabled:
                     continue
-                moe_metrics[f"moe_entropy/layer_{block_idx}"] = (
-                    self.get_normalized_entropy(transformer_block)
-                )
+                moe_metrics[
+                    f"moe_entropy/layer_{block_idx}"
+                ] = self.get_normalized_entropy(transformer_block)
                 if (
                     n_expert_groups := model_part.model_args.moe_args.n_expert_groups
                 ) > 1:
@@ -49,15 +49,15 @@ class CustomMetricsProcessor(MetricsProcessor):
                 moe_metrics[f"moe_router/layer_{block_idx} abs mean"] = (
                     router_weight.abs().mean().item()
                 )
-                moe_metrics[f"moe_router/layer_{block_idx} std"] = (
-                    router_weight.std().item()
-                )
-                moe_metrics[f"moe_router/layer_{block_idx} min"] = (
-                    router_weight.min().item()
-                )
-                moe_metrics[f"moe_router/layer_{block_idx} max"] = (
-                    router_weight.max().item()
-                )
+                moe_metrics[
+                    f"moe_router/layer_{block_idx} std"
+                ] = router_weight.std().item()
+                moe_metrics[
+                    f"moe_router/layer_{block_idx} min"
+                ] = router_weight.min().item()
+                moe_metrics[
+                    f"moe_router/layer_{block_idx} max"
+                ] = router_weight.max().item()
 
         return moe_metrics
 

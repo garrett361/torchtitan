@@ -14,7 +14,6 @@ import torch
 import torch.nn as nn
 from torch.distributed.elastic.multiprocessing.errors import record
 
-from torchtitan.models.moe import MoE
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager, ModelWrapper
 from torchtitan.components.dataloader import DataloaderExhaustedError
@@ -35,6 +34,8 @@ from torchtitan.models.llama3_moe import (
 )
 from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
 from torchtitan.models.llama3_moe.top_k_scheduler import get_top_k_scheduler
+
+from torchtitan.models.moe import MoE
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -269,8 +270,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 m.train()
                 if (
                     hasattr(job_config, "moe_overrides")
-                    and (std := job_config.moe_overrides.router_init_std)
-                    is not None
+                    and (std := job_config.moe_overrides.router_init_std) is not None
                 ):
                     logger.info(f"Intializing router weights with {std=}")
                     for maybe_moe in model.modules():
@@ -292,8 +292,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 model.init_weights(buffer_device=buffer_device)
             if (
                 hasattr(job_config, "moe_overrides")
-                and (std := job_config.moe_overrides.router_init_std)
-                is not None
+                and (std := job_config.moe_overrides.router_init_std) is not None
             ):
                 logger.info(f"Intializing router weights with {std=}")
                 for maybe_moe in model.modules():
