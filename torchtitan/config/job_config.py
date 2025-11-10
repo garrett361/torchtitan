@@ -158,6 +158,7 @@ class LRScheduler:
     - 'linear': linearly decays learning rate from initial to final value
     - 'sqrt': decays learning rate following a 1 minus square root curve
     - 'cosine': smoothly decays learning rate following a cosine curve
+    - 'constant': constant
     """
 
     min_lr_factor: float = 0.0
