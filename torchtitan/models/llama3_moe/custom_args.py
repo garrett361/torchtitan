@@ -61,6 +61,8 @@ class MoEOverrides:
     hf_ffn_hidden_dim: int | None | None = None
     n_expert_groups: int | None = None
     top_k_group: int | None = None
+    # Custom args
+    router_init_std: float | None = None
 
 
 @dataclass

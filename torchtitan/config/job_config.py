@@ -152,12 +152,13 @@ class LRScheduler:
     This is known as the Warmup-Stable-Decay (WSD) schedule, as described in https://arxiv.org/abs/2404.06395.
     """
 
-    decay_type: Literal["linear", "sqrt", "cosine"] = "linear"
+    decay_type: Literal["linear", "sqrt", "cosine", "constant"] = "linear"
     """
     Learning rate decay type to use during training:
     - 'linear': linearly decays learning rate from initial to final value
     - 'sqrt': decays learning rate following a 1 minus square root curve
     - 'cosine': smoothly decays learning rate following a cosine curve
+    - 'constant': constant
     """
 
     min_lr_factor: float = 0.0
