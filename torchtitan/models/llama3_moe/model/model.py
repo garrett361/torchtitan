@@ -18,6 +18,7 @@ from torchtitan.models.llama3.model.model import Attention, FeedForward
 from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs
 from torchtitan.models.moe import MoE, MoEArgs
 from torchtitan.protocols.train_spec import ModelProtocol
+from torchtitan.tools.logging import logger
 
 # NOTE: @goon - we pull in both the dsv3 yarn impl, as well as the llama style rope impl
 
@@ -333,6 +334,7 @@ class VirtualGroupMoE(_CustomMoE):
 
     def post_init(self) -> None:
         if self.n_groups > 1:
+            logger.info("Apply virtual_group init.")
             with torch.no_grad():
                 # Weight shape: (num_experts, dim) = (n_replicas * n_groups, dim)
                 router_weights = self.router.gate.weight
