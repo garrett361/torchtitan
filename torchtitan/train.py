@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.elastic.multiprocessing.errors import record
 
-from torchtitan.models.moe import TokenChoiceTopKRouter
+from torchtitan.models.moe import MoE
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager, ModelWrapper
 from torchtitan.components.dataloader import DataloaderExhaustedError
@@ -273,9 +273,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     is not None
                 ):
                     logger.info(f"Intializing router weights with {std=}")
-                    for maybe_router_mod in m.modules():
-                        if isinstance(maybe_router_mod, TokenChoiceTopKRouter):
-                            nn.init.trunc_normal_(maybe_router_mod.gate.weight, std=std)
+                    for maybe_moe in model.modules():
+                        if isinstance(maybe_moe, MoE):
+                            nn.init.trunc_normal_(maybe_moe.router.gate.weight, std=std)
+                            if hasattr(maybe_moe, "post_init"):
+                                # Ensure that any post-init steps are handled, e.g. for virtual group
+                                # init.
+                                maybe_moe.post_init()
 
             # confirm that user will be able to view loss metrics on the console
             ensure_pp_loss_visible(parallel_dims, job_config, color)
@@ -292,9 +296,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 is not None
             ):
                 logger.info(f"Intializing router weights with {std=}")
-                for maybe_router_mod in model.modules():
-                    if isinstance(maybe_router_mod, TokenChoiceTopKRouter):
-                        nn.init.trunc_normal_(maybe_router_mod.gate.weight, std=std)
+                for maybe_moe in model.modules():
+                    if isinstance(maybe_moe, MoE):
+                        nn.init.trunc_normal_(maybe_moe.router.gate.weight, std=std)
+                        if hasattr(maybe_moe, "post_init"):
+                            # Ensure that any post-init steps are handled, e.g. for virtual group
+                            # init.
+                            maybe_moe.post_init()
             model.train()
 
             self.model_parts = [model]

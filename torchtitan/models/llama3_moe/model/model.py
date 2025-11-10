@@ -329,6 +329,9 @@ class VirtualGroupMoE(_CustomMoE):
         buffer_device: torch.device,
     ):
         super().init_weights(init_std=init_std, buffer_device=buffer_device)
+        self.post_init()
+
+    def post_init(self) -> None:
         if self.n_groups > 1:
             with torch.no_grad():
                 # Weight shape: (num_experts, dim) = (n_replicas * n_groups, dim)
