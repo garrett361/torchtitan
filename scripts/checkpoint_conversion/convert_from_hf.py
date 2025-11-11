@@ -34,6 +34,9 @@ def convert_from_hf(input_dir, output_dir, model_name, model_flavor):
     state_dict = model._get_state_dict()
     # convert empty state dict to hf format so that hf weights can be loaded into it
     hf_state_dict = sd_adapter.to_hf(state_dict)
+    if args.vocab_size_override is not None:
+        hf_state_dict["model.embed_tokens.weight"] = hf_state_dict["model.embed_tokens.weight"][:args.vocab_size_override].contiguous()
+        hf_state_dict["lm_head.weight"] = hf_state_dict["lm_head.weight"][:args.vocab_size_override].contiguous()
     dcp.load(
         hf_state_dict,
         storage_reader=HuggingFaceStorageReader(path=input_dir),
@@ -54,6 +57,7 @@ if __name__ == "__main__":
     parser.add_argument("output_dir", type=Path, help="Output directory for DCP.")
     parser.add_argument("--model_name", type=str, nargs="?", default="llama3")
     parser.add_argument("--model_flavor", type=str, nargs="?", default="8B")
+    parser.add_argument("--vocab_size_override", type=int,  default=None)
     args = parser.parse_args()
 
     convert_from_hf(
