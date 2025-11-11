@@ -7,7 +7,7 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
-from torchtitan.config.job_config import JobConfig
+from torchtitan.config.job_config import JobConfig, Optimizer
 
 
 @dataclass
@@ -66,8 +66,14 @@ class MoEOverrides:
 
 
 @dataclass
+class Llama3MoEOptimizer(Optimizer):
+    moe_router_lr: float | None = None
+
+
+@dataclass
 class Llama3MoEJobConfig(JobConfig):
     custom_args: Llama3MoECustomArgs = field(default_factory=Llama3MoECustomArgs)
     top_k_args: TopKSchedulerArgs = field(default_factory=TopKSchedulerArgs)
     model_overrides: ModelOverrides = field(default_factory=ModelOverrides)
     moe_overrides: MoEOverrides = field(default_factory=MoEOverrides)
+    optimizer: Llama3MoEOptimizer = field(default_factory=Llama3MoEOptimizer)
