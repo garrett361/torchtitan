@@ -9,8 +9,9 @@ from pathlib import Path
 
 import torch
 import torch.distributed.checkpoint as dcp
-import torchtitan.protocols.train_spec as train_spec_module
 from torch.distributed.checkpoint import HuggingFaceStorageReader
+
+import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import ModelWrapper
 
 
@@ -21,28 +22,38 @@ def convert_from_hf(input_dir, output_dir, model_name, model_flavor):
     # initialize model to allocate memory for state dict
     train_spec = train_spec_module.get_train_spec(model_name)
     model_args = train_spec.model_args[model_flavor]
+    if args.load_ckpt_vocab_size is not None:
+        orig_vocab_size = model_args.vocab_size
+        model_args.vocab_size = args.load_ckpt_vocab_size
 
     with torch.device("cpu"):
         model = train_spec.model_cls(model_args)
     model = ModelWrapper(model)
 
     sd_adapter = train_spec.state_dict_adapter(model_args, None)
-    assert (
-        sd_adapter is not None
-    ), "trying to convert checkpoint from HF to DCP safetensors format, but sd_adapter is not provided."
+    assert sd_adapter is not None, (
+        "trying to convert checkpoint from HF to DCP safetensors format, but sd_adapter is not provided."
+    )
     # get state dict in tt format with allocated memory
     state_dict = model._get_state_dict()
     # convert empty state dict to hf format so that hf weights can be loaded into it
     hf_state_dict = sd_adapter.to_hf(state_dict)
-    if args.vocab_size_override is not None:
-        hf_state_dict["model.embed_tokens.weight"] = hf_state_dict["model.embed_tokens.weight"][:args.vocab_size_override].contiguous()
-        hf_state_dict["lm_head.weight"] = hf_state_dict["lm_head.weight"][:args.vocab_size_override].contiguous()
     dcp.load(
         hf_state_dict,
         storage_reader=HuggingFaceStorageReader(path=input_dir),
     )
     # convert state dict format back hf->tt and save
     state_dict = sd_adapter.from_hf(hf_state_dict)
+    if args.load_ckpt_vocab_size is not None:
+        state_dict["tok_embeddings.weight"] = state_dict["tok_embeddings.weight"][
+            :orig_vocab_size
+        ].contiguous()
+        state_dict["output.weight"] = state_dict["output.weight"][
+            :orig_vocab_size
+        ].contiguous()
+        print(f"{state_dict['output.weight'].shape=}")
+        print(f"{state_dict['tok_embeddings.weight'].shape=}")
+
     dcp.save(
         state_dict,
         checkpoint_id=output_dir,
@@ -57,7 +68,12 @@ if __name__ == "__main__":
     parser.add_argument("output_dir", type=Path, help="Output directory for DCP.")
     parser.add_argument("--model_name", type=str, nargs="?", default="llama3")
     parser.add_argument("--model_flavor", type=str, nargs="?", default="8B")
-    parser.add_argument("--vocab_size_override", type=int,  default=None)
+    parser.add_argument(
+        "--load_ckpt_vocab_size",
+        type=int,
+        default=None,
+        help="Load a checkpoint with a larger vocab size and throw away all the additional entries. HACK for OI.",
+    )
     args = parser.parse_args()
 
     convert_from_hf(
