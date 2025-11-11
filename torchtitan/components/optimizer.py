@@ -21,6 +21,7 @@ from torch.optim import Optimizer
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.models.moe import TokenChoiceTopKRouter
 
 __all__ = [
     "OptimizersContainer",
@@ -74,10 +75,30 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         all_params = []
         self.optimizers = []
         self.model_parts = model_parts
-        for model in self.model_parts:
-            params = [p for p in model.parameters() if p.requires_grad]
-            self.optimizers.append(optimizer_cls(params, **optimizer_kwargs))
-            all_params.extend(params)
+        moe_router_lr = optimizer_kwargs.pop("moe_router_lr")
+        if moe_router_lr is None:
+            for model in self.model_parts:
+                params = [p for p in model.parameters() if p.requires_grad]
+                self.optimizers.append(optimizer_cls(params, **optimizer_kwargs))
+                all_params.extend(params)
+        else:
+            non_router_kwargs = optimizer_kwargs.copy()
+            router_kwargs = optimizer_kwargs.copy()
+            router_kwargs["lr"] = moe_router_lr
+            for model in self.model_parts:
+                all_params_set = set(model.parameters())
+                all_params.extend(all_params_set)
+                router_params_set = set()
+                for module in model.modules():
+                    if isinstance(module, TokenChoiceTopKRouter):
+                        router_params_set.update(module.parameters())
+                non_router_params_set = all_params_set - router_params_set
+                arg_list = [
+                    {"params": list(non_router_params_set), **non_router_kwargs},
+                    {"params": list(router_params_set), **router_kwargs},
+                ]
+                self.optimizers.append(optimizer_cls(arg_list))
+
         self._validate_length(len(self.model_parts))
         self._post_init(all_params, optimizer_kwargs)
 
@@ -286,6 +307,7 @@ def build_optimizers(
     beta2 = optimizer_config.beta2
     eps = optimizer_config.eps
     weight_decay = optimizer_config.weight_decay
+    moe_router_lr = optimizer_config.moe_router_lr
 
     optim_implementation = optimizer_config.implementation
     assert optim_implementation in ["fused", "foreach", "for-loop"]
@@ -300,6 +322,7 @@ def build_optimizers(
         "weight_decay": weight_decay,
         "fused": fused,
         "foreach": foreach,
+        "moe_router_lr": moe_router_lr,
     }
 
     optimizer_classes = {
@@ -311,11 +334,13 @@ def build_optimizers(
     optimizer_cls = optimizer_classes[name]
 
     if optim_in_bwd:
+        raise ValueError("optim_in_bwd disabled")
         return OptimizersInBackwardContainer(
             model_parts, optimizer_cls, optimizer_kwargs
         )
 
     if ft_manager and ft_manager.enabled:
+        raise ValueError("ft optim disabled")
         return FTOptimizersContainer(
             model_parts,
             optimizer_cls,
