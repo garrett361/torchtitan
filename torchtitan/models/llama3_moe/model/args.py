@@ -18,6 +18,16 @@ from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.tools.logging import logger
 
 
+# From
+# https://github.com/pytorch/torchtitan/blob/89c631cdcefd05885af511513507099148f2bd1d/torchtitan/models/llama3/model/model.py?plain=1#L30
+@dataclass
+class RoPEScalingArgs:
+    scaling_factor: float = 8.0
+    low_freq_factor: float = 1.0
+    high_freq_factor: float = 4.0
+    original_max_position_embeddings: int = 8192
+
+
 @dataclass
 class Llama3MoEModelArgs(BaseModelArgs):
     dim: int = 4096
@@ -31,6 +41,7 @@ class Llama3MoEModelArgs(BaseModelArgs):
     norm_eps: float = 1e-5
     rope_theta: float = 500000.0
     custom_moe_impl: str | None = None
+    rope_scaling_args: RoPEScalingArgs = field(default_factory=RoPEScalingArgs)
 
     # MoE
     moe_args: MoEArgs = field(default_factory=MoEArgs)

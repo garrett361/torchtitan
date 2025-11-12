@@ -26,7 +26,7 @@ from torchtitan.models.llama3_moe.metrics import (
     build_custom_metrics_processor,
     CustomMetricsProcessor,
 )
-from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs
+from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs, RoPEScalingArgs
 from torchtitan.models.llama3_moe.model.model import Llama3MoE, VirtualGroupMoE
 from torchtitan.models.llama3_moe.model.state_dict_adapter import (
     Llama3MoEStateDictAdapter,
@@ -54,6 +54,13 @@ __all__ = [
     "parallelize_llama_moe",
     "pipeline_llama",
 ]
+
+llama_3p2_3b_rope_cfg = RoPEScalingArgs(
+    scaling_factor=32,
+    low_freq_factor=1.0,
+    high_freq_factor=4.0,
+    original_max_position_embeddings=8192,
+)
 
 
 llama3_moe_configs = {
@@ -150,6 +157,7 @@ llama3_moe_configs = {
             score_before_experts=False,
             top_k=2,
         ),
+        rope_scaling_args=llama_3p2_3b_rope_cfg,
     ),
     # NOTE: @goon - the 3B_2layer and 3B_2layer_halfmoe models are used in
     # torchtitan/tests/llama3_moe/test_dist.py, do not delete!
@@ -172,6 +180,7 @@ llama3_moe_configs = {
             score_before_experts=False,
             top_k=2,
         ),
+        rope_scaling_args=llama_3p2_3b_rope_cfg,
     ),
     "3B_2layer_halfmoe": Llama3MoEModelArgs(
         dim=3072,
@@ -191,6 +200,7 @@ llama3_moe_configs = {
             top_k=2,
         ),
         is_moe_list=[False, True],
+        rope_scaling_args=llama_3p2_3b_rope_cfg,
     ),
     # See VirtualGroupMoE for necessary cfg requirements for virtual_group init.
     "3B_2layer_halfmoe_finegrained": Llama3MoEModelArgs(
@@ -214,6 +224,7 @@ llama3_moe_configs = {
         ),
         is_moe_list=[False, True],
         custom_moe_impl="virtual_group",  # Must specify for virtual_group router init!
+        rope_scaling_args=llama_3p2_3b_rope_cfg,
     ),
     "8B": Llama3MoEModelArgs(
         dim=4096,

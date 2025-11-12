@@ -6,6 +6,7 @@
 
 
 import torch
+import torch.nn.functional as F
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.models.llama3_moe import (
@@ -17,7 +18,22 @@ from torchtitan.models.llama3_moe import (
 )
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-TEST_TEXT = "Why did the chicken cross the road? To get to the other side."
+TEST_TEXT = """
+The biggest lesson that can be read from 70 years of AI research is that general methods that leverage
+computation are ultimately the most effective, and by a large margin. The ultimate reason for this is
+Moore's law, or rather its generalization of continued exponentially falling cost per unit of
+computation. Most AI research has been conducted as if the computation available to the agent were
+constant (in which case leveraging human knowledge would be one of the only ways to improve
+performance) but, over a slightly longer time than a typical research project, massively more
+computation inevitably becomes available. Seeking an improvement that makes a difference in the
+shorter term, researchers seek to leverage their human knowledge of the domain, but the only thing
+that matters in the long run is the leveraging of computation. These two need not run counter to each
+other, but in practice they tend to. Time spent on one is time not spent on the other. There are
+psychological commitments to investment in one approach or the other. And the human-knowledge
+approach tends to complicate methods in ways that make them less suited to taking advantage of
+general methods leveraging computation.  There were many examples of AI researchers' belated
+learning of this bitter lesson, and it is instructive to review some of the most prominent.
+"""
 LLAMA_3B_HF_PATH = "/gpfs/goon/models/Llama-3.2-3B/"
 LLAMA_3B_HF_NO_TIED_PATH = "/gpfs/goon/models/Llama-3.2-3B-no-tied-weights/"
 
@@ -110,9 +126,16 @@ class TestModel:
         with torch.no_grad():
             out = model(inputs["input_ids"])
             out_hf = model_hf(**inputs).logits
-            p, q = out_hf.softmax(dim=-1), out.softmax(dim=-1)
-            kl = (p * (p / q).log()).sum(dim=-1).mean()
-            assert kl < 1e-5, f"{kl=}"
+            vocab_size = out.shape[-1]
+            kl = F.kl_div(
+                out_hf.reshape(-1, vocab_size).log_softmax(dim=-1),
+                out.reshape(-1, vocab_size).log_softmax(dim=-1),
+                reduction="batchmean",
+                log_target=True,
+            )
+            mse = (out_hf - out).pow(2).mean().sqrt()
+            assert kl < 1e-8, f"{kl=}"
+            assert mse < 1e-5, f"{mse=}"
             torch.testing.assert_close(out_hf, out, atol=1e-2, rtol=1e-5)
 
     def test_model_dynamic_n_moe_layers(self):
