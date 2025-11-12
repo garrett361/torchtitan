@@ -8,14 +8,13 @@
 
 
 import math
-from dataclasses import dataclass
 
 import torch
 from einops import rearrange
 from torch import nn
 
 from torchtitan.models.llama3.model.model import Attention, FeedForward
-from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs
+from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs, RoPEScalingArgs
 from torchtitan.models.moe import MoE, MoEArgs
 from torchtitan.protocols.train_spec import ModelProtocol
 from torchtitan.tools.logging import logger
@@ -142,16 +141,6 @@ def precompute_freqs_cis_dsv3(
     # Convert to complex exponentials: e^(i*freq*pos)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
     return freqs_cis
-
-
-# From
-# https://github.com/pytorch/torchtitan/blob/89c631cdcefd05885af511513507099148f2bd1d/torchtitan/models/llama3/model/model.py?plain=1#L30
-@dataclass
-class RoPEScalingArgs:
-    scaling_factor: float = 8.0
-    low_freq_factor: float = 1.0
-    high_freq_factor: float = 4.0
-    original_max_position_embeddings: int = 8192
 
 
 def precompute_freqs_cis_llama(
@@ -546,6 +535,7 @@ class Llama3MoE(nn.Module, ModelProtocol):
                 dim=self.model_args.dim // self.model_args.n_heads,
                 end=self.model_args.max_seq_len,
                 theta=self.model_args.rope_theta,
+                scaling_args=self.model_args.rope_scaling_args,
             )
         elif self.model_args.rope_impl == "dsv3":
             return precompute_freqs_cis_dsv3(
