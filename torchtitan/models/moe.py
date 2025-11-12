@@ -252,8 +252,12 @@ class TokenChoiceTopKRouter(nn.Module):
             # 1) Group experts and get the top per-group-score
             # 2) Zero out everything except the top_k groups with k=top_k_group
 
+            # NOTE: @goon - need to use the biased scores for choosing the groups
+            temp_scores = scores + expert_bias if expert_bias is not None else scores
             group_scores = (
-                scores.view(scores.shape[0], self.moe_args.n_expert_groups, -1)
+                temp_scores.view(
+                    temp_scores.shape[0], self.moe_args.n_expert_groups, -1
+                )
                 .max(dim=-1)
                 .values
             )
@@ -273,8 +277,6 @@ class TokenChoiceTopKRouter(nn.Module):
             )
             scores = scores.masked_fill(~score_mask.bool(), 0.0)
 
-        # NOTE: @goon - not handling this correctly! Need to account for bias before doing n_expert_groups
-        # top scores shape (bs*slen, top_k)
         # NOTE: The expert_bias is only used for routing. The gating value
         #       top_scores is still derived from the original scores.
         if expert_bias is not None:
