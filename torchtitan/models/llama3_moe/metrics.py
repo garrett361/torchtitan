@@ -29,7 +29,7 @@ class Hook:
     ) -> None:
         self.module = module
         self.module.register_forward_hook(self)
-        self.fqn = fqn.replace("_checkpoint_wrapped_module.moe", "")
+        self.fqn = fqn.replace("_checkpoint_wrapped_module.", "")
         self.parallel_dims = parallel_dims
 
     def __call__(self, module: nn.Module, args, output) -> None:
