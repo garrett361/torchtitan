@@ -33,9 +33,11 @@ from torchtitan.models.llama3_moe import (
     TransformingHuggingFaceStorageReader,
 )
 from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
+
+from torchtitan.models.llama3_moe.metrics import RouterHook
 from torchtitan.models.llama3_moe.top_k_scheduler import get_top_k_scheduler
 
-from torchtitan.models.moe import MoE
+from torchtitan.models.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -338,6 +340,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         self.metrics_processor.optimizers = self.optimizers
         self.metrics_processor.model_parts = self.model_parts
+        for mp in self.model_parts:
+            for fqn, module in mp.named_modules():
+                if isinstance(module, TokenChoiceTopKRouter):
+                    self.metrics_processor.hooks.append(
+                        RouterHook(module, fqn, parallel_dims)
+                    )
 
         # Initialize trainer states that will be saved in checkpoint.
         # These attributes must be initialized before checkpoint loading.

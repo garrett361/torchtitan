@@ -280,6 +280,7 @@ class TokenChoiceTopKRouter(nn.Module):
         # NOTE: The expert_bias is only used for routing. The gating value
         #       top_scores is still derived from the original scores.
         if expert_bias is not None:
+            # NOTE: @goon - this is probably wrong when n_expert_groups>1
             _, selected_experts_indices = torch.topk(
                 scores + expert_bias, k=self.top_k, dim=1
             )

@@ -16,6 +16,8 @@ from torchtitan.models.llama3_moe import (
     Llama3MoEModelArgs,
     Llama3MoEStateDictAdapter,
 )
+from torchtitan.models.llama3_moe.metrics import RouterHook
+from torchtitan.models.moe import TokenChoiceTopKRouter
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 TEST_TEXT = """
@@ -159,3 +161,47 @@ class TestModel:
             model = Llama3MoE(args)
         moe_enabled_list = [l.moe_enabled for l in model.layers.values()]
         assert moe_enabled_list == [False, True, True, False]
+
+
+class TestHooks:
+    # Small Defaults
+    dim = 128
+    moe_inter_dim = 256
+    n_layers = 2
+    n_heads = 4
+    vocab_size = 256
+    is_moe_list = None
+    bsz = 2
+    seqlen = 64
+    device = "cuda"
+    hf_assets_path = LLAMA_3B_HF_NO_TIED_PATH
+
+    def test_router_hook(self) -> None:
+        args = Llama3MoEModelArgs(
+            dim=self.dim,
+            moe_inter_dim=self.moe_inter_dim,
+            n_layers=self.n_layers,
+            n_heads=self.n_heads,
+            vocab_size=self.vocab_size,
+            is_moe_list=[True for _ in range(self.n_layers)],
+        )
+        model = Llama3MoE(args)
+        model.init_weights()
+        model.to(self.device)
+
+        hooks = []
+        for fqn, module in model.named_modules():
+            if isinstance(module, TokenChoiceTopKRouter):
+                hooks.append(RouterHook(module, fqn, parallel_dims=None))
+
+        inputs = torch.randint(
+            self.vocab_size, size=(self.bsz, self.seqlen), device=self.device
+        )
+        model(inputs)
+        stats = [h.get_stats_dict() for h in hooks]
+        for s in stats:
+            assert len(s.values()) > 0
+            for v in s.values():
+                assert isinstance(v, float)
+        for h in hooks:
+            h.reset()

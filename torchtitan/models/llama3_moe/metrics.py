@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+from dataclasses import field
 from typing import Any, TYPE_CHECKING
 
 import torch
@@ -19,8 +20,87 @@ if TYPE_CHECKING:
     from torchtitan.protocols import BaseModelArgs
 
 
+class Hook:
+    """
+    Class for forward hooks
+    """
+
+    def __init__(
+        self, module: nn.Module, fqn: str, parallel_dims: ParallelDims
+    ) -> None:
+        self.module = module
+        self.module.register_forward_hook(self)
+        self.fqn = fqn
+        self.parallel_dims = parallel_dims
+
+    def __call__(self, module: nn.Module, args, output) -> None:
+        raise NotImplementedError
+
+    def get_stats_dict(self) -> dict[str, float]:
+        raise NotImplementedError
+
+    def reset(self) -> None:
+        raise NotImplementedError
+
+
+class RouterHook(Hook):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.inputs_abs_mean = []
+        self.inputs_std = []
+        self.expert_bias_abs_mean = []
+        self.expert_bias_std = []
+        self.scores_abs_mean = []
+        self.scores_std = []
+
+    @torch.no_grad
+    def __call__(self, module: nn.Module, args, output) -> None:
+        inputs, expert_bias = args
+        scores = output[0]
+        self.inputs_abs_mean.append(inputs.detach().abs().mean().item())
+        self.inputs_std.append(inputs.detach().std().item())
+        self.scores_abs_mean.append(scores.detach().abs().mean().item())
+        self.scores_std.append(scores.detach().std().item())
+        if expert_bias is not None:
+            self.expert_bias_abs_mean.append(expert_bias.detach().abs().mean().item())
+            self.expert_bias_std.append(expert_bias.detach().std().item())
+
+    def get_stats_dict(self) -> dict[str, float]:
+        stats_dict = {}
+        stats_dict[f"moe_router_hook/{self.fqn} inputs abs mean"] = sum(
+            self.inputs_abs_mean
+        ) / len(self.inputs_abs_mean)
+        stats_dict[f"moe_router_hook/{self.fqn} inputs std"] = sum(
+            self.inputs_std
+        ) / len(self.inputs_std)
+        stats_dict[f"moe_router_hook/{self.fqn} scores abs mean"] = sum(
+            self.scores_abs_mean
+        ) / len(self.scores_abs_mean)
+        stats_dict[f"moe_router_hook/{self.fqn} scores std"] = sum(
+            self.scores_std
+        ) / len(self.scores_std)
+        if self.expert_bias_std:
+            stats_dict[f"moe_router_hook/{self.fqn} expert_bias abs mean"] = sum(
+                self.expert_bias_abs_mean
+            ) / len(self.expert_bias_abs_mean)
+            stats_dict[f"moe_router_hook/{self.fqn} expert_bias std"] = sum(
+                self.expert_bias_std
+            ) / len(self.expert_bias_std)
+
+        return stats_dict
+
+    def reset(self) -> None:
+        self.inputs_abs_mean.clear()
+        self.inputs_std.clear()
+        self.expert_bias_abs_mean.clear()
+        self.expert_bias_std.clear()
+        self.scores_abs_mean.clear()
+        self.scores_std.clear()
+
+
 class CustomMetricsProcessor(MetricsProcessor):
     eps = 1e-10
+    hooks: list[Hook] = field(default_factory=list)
 
     @torch.no_grad
     def get_moe_metrics(self) -> dict[str, Any]:
@@ -30,16 +110,16 @@ class CustomMetricsProcessor(MetricsProcessor):
             for block_idx, transformer_block in model_part.layers.items():
                 if not transformer_block.moe_enabled:
                     continue
-                moe_metrics[f"moe_entropy/layer_{block_idx}"] = (
-                    self.get_normalized_entropy(transformer_block)
-                )
+                moe_metrics[
+                    f"moe_entropy/layer_{block_idx}"
+                ] = self.get_normalized_entropy(transformer_block)
                 if (
                     n_expert_groups := model_part.model_args.moe_args.n_expert_groups
                 ) > 1:
-                    moe_metrics[f"moe_group_entropy/layer_{block_idx}"] = (
-                        self.get_expert_group_normalized_group_entropy(
-                            transformer_block, n_expert_groups
-                        )
+                    moe_metrics[
+                        f"moe_group_entropy/layer_{block_idx}"
+                    ] = self.get_expert_group_normalized_group_entropy(
+                        transformer_block, n_expert_groups
                     )
                 # Reset
                 transformer_block.moe.tokens_per_expert_cumulative.zero_()
@@ -49,9 +129,13 @@ class CustomMetricsProcessor(MetricsProcessor):
                 moe_metrics[f"moe_router/layer_{block_idx} abs mean"] = (
                     router_weight.abs().mean().item()
                 )
-                moe_metrics[f"moe_router/layer_{block_idx} std"] = (
-                    router_weight.std().item()
-                )
+                moe_metrics[
+                    f"moe_router/layer_{block_idx} std"
+                ] = router_weight.std().item()
+
+        for hook in self.hooks:
+            moe_metrics = {**moe_metrics, **hook.get_stats_dict()}
+            hook.reset()
 
         return moe_metrics
 
