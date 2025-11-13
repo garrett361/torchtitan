@@ -5,8 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from dataclasses import field
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -100,7 +99,8 @@ class RouterHook(Hook):
 
 class CustomMetricsProcessor(MetricsProcessor):
     eps = 1e-10
-    hooks: list[Hook] = field(default_factory=list)
+    # Bad mutable default, but field(default_factory=list) is erroring, maybe b/c of subclassing?
+    hooks: list[Hook] = []
 
     @torch.no_grad
     def get_moe_metrics(self) -> dict[str, Any]:
@@ -110,16 +110,16 @@ class CustomMetricsProcessor(MetricsProcessor):
             for block_idx, transformer_block in model_part.layers.items():
                 if not transformer_block.moe_enabled:
                     continue
-                moe_metrics[
-                    f"moe_entropy/layer_{block_idx}"
-                ] = self.get_normalized_entropy(transformer_block)
+                moe_metrics[f"moe_entropy/layer_{block_idx}"] = (
+                    self.get_normalized_entropy(transformer_block)
+                )
                 if (
                     n_expert_groups := model_part.model_args.moe_args.n_expert_groups
                 ) > 1:
-                    moe_metrics[
-                        f"moe_group_entropy/layer_{block_idx}"
-                    ] = self.get_expert_group_normalized_group_entropy(
-                        transformer_block, n_expert_groups
+                    moe_metrics[f"moe_group_entropy/layer_{block_idx}"] = (
+                        self.get_expert_group_normalized_group_entropy(
+                            transformer_block, n_expert_groups
+                        )
                     )
                 # Reset
                 transformer_block.moe.tokens_per_expert_cumulative.zero_()
@@ -129,9 +129,9 @@ class CustomMetricsProcessor(MetricsProcessor):
                 moe_metrics[f"moe_router/layer_{block_idx} abs mean"] = (
                     router_weight.abs().mean().item()
                 )
-                moe_metrics[
-                    f"moe_router/layer_{block_idx} std"
-                ] = router_weight.std().item()
+                moe_metrics[f"moe_router/layer_{block_idx} std"] = (
+                    router_weight.std().item()
+                )
 
         for hook in self.hooks:
             moe_metrics = {**moe_metrics, **hook.get_stats_dict()}
