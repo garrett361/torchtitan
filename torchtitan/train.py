@@ -86,6 +86,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         torch._C._log_api_usage_once("torchtitan.train")
 
         self.job_config = job_config
+        moe_overrides = getattr(job_config, "moe_overrides", None)
 
         logger.info(f"Starting job: {job_config.job.description}")
 
@@ -271,8 +272,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     m.init_weights(buffer_device=buffer_device)
                 m.train()
                 if (
-                    hasattr(job_config, "moe_overrides")
-                    and (std := job_config.moe_overrides.router_init_std) is not None
+                    moe_overrides is not None
+                    and (std := moe_overrides.router_init_std) is not None
                 ):
                     logger.info(f"Intializing router weights with {std=}")
                     for maybe_moe in model.modules():
@@ -293,8 +294,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with torch.no_grad():
                 model.init_weights(buffer_device=buffer_device)
             if (
-                hasattr(job_config, "moe_overrides")
-                and (std := job_config.moe_overrides.router_init_std) is not None
+                moe_overrides is not None
+                and (std := moe_overrides.router_init_std) is not None
             ):
                 logger.info(f"Intializing router weights with {std=}")
                 for maybe_moe in model.modules():
@@ -340,12 +341,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         self.metrics_processor.optimizers = self.optimizers
         self.metrics_processor.model_parts = self.model_parts
-        for mp in self.model_parts:
-            for fqn, module in mp.named_modules():
-                if isinstance(module, TokenChoiceTopKRouter):
-                    self.metrics_processor.hooks.append(
-                        RouterHook(module, fqn, parallel_dims)
-                    )
+        if moe_overrides is not None:
+            if moe_overrides.router_hooks:
+                for mp in self.model_parts:
+                    for fqn, module in mp.named_modules():
+                        if isinstance(module, TokenChoiceTopKRouter):
+                            self.metrics_processor.hooks.append(
+                                RouterHook(module, fqn, parallel_dims)
+                            )
 
         # Initialize trainer states that will be saved in checkpoint.
         # These attributes must be initialized before checkpoint loading.
