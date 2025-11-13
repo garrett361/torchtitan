@@ -49,6 +49,7 @@ class RouterHook(Hook):
         self.inputs_std = []
         self.expert_bias_abs_mean = []
         self.expert_bias_std = []
+        # NOTE: @goon - the scores abs mean will always be 1 if we have route_norm=True
         self.scores_abs_mean = []
         self.scores_std = []
 

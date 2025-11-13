@@ -298,12 +298,6 @@ class VirtualGroupMoE(_CustomMoE):
             raise ValueError(
                 f"{self.moe_args.num_experts=} must be divisible by {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
             )
-        if self.moe_args.route_scale != self.n_groups:
-            raise ValueError(
-                f"{self.moe_args.route_scale=} must equal {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
-            )
-        if not self.moe_args.route_norm:
-            raise ValueError(f"{self.moe_args.route_norm=} must be True")
         if self.moe_args.top_k % self.n_groups:
             raise ValueError(
                 f"{self.moe_args.top_k=} must be divisible by {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
@@ -311,6 +305,19 @@ class VirtualGroupMoE(_CustomMoE):
         if self.moe_args.score_before_experts:
             raise ValueError(
                 f"Virtual group init requires {self.moe_args.score_before_experts=} to be False"
+            )
+
+        # Previously raised ValueErrors on these, but just warning now, as we might want to
+        # experiment with different settings.
+        if self.moe_args.route_scale != self.n_groups:
+            logger.warning(
+                f"{self.moe_args.route_scale=} must equal"
+                f" {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
+                " for precise VirtualGroupMoE-FFN equivalence"
+            )
+        if not self.moe_args.route_norm:
+            logger.warning(
+                f"{self.moe_args.route_norm=} must be True for precise VirtualGroupMoE-FFN equivalence"
             )
 
     def init_weights(
