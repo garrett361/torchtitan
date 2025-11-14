@@ -96,11 +96,11 @@ class CustomMetricsProcessor(MetricsProcessor):
                 router_weight = transformer_block.moe.router.gate.weight
                 if isinstance(router_weight, DTensor):
                     router_weight = router_weight.full_tensor()
-                moe_metrics[f"moe_router/layer_{block_idx} abs mean"] = (
+                moe_metrics[f"moe_router_weight/layer_{block_idx} abs mean"] = (
                     router_weight.abs().mean().item()
                 )
                 moe_metrics[
-                    f"moe_router/layer_{block_idx} std"
+                    f"moe_router_weight/layer_{block_idx} std"
                 ] = router_weight.std().item()
 
         for hook in self.hooks:
