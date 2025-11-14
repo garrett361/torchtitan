@@ -330,7 +330,6 @@ class VirtualGroupMoE(_CustomMoE):
 
     def post_init(self) -> None:
         if self.n_groups > 1:
-            logger.info("Apply virtual_group init.")
             with torch.no_grad():
                 # Weight shape: (num_experts, dim) = (n_replicas * n_groups, dim)
                 router_weights = self.router.gate.weight
@@ -359,6 +358,7 @@ class VirtualGroupMoE(_CustomMoE):
                         g=self.n_groups,
                     )
                     self.expert_bias.copy_(replicated_expert_bias)
+            logger.info("Applied virtual_group init.")
 
 
 def get_moe_impl_cls(name: str | None = None) -> type[MoE]:

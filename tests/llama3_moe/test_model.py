@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -70,7 +71,15 @@ class TestModel:
         )
         model(inputs)
 
-    def test_model_all_moe(self):
+    @pytest.mark.parametrize(
+        "load_balance_coeff", [None, 1e-3], ids=lambda x: f"load_balance_coeff={x}"
+    )
+    @pytest.mark.parametrize(
+        "n_expert_groups", [1, 2], ids=lambda x: f"n_expert_groups={x}"
+    )
+    def test_model_all_moe(
+        self, load_balance_coeff: float | None, n_expert_groups: int
+    ):
         # NOTE: @goon - testing requires cuda, as the histogram op used in the current router impl
         # is not supported on CPU, apparently.
         args = Llama3MoEModelArgs(
@@ -81,13 +90,16 @@ class TestModel:
             vocab_size=self.vocab_size,
             is_moe_list=[True for _ in range(self.n_layers)],
         )
+        args.moe_args.load_balance_coeff = load_balance_coeff
+        args.moe_args.n_expert_groups = n_expert_groups
         model = Llama3MoE(args)
         model.init_weights()
         model.to(self.device)
         inputs = torch.randint(
             self.vocab_size, size=(self.bsz, self.seqlen), device=self.device
         )
-        model(inputs)
+        # Just testing for no errors:
+        model(inputs).sum().backward()
 
     def test_hf_equivalence(self) -> None:
         torch.manual_seed(42)
