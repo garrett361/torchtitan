@@ -6,7 +6,7 @@
 
 import math
 from collections import defaultdict
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -15,44 +15,23 @@ from torch.distributed.tensor import DTensor
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
-from torchtitan.models.moe import TokenChoiceTopKRouter
+from torchtitan.models.moe import MoE
 
 if TYPE_CHECKING:
     from torchtitan.protocols import BaseModelArgs
 
 
-class Hook:
-    """
-    Class for forward hooks
-    """
-
-    def __init__(
-        self, module: nn.Module, fqn: str, parallel_dims: ParallelDims
-    ) -> None:
-        self.module = module
-        self.module.register_forward_hook(self)
+class MoEHook:
+    def __init__(self, moe: nn.Module, fqn: str, parallel_dims: ParallelDims) -> None:
+        self.moe = moe
+        self.moe.router.register_forward_hook(self.router_hook)
         self.fqn = fqn.replace("_checkpoint_wrapped_module.", "")
         self.parallel_dims = parallel_dims
-
-    def __call__(self, module: nn.Module, args, output) -> None:
-        raise NotImplementedError
-
-    def get_stats_dict(self) -> dict[str, float]:
-        raise NotImplementedError
-
-    def reset(self) -> None:
-        raise NotImplementedError
-
-
-class RouterHook(Hook):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
         self.inputs_abs_mean = []
-        if not isinstance(self.module, TokenChoiceTopKRouter):
-            raise ValueError(f"{self.module=} must be a TokenChoiceTopKRouter instance")
-        self.module.gate.register_forward_hook(self.gate_hook)
+        if not isinstance(self.moe, MoE):
+            raise ValueError(f"{self.moe=} must be a TokenChoiceTopKRouter instance")
+        self.moe.gate.register_forward_hook(self.gate_hook)
         self._stats_dict = defaultdict(list)
-
 
     @torch.no_grad
     def gate_hook(self, module: nn.Module, args, output) -> None:
@@ -60,7 +39,7 @@ class RouterHook(Hook):
         self._stats_dict["gate scores std"].append(output.detach().std().item())
 
     @torch.no_grad
-    def __call__(self, module: nn.Module, args, output) -> None:
+    def router_hook(self, module: nn.Module, args, output) -> None:
         inputs, expert_bias = args
         scores, _, _ = output
         self._stats_dict["inputs mean"].append(inputs.detach().mean().item())
@@ -101,16 +80,16 @@ class CustomMetricsProcessor(MetricsProcessor):
             for block_idx, transformer_block in model_part.layers.items():
                 if not transformer_block.moe_enabled:
                     continue
-                moe_metrics[
-                    f"moe_entropy/layer_{block_idx}"
-                ] = self.get_normalized_entropy(transformer_block)
+                moe_metrics[f"moe_entropy/layer_{block_idx}"] = (
+                    self.get_normalized_entropy(transformer_block)
+                )
                 if (
                     n_expert_groups := model_part.model_args.moe_args.n_expert_groups
                 ) > 1:
-                    moe_metrics[
-                        f"moe_group_entropy/layer_{block_idx}"
-                    ] = self.get_expert_group_normalized_group_entropy(
-                        transformer_block, n_expert_groups
+                    moe_metrics[f"moe_group_entropy/layer_{block_idx}"] = (
+                        self.get_expert_group_normalized_group_entropy(
+                            transformer_block, n_expert_groups
+                        )
                     )
                 # Reset
                 transformer_block.moe.tokens_per_expert_cumulative.zero_()
@@ -120,9 +99,9 @@ class CustomMetricsProcessor(MetricsProcessor):
                 moe_metrics[f"moe_router/layer_{block_idx} abs mean"] = (
                     router_weight.abs().mean().item()
                 )
-                moe_metrics[
-                    f"moe_router/layer_{block_idx} std"
-                ] = router_weight.std().item()
+                moe_metrics[f"moe_router/layer_{block_idx} std"] = (
+                    router_weight.std().item()
+                )
 
         for hook in self.hooks:
             moe_metrics = {**moe_metrics, **hook.get_stats_dict()}

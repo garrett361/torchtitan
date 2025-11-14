@@ -63,7 +63,7 @@ class MoEOverrides:
     top_k_group: int | None = None
     # Custom args
     router_init_std: float | None = None
-    router_hooks: bool = True
+    moe_hooks: bool = True
 
 
 @dataclass

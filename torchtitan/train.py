@@ -33,11 +33,9 @@ from torchtitan.models.llama3_moe import (
     TransformingHuggingFaceStorageReader,
 )
 from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
-
-from torchtitan.models.llama3_moe.metrics import RouterHook
+from torchtitan.models.llama3_moe.metrics import CustomMetricsProcessor, MoEHook
 from torchtitan.models.llama3_moe.top_k_scheduler import get_top_k_scheduler
-
-from torchtitan.models.moe import MoE, TokenChoiceTopKRouter
+from torchtitan.models.moe import MoE
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -342,12 +340,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.metrics_processor.optimizers = self.optimizers
         self.metrics_processor.model_parts = self.model_parts
         if moe_overrides is not None:
-            if moe_overrides.router_hooks:
+            if moe_overrides.moe_hooks:
                 for mp in self.model_parts:
                     for fqn, module in mp.named_modules():
-                        if isinstance(module, TokenChoiceTopKRouter):
+                        if isinstance(module, MoE):
+                            assert isinstance(
+                                self.metrics_processor, CustomMetricsProcessor
+                            )
                             self.metrics_processor.hooks.append(
-                                RouterHook(module, fqn, parallel_dims)
+                                MoEHook(module, fqn, parallel_dims)
                             )
 
         # Initialize trainer states that will be saved in checkpoint.
