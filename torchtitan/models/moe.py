@@ -253,10 +253,12 @@ class TokenChoiceTopKRouter(nn.Module):
             # 2) Zero out everything except the top_k groups with k=top_k_group
 
             # NOTE: @goon - need to use the biased scores for choosing the groups
-            temp_scores = scores + expert_bias if expert_bias is not None else scores
+            maybe_biased_scores = (
+                scores + expert_bias if expert_bias is not None else scores
+            )
             group_scores = (
-                temp_scores.view(
-                    temp_scores.shape[0], self.moe_args.n_expert_groups, -1
+                maybe_biased_scores.view(
+                    maybe_biased_scores.shape[0], self.moe_args.n_expert_groups, -1
                 )
                 .max(dim=-1)
                 .values
@@ -276,14 +278,17 @@ class TokenChoiceTopKRouter(nn.Module):
                 .reshape(scores.shape[0], -1)
             )
             scores = scores.masked_fill(~score_mask.bool(), 0.0)
+        else:
+            score_mask = None
 
         # NOTE: The expert_bias is only used for routing. The gating value
         #       top_scores is still derived from the original scores.
         if expert_bias is not None:
-            # NOTE: @goon - this is probably wrong when n_expert_groups>1
-            _, selected_experts_indices = torch.topk(
-                scores + expert_bias, k=self.top_k, dim=1
-            )
+            biased_scores = scores + expert_bias
+            if score_mask is not None:
+                biased_scores = biased_scores.masked_fill(~score_mask.bool(), 0.0)
+
+            _, selected_experts_indices = torch.topk(biased_scores, k=self.top_k, dim=1)
             top_scores = scores.gather(dim=1, index=selected_experts_indices)
         else:
             top_scores, selected_experts_indices = torch.topk(

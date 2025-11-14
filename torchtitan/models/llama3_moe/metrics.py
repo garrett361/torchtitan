@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+from collections import defaultdict
 from typing import Any, TYPE_CHECKING
 
 import torch
@@ -14,94 +15,62 @@ from torch.distributed.tensor import DTensor
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
+from torchtitan.models.moe import MoE
 
 if TYPE_CHECKING:
     from torchtitan.protocols import BaseModelArgs
 
 
-class Hook:
-    """
-    Class for forward hooks
-    """
-
-    def __init__(
-        self, module: nn.Module, fqn: str, parallel_dims: ParallelDims
-    ) -> None:
-        self.module = module
-        self.module.register_forward_hook(self)
+class MoEHook:
+    def __init__(self, moe: nn.Module, fqn: str, parallel_dims: ParallelDims) -> None:
+        self.moe = moe
+        self.moe.router.register_forward_hook(self.router_hook)
         self.fqn = fqn.replace("_checkpoint_wrapped_module.", "")
         self.parallel_dims = parallel_dims
-
-    def __call__(self, module: nn.Module, args, output) -> None:
-        raise NotImplementedError
-
-    def get_stats_dict(self) -> dict[str, float]:
-        raise NotImplementedError
-
-    def reset(self) -> None:
-        raise NotImplementedError
-
-
-class RouterHook(Hook):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
         self.inputs_abs_mean = []
-        self.inputs_std = []
-        self.expert_bias_abs_mean = []
-        self.expert_bias_std = []
-        # NOTE: @goon - the scores abs mean will always be 1 if we have route_norm=True
-        self.scores_abs_mean = []
-        self.scores_std = []
+        if not isinstance(self.moe, MoE):
+            raise ValueError(f"{self.moe=} must be a TokenChoiceTopKRouter instance")
+        self.moe.router.gate.register_forward_hook(self.gate_hook)
+        self._stats_dict = defaultdict(list)
 
     @torch.no_grad
-    def __call__(self, module: nn.Module, args, output) -> None:
+    def gate_hook(self, module: nn.Module, args, output) -> None:
+        self._stats_dict["gate scores mean"].append(output.detach().mean().item())
+        self._stats_dict["gate scores std"].append(output.detach().std().item())
+
+    @torch.no_grad
+    def router_hook(self, module: nn.Module, args, output) -> None:
         inputs, expert_bias = args
-        scores = output[0]
-        self.inputs_abs_mean.append(inputs.detach().abs().mean().item())
-        self.inputs_std.append(inputs.detach().std().item())
-        self.scores_abs_mean.append(scores.detach().abs().mean().item())
-        self.scores_std.append(scores.detach().std().item())
+        scores, _, _ = output
+        self._stats_dict["inputs mean"].append(inputs.detach().mean().item())
+        self._stats_dict["inputs std"].append(inputs.detach().std().item())
+        # NOTE: @goon - the scores mean will always be 1 if we have route_norm=True
+        self._stats_dict["scores_mean"].append(scores.detach().mean().item())
+        self._stats_dict["scores std"].append(scores.detach().std().item())
         if expert_bias is not None:
-            self.expert_bias_abs_mean.append(expert_bias.detach().abs().mean().item())
-            self.expert_bias_std.append(expert_bias.detach().std().item())
+            self._stats_dict["expert bias mean"].append(
+                expert_bias.detach().mean().item()
+            )
+            self._stats_dict["expert bias std"].append(
+                expert_bias.detach().std().item()
+            )
 
     def get_stats_dict(self) -> dict[str, float]:
         stats_dict = {}
-        stats_dict[f"moe_router_hook/{self.fqn} inputs abs mean"] = sum(
-            self.inputs_abs_mean
-        ) / len(self.inputs_abs_mean)
-        stats_dict[f"moe_router_hook/{self.fqn} inputs std"] = sum(
-            self.inputs_std
-        ) / len(self.inputs_std)
-        stats_dict[f"moe_router_hook/{self.fqn} scores abs mean"] = sum(
-            self.scores_abs_mean
-        ) / len(self.scores_abs_mean)
-        stats_dict[f"moe_router_hook/{self.fqn} scores std"] = sum(
-            self.scores_std
-        ) / len(self.scores_std)
-        if self.expert_bias_std:
-            stats_dict[f"moe_router_hook/{self.fqn} expert_bias abs mean"] = sum(
-                self.expert_bias_abs_mean
-            ) / len(self.expert_bias_abs_mean)
-            stats_dict[f"moe_router_hook/{self.fqn} expert_bias std"] = sum(
-                self.expert_bias_std
-            ) / len(self.expert_bias_std)
-
+        for k, v in self._stats_dict.items():
+            if v:
+                stats_dict[f"moe_router_hook/{self.fqn} {k}"] = sum(v) / len(v)
         return stats_dict
 
     def reset(self) -> None:
-        self.inputs_abs_mean.clear()
-        self.inputs_std.clear()
-        self.expert_bias_abs_mean.clear()
-        self.expert_bias_std.clear()
-        self.scores_abs_mean.clear()
-        self.scores_std.clear()
+        for v in self._stats_dict.values():
+            v.clear()
 
 
 class CustomMetricsProcessor(MetricsProcessor):
     eps = 1e-10
     # Bad mutable default, but field(default_factory=list) is erroring, maybe b/c of subclassing?
-    hooks: list[Hook] = []
+    hooks: list[MoEHook] = []
 
     @torch.no_grad
     def get_moe_metrics(self) -> dict[str, Any]:

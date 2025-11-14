@@ -272,7 +272,8 @@ class VirtualGroupMoE(_CustomMoE):
 
     the above can be achieved by initializing the weight P_ed = P_rgd so that it is independent of
     g, i.e. P_rgd = Q_rd for some Q_rd, and also taking the k in top_k to be a multiple of G so that
-    entire groups are activated together. The same conclusion also holds for softmax-then-top_k.
+    entire groups are activated together. The same conclusion also holds for softmax-then-top_k, if
+    we also have `route_norm = True`.
     """
 
     name = "virtual_group"
@@ -298,10 +299,6 @@ class VirtualGroupMoE(_CustomMoE):
             raise ValueError(
                 f"{self.moe_args.num_experts=} must be divisible by {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
             )
-        if self.moe_args.top_k % self.n_groups:
-            raise ValueError(
-                f"{self.moe_args.top_k=} must be divisible by {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
-            )
         if self.moe_args.score_before_experts:
             raise ValueError(
                 f"Virtual group init requires {self.moe_args.score_before_experts=} to be False"
@@ -319,6 +316,11 @@ class VirtualGroupMoE(_CustomMoE):
             logger.warning(
                 f"{self.moe_args.route_norm=} must be True for precise VirtualGroupMoE-FFN equivalence"
             )
+        if self.moe_args.top_k % self.n_groups:
+            logger.warning(
+                f"{self.moe_args.top_k=} must be divisible by {self.moe_args.hf_ffn_hidden_dim // self.hidden_dim =}"
+                " for precise VirtualGroupMoE-FFN equivalence"
+            )
 
     def init_weights(
         self,
@@ -330,7 +332,6 @@ class VirtualGroupMoE(_CustomMoE):
 
     def post_init(self) -> None:
         if self.n_groups > 1:
-            logger.info("Apply virtual_group init.")
             with torch.no_grad():
                 # Weight shape: (num_experts, dim) = (n_replicas * n_groups, dim)
                 router_weights = self.router.gate.weight
@@ -359,6 +360,7 @@ class VirtualGroupMoE(_CustomMoE):
                         g=self.n_groups,
                     )
                     self.expert_bias.copy_(replicated_expert_bias)
+            logger.info("Applied virtual_group init.")
 
 
 def get_moe_impl_cls(name: str | None = None) -> type[MoE]:
