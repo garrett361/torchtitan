@@ -284,7 +284,6 @@ class TokenChoiceTopKRouter(nn.Module):
         # NOTE: The expert_bias is only used for routing. The gating value
         #       top_scores is still derived from the original scores.
         if expert_bias is not None:
-            # NOTE: @goon - this is probably wrong when n_expert_groups>1
             biased_scores = scores + expert_bias
             if score_mask is not None:
                 biased_scores = biased_scores.masked_fill(~score_mask.bool(), 0.0)
