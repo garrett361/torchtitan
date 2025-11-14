@@ -45,7 +45,7 @@ class MoEHook:
         self._stats_dict["inputs mean"].append(inputs.detach().mean().item())
         self._stats_dict["inputs std"].append(inputs.detach().std().item())
         # NOTE: @goon - the scores mean will always be 1 if we have route_norm=True
-        self._stats_dict["scores_mean"].append(scores.detach().mean().item())
+        self._stats_dict["scores mean"].append(scores.detach().mean().item())
         self._stats_dict["scores std"].append(scores.detach().std().item())
         if expert_bias is not None:
             self._stats_dict["expert bias mean"].append(
