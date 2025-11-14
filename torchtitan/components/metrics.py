@@ -7,7 +7,7 @@
 import os
 import time
 from collections import namedtuple
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, TYPE_CHECKING
 
 import torch
@@ -436,9 +436,15 @@ class MetricsProcessor:
 
         self.logger.log(metrics, step)
 
+        steps_remaining = self.job_config.training.steps - step
+        secs_remaining = steps_remaining / time_end_to_end
+        time_remaining = timedelta(seconds=secs_remaining)
+
         color = self.color
+
         logger.info(
             f"{color.red}step: {step:2}  "
+            f"{color.yellow}time remaining: {time_remaining}"
             f"{color.green}loss: {global_avg_loss:7.4f}  "
             f"{color.orange}grad_norm: {grad_norm:7.4f}  "
             f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
