@@ -367,8 +367,7 @@ def main(job_config: JobConfig):
     # train loop
     logger.info(
         f"Training starts at step {train_state.step + 1}, "
-        f"with local batch size {job_config.training.batch_size}, "
-        f"global batch size {job_config.training.batch_size * dp_degree}, "
+        f"max {job_config.training.seq_len * dp_degree * job_config.training.gradient_accumulation_steps / cp_degree} tok per optim step, "
         f"sequence length {job_config.training.seq_len}, "
         f"total epochs {job_config.training.epochs} "
         f"(warmup {job_config.training.warmup_steps} steps)"
@@ -389,10 +388,10 @@ def main(job_config: JobConfig):
             batch = next(data_iterator)
             if len(batch) == 2:
                 input_ids, labels = batch
-                dataset_stats = batch_size = None
+                dataset_stats = None
             else:
                 # SFT path
-                dataset_stats, batch_size, batch_dict = batch
+                dataset_stats, _, batch_dict = batch
                 input_ids, labels = batch_dict["input_ids"], batch_dict["labels"]
                 if job_config.training.debug:
                     # TODO: @goon - DELETE
@@ -635,6 +634,13 @@ def main(job_config: JobConfig):
                         "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
                         "memory/num_ooms": device_mem_stats.num_ooms,
                     }
+                    for idx, toks in enumerate(tokens_seen_reduced_t.tolist()):
+                        wandb_metrics[f"data/toks seen dataset {idx}"] = toks
+                    for idx, pred_toks in enumerate(pred_tokens_seen_reduced_t.tolist()):
+                        wandb_metrics[f"data/pred toks seen dataset {idx}"] = pred_toks
+                    wandb_metrics["data/examples per step"] = examples_per_optim_step
+                    wandb_metrics["data/toks per step"] = tokens_per_optim_step
+                    wandb_metrics["data/pred toks per step"] = pred_tokens_per_optim_step
                     wandb.log(wandb_metrics, step=optim_step_idx)
 
                 frac_complete = num_epochs / job_config.training.epochs
