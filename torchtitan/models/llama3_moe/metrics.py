@@ -70,7 +70,7 @@ class MoEHook:
 class CustomMetricsProcessor(MetricsProcessor):
     eps = 1e-10
     # Bad mutable default, but field(default_factory=list) is erroring, maybe b/c of subclassing?
-    hooks: list[Hook] = []
+    hooks: list[MoEHook] = []
 
     @torch.no_grad
     def get_moe_metrics(self) -> dict[str, Any]:
