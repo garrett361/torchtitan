@@ -17,7 +17,7 @@ from torchtitan.models.llama3_moe import (
     Llama3MoEModelArgs,
     Llama3MoEStateDictAdapter,
 )
-from torchtitan.models.llama3_moe.metrics import RouterHook
+from torchtitan.models.llama3_moe.metrics import MoEHook
 from torchtitan.models.moe import TokenChoiceTopKRouter
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -204,7 +204,7 @@ class TestHooks:
         hooks = []
         for fqn, module in model.named_modules():
             if isinstance(module, TokenChoiceTopKRouter):
-                hooks.append(RouterHook(module, fqn, parallel_dims=None))
+                hooks.append(MoEHook(module, fqn, parallel_dims=None))
 
         inputs = torch.randint(
             self.vocab_size, size=(self.bsz, self.seqlen), device=self.device
