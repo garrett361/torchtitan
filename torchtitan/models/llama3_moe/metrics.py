@@ -30,7 +30,7 @@ class MoEHook:
         self.inputs_abs_mean = []
         if not isinstance(self.moe, MoE):
             raise ValueError(f"{self.moe=} must be a TokenChoiceTopKRouter instance")
-        self.moe.gate.register_forward_hook(self.gate_hook)
+        self.moe.router.gate.register_forward_hook(self.gate_hook)
         self._stats_dict = defaultdict(list)
 
     @torch.no_grad
