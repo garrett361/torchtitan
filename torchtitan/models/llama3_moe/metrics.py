@@ -51,10 +51,8 @@ class RouterHook(Hook):
         if not isinstance(self.module, TokenChoiceTopKRouter):
             raise ValueError(f"{self.module=} must be a TokenChoiceTopKRouter instance")
         self.module.gate.register_forward_hook(self.gate_hook)
-
         self._stats_dict = defaultdict(list)
 
-        # NOTE: @goon - the scores abs mean will always be 1 if we have route_norm=True
 
     @torch.no_grad
     def gate_hook(self, module: nn.Module, args, output) -> None:
@@ -67,6 +65,7 @@ class RouterHook(Hook):
         scores, _, _ = output
         self._stats_dict["inputs mean"].append(inputs.detach().mean().item())
         self._stats_dict["inputs std"].append(inputs.detach().std().item())
+        # NOTE: @goon - the scores mean will always be 1 if we have route_norm=True
         self._stats_dict["scores_mean"].append(scores.detach().mean().item())
         self._stats_dict["scores std"].append(scores.detach().std().item())
         if expert_bias is not None:
