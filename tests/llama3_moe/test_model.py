@@ -217,3 +217,5 @@ class TestHooks:
                 assert isinstance(v, float)
         for h in hooks:
             h.reset()
+        reset_stats = [h.get_stats_dict() for h in hooks]
+        assert not any(s for s in reset_stats)
