@@ -63,6 +63,9 @@ class MoEOverrides:
     top_k_group: int | None = None
     # Custom args
     router_init_std: float | None = None
+    # HACK: @goon - typing as bool alone means that torchtitan expects --moe_overrides.moe_hooks or
+    # --moe_overrides.no_moe_hooks rather than --moe_overrides.moe_hooks True or
+    # --moe_overrides.moe_hooks False. Typing as follows allows a True/False API.
     moe_hooks: bool | None = True
 
 
