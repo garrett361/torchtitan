@@ -444,7 +444,7 @@ class MetricsProcessor:
 
         logger.info(
             f"{color.red}step: {step:2}  "
-            f"{color.yellow}time remaining: {time_remaining}"
+            f"{color.yellow}time remaining: {time_remaining}  "
             f"{color.green}loss: {global_avg_loss:7.4f}  "
             f"{color.orange}grad_norm: {grad_norm:7.4f}  "
             f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
