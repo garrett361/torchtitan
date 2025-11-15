@@ -159,9 +159,14 @@ class TestModel:
             device=self.device,
             dtype=torch.bfloat16,
         )
-        out_moe_empty_like = moe_empty_like(inputs)
-        out_moe_clone = moe_clone(inputs)
-        out_moe = moe(inputs)
+
+        inputs_moe_empty_like = inputs.clone().requires_grad_()
+        inputs_moe_clone = inputs.clone().requires_grad_()
+        inputs_moe = inputs.clone().requires_grad_()
+
+        out_moe_empty_like = moe_empty_like(inputs_moe_empty_like)
+        out_moe_clone = moe_clone(inputs_moe_clone)
+        out_moe = moe(inputs_moe)
 
         assert_close(
             "moe_clone vs moe", out_moe_clone, out_moe, self.assert_close_ratio
@@ -177,24 +182,36 @@ class TestModel:
         out_moe_clone.pow(2).mean().backward()
         out_moe.pow(2).mean().backward()
 
-        for p1, p2, p3 in zip(
-            moe_empty_like.parameters(),
-            moe_clone.parameters(),
-            moe.parameters(),
+        for (name, p1), (_, p2), (_, p3) in zip(
+            moe_empty_like.named_parameters(),
+            moe_clone.named_parameters(),
+            moe.named_parameters(),
             strict=True,
         ):
             assert_close(
-                "grad",
+                f"{name} grad",
                 p1.grad,
                 p2.grad,
                 self.assert_close_ratio,
             )
             assert_close(
-                "grad",
+                f"{name} grad",
                 p1.grad,
                 p3.grad,
                 self.assert_close_ratio,
             )
+        assert_close(
+            "input empty_like grad",
+            inputs_moe_empty_like.grad,
+            inputs_moe.grad,
+            self.assert_close_ratio,
+        )
+        assert_close(
+            "input clone grad",
+            inputs_moe_clone.grad,
+            inputs_moe.grad,
+            self.assert_close_ratio,
+        )
 
     def test_moe_ffn_equivalence(self, iteration: int = 0) -> tuple[float, float]:
         torch.manual_seed(42 + iteration)
