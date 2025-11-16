@@ -437,7 +437,7 @@ class MetricsProcessor:
         self.logger.log(metrics, step)
 
         steps_remaining = self.job_config.training.steps - step
-        secs_remaining = steps_remaining / time_end_to_end
+        secs_remaining = steps_remaining * time_end_to_end
         time_remaining = timedelta(seconds=secs_remaining)
 
         color = self.color
