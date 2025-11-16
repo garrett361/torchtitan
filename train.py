@@ -365,6 +365,9 @@ def main(job_config: JobConfig):
     checkpoint.reset()
 
     # train loop
+
+    # Get a reference to the full rope freqs so we can slice and reassign as needed for CP:
+    orig_freqs_cis = model.freqs_cis
     logger.info(
         f"Training starts at step {train_state.step + 1}, "
         f"max {job_config.training.seq_len * dp_degree * job_config.training.gradient_accumulation_steps / cp_degree} tok per optim step, "
@@ -422,6 +425,10 @@ def main(job_config: JobConfig):
             labels = labels.to(device_type)
 
             # apply context parallelism if cp is enabled
+            # Also need to slice and reassign the rope buffer length to match the input length:
+            model.register_buffer(
+                "freqs_cis", orig_freqs_cis[: input_ids.shape[1]], persistent=True
+            )
             optional_context_parallel_ctx = (
                 utils.create_context_parallel_ctx(
                     cp_mesh=world_mesh["cp"],
