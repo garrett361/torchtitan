@@ -6,7 +6,7 @@
 
 import math
 from collections import defaultdict
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -35,31 +35,29 @@ class MoEHook:
 
     @torch.no_grad
     def gate_hook(self, module: nn.Module, args, output) -> None:
-        self._stats_dict["gate scores mean"].append(output.detach().mean().item())
-        self._stats_dict["gate scores std"].append(output.detach().std().item())
+        self._stats_dict["gate scores mean"].append(output.detach().mean())
+        self._stats_dict["gate scores std"].append(output.detach().std())
 
     @torch.no_grad
     def router_hook(self, module: nn.Module, args, output) -> None:
         inputs, expert_bias = args
         scores, _, _ = output
-        self._stats_dict["inputs mean"].append(inputs.detach().mean().item())
-        self._stats_dict["inputs std"].append(inputs.detach().std().item())
+        self._stats_dict["inputs mean"].append(inputs.detach().mean())
+        self._stats_dict["inputs std"].append(inputs.detach().std())
         # NOTE: @goon - the scores mean will always be 1 if we have route_norm=True
-        self._stats_dict["scores mean"].append(scores.detach().mean().item())
-        self._stats_dict["scores std"].append(scores.detach().std().item())
+        self._stats_dict["scores mean"].append(scores.detach().mean())
+        self._stats_dict["scores std"].append(scores.detach().std())
         if expert_bias is not None:
-            self._stats_dict["expert bias mean"].append(
-                expert_bias.detach().mean().item()
-            )
-            self._stats_dict["expert bias std"].append(
-                expert_bias.detach().std().item()
-            )
+            self._stats_dict["expert bias mean"].append(expert_bias.detach().mean())
+            self._stats_dict["expert bias std"].append(expert_bias.detach().std())
 
     def get_stats_dict(self) -> dict[str, float]:
         stats_dict = {}
         for k, v in self._stats_dict.items():
             if v:
-                stats_dict[f"moe_router_hook/{self.fqn} {k}"] = sum(v) / len(v)
+                stats_dict[f"moe_router_hook/{self.fqn} {k}"] = (
+                    torch.stack(v).mean().item()
+                )
         return stats_dict
 
     def reset(self) -> None:
@@ -80,16 +78,16 @@ class CustomMetricsProcessor(MetricsProcessor):
             for block_idx, transformer_block in model_part.layers.items():
                 if not transformer_block.moe_enabled:
                     continue
-                moe_metrics[
-                    f"moe_entropy/layer_{block_idx}"
-                ] = self.get_normalized_entropy(transformer_block)
+                moe_metrics[f"moe_entropy/layer_{block_idx}"] = (
+                    self.get_normalized_entropy(transformer_block)
+                )
                 if (
                     n_expert_groups := model_part.model_args.moe_args.n_expert_groups
                 ) > 1:
-                    moe_metrics[
-                        f"moe_group_entropy/layer_{block_idx}"
-                    ] = self.get_expert_group_normalized_group_entropy(
-                        transformer_block, n_expert_groups
+                    moe_metrics[f"moe_group_entropy/layer_{block_idx}"] = (
+                        self.get_expert_group_normalized_group_entropy(
+                            transformer_block, n_expert_groups
+                        )
                     )
                 # Reset
                 transformer_block.moe.tokens_per_expert_cumulative.zero_()
@@ -99,9 +97,9 @@ class CustomMetricsProcessor(MetricsProcessor):
                 moe_metrics[f"moe_router_weight/layer_{block_idx} abs mean"] = (
                     router_weight.abs().mean().item()
                 )
-                moe_metrics[
-                    f"moe_router_weight/layer_{block_idx} std"
-                ] = router_weight.std().item()
+                moe_metrics[f"moe_router_weight/layer_{block_idx} std"] = (
+                    router_weight.std().item()
+                )
 
         for hook in self.hooks:
             moe_metrics = {**moe_metrics, **hook.get_stats_dict()}
