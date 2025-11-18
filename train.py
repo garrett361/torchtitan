@@ -405,19 +405,19 @@ def main(job_config: JobConfig):
                     print(f"{input_ids.shape=}")
                     print(f"{input_ids.max()=}")
                     print(f"{lr_schedulers.schedulers[0].get_last_lr()[0]=}")
-                    if train_state.step == 1:
-                        input_toks_list = input_ids.cpu().tolist()
-                        for example_idx, toks in enumerate(input_toks_list):
-                            print(
-                                f"[rank={torch.distributed.get_rank()}, {example_idx=} INPUTS]:  {tokenizer.decode(toks)}"
-                            )
-                        label_toks_list = labels.cpu().tolist()
-                        for example_idx, toks in enumerate(label_toks_list):
-                            # The -100 masking label is not a valid token, so just take the abs to make it one
-                            toks = [abs(t) for t in toks]
-                            print(
-                                f"[rank={torch.distributed.get_rank()}, {example_idx=} LABELS]:  {tokenizer.decode(toks)}"
-                            )
+                if job_config.training.debug or train_state.step == 1:
+                    input_toks_list = input_ids.cpu().tolist()
+                    for batch_idx, toks in enumerate(input_toks_list):
+                        print(
+                            f"[rank={torch.distributed.get_rank()}, {batch_idx=} INPUTS]:  {tokenizer.decode(toks)}"
+                        )
+                    label_toks_list = labels.cpu().tolist()
+                    for batch_idx, toks in enumerate(label_toks_list):
+                        # The -100 masking label is not a valid token, so just take the abs to make it one
+                        toks = [abs(t) for t in toks]
+                        print(
+                            f"[rank={torch.distributed.get_rank()}, {batch_idx=} LABELS]:  {tokenizer.decode(toks)}"
+                        )
 
             data_loading_times.append(time.perf_counter() - data_load_start)
 
