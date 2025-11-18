@@ -54,17 +54,11 @@ def reduce_tensor_to_cpu(
     return t_reduced.cpu()
 
 
-def num_epochs_completed(
+def num_epochs_completed_per_dataset(
     job_config: JobConfig,
     dataset_stats: DatasetStats,
     dp_mesh: DeviceMesh | None,
-) -> float:
-    """
-    Working def for number of completed epochs:
-    * All-reduce sum the number of examples seen for each dataset.
-    * Divide by number of expected examples per epoch per dataset, accounting for weights
-    * Take the minimum (but non-zero value) over datasets, so that we don't cut short.
-    """
+) -> torch.Tensor:
     weights_t = torch.tensor(
         [float(w) for w in job_config.dataset.dataset_weights.split(",")],
         dtype=torch.float32,
@@ -72,6 +66,18 @@ def num_epochs_completed(
     examples_per_epoch = dataset_stats.dataset_lens * weights_t
     examples_seen_reduced = reduce_tensor_to_cpu(dataset_stats.examples_seen, dp_mesh)
     epochs_completed_per_dataset = examples_seen_reduced / examples_per_epoch
+    return epochs_completed_per_dataset
+
+
+def num_epochs_completed(
+    epochs_completed_per_dataset: torch.Tensor
+) -> float:
+    """
+    Working def for number of completed epochs:
+    * All-reduce sum the number of examples seen for each dataset.
+    * Divide by number of expected examples per epoch per dataset, accounting for weights
+    * Take the minimum (but non-zero value) over datasets, so that we don't cut short.
+    """
     # Get the minimum of the non-zero entries. Avoiding the non-zero cases to avoid later divisions
     # by zero. This can only happen super early in training, for typical cases.
     epochs_completed = (
@@ -383,7 +389,9 @@ def main(job_config: JobConfig):
         stop_training = False
         while not stop_training:
             train_state.step += 1
-            train_state.ntokens += job_config.training.batch_size * dp_degree * job_config.training.seq_len
+            train_state.ntokens += (
+                job_config.training.batch_size * dp_degree * job_config.training.seq_len
+            )
             gc_handler.run(train_state.step)
 
             # get batch
@@ -486,7 +494,10 @@ def main(job_config: JobConfig):
             optim_step_idx = (
                 train_state.step // job_config.training.gradient_accumulation_steps
             )
-            num_epochs = num_epochs_completed(job_config, dataset_stats, dp_mesh)
+            epochs_completed_per_dataset = num_epochs_completed_per_dataset(
+                job_config=job_config, dataset_stats=dataset_stats, dp_mesh=dp_mesh
+            )
+            num_epochs = num_epochs_completed(epochs_completed_per_dataset)
             if train_state.step % job_config.training.gradient_accumulation_steps == 0:
                 # clip gradients
                 gnorm = utils.clip_grad_norm_(
@@ -659,6 +670,8 @@ def main(job_config: JobConfig):
                         wandb_metrics[f"data/toks seen dataset {idx}"] = toks
                     for idx, pred_toks in enumerate(pred_tokens_seen_reduced_t.tolist()):
                         wandb_metrics[f"data/pred toks seen dataset {idx}"] = pred_toks
+                    for idx, pred_toks in enumerate(epochs_completed_per_dataset.tolist()):
+                        wandb_metrics[f"data/epochs seen dataset {idx}"] = pred_toks
                     wandb_metrics["data/examples per step"] = examples_per_optim_step
                     wandb_metrics["data/toks per step"] = tokens_per_optim_step
                     wandb_metrics["data/pred toks per step"] = pred_tokens_per_optim_step
@@ -683,6 +696,7 @@ def main(job_config: JobConfig):
                     f"{color.red}{100 * frac_complete:.2f}% complete  "
                     f"{color.yellow}{num_epochs:.2f} epochs complete  "
                     f"{color.cyan}Tok per dataset: {tokens_seen_reduced_t}  "
+                    f"{color.magenta}Epochs per dataset: {epochs_completed_per_dataset}  "
                     f"{color.green}Pred tok per dataset: {pred_tokens_seen_reduced_t}  "
                     f"{color.white}{time_remaining} remaining  "
                     f"{color.blue}{approx_optim_steps_remaining} optim steps remaining  "
