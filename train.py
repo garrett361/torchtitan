@@ -376,7 +376,7 @@ def main(job_config: JobConfig):
     orig_freqs_cis = model.freqs_cis
     logger.info(
         f"Training starts at step {train_state.step + 1}, "
-        f"max {job_config.training.seq_len * dp_degree * job_config.training.gradient_accumulation_steps / cp_degree} tok per optim step, "
+        f"max {job_config.training.seq_len * dp_degree * job_config.training.gradient_accumulation_steps} tok per optim step, "
         f"sequence length {job_config.training.seq_len}, "
         f"total epochs {job_config.training.epochs} "
         f"(warmup {job_config.training.warmup_steps} steps)"
