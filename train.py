@@ -5,9 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+import textwrap
 import time
 from datetime import timedelta
-from dataclasses import fields
 
 import torch
 import torch.distributed as dist
@@ -417,14 +417,20 @@ def main(job_config: JobConfig):
                     input_toks_list = input_ids.cpu().tolist()
                     for batch_idx, toks in enumerate(input_toks_list):
                         logger.info(
-                            f"[{batch_idx=}, {train_state.step=} INPUTS]:  {tokenizer.decode(toks)}"
+                            textwrap.indent(
+                                tokenizer.decode(toks),
+                                f"[rank={torch.distributed.get_rank()}, {batch_idx=}, f{train_state.step=} INPUTS] ",
+                            )
                         )
                     label_toks_list = labels.cpu().tolist()
                     for batch_idx, toks in enumerate(label_toks_list):
                         # The -100 masking label is not a valid token, so just take the abs to make it one
                         toks = [abs(t) for t in toks]
                         logger.info(
-                            f"[{batch_idx=}, {train_state.step=} LABELS]:  {tokenizer.decode(toks)}"
+                            textwrap.indent(
+                                tokenizer.decode(toks),
+                                f"[rank={torch.distributed.get_rank()}, {batch_idx=}, {train_state.step=} LABELS] ",
+                            )
                         )
 
             data_loading_times.append(time.perf_counter() - data_load_start)
