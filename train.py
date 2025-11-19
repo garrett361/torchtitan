@@ -416,17 +416,17 @@ def main(job_config: JobConfig):
                 if job_config.training.debug or train_state.step == 1:
                     input_toks_list = input_ids.cpu().tolist()
                     for batch_idx, toks in enumerate(input_toks_list):
-                        logger.info(
+                        print(
                             textwrap.indent(
                                 tokenizer.decode(toks),
-                                f"[rank={torch.distributed.get_rank()}, {batch_idx=}, f{train_state.step=} INPUTS] ",
+                                f"[rank={torch.distributed.get_rank()}, {batch_idx=}, {train_state.step=} INPUTS] ",
                             )
                         )
                     label_toks_list = labels.cpu().tolist()
                     for batch_idx, toks in enumerate(label_toks_list):
                         # The -100 masking label is not a valid token, so just take the abs to make it one
                         toks = [abs(t) for t in toks]
-                        logger.info(
+                        print(
                             textwrap.indent(
                                 tokenizer.decode(toks),
                                 f"[rank={torch.distributed.get_rank()}, {batch_idx=}, {train_state.step=} LABELS] ",
