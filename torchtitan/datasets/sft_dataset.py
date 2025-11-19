@@ -383,6 +383,7 @@ def build_sft_data_loader(
     datasets = [
         Dataset.load_from_disk(path, keep_in_memory=False) for path in dataset_paths
     ]
+    datasets = [d.shuffle(seed=seed) for d in datasets]
     dataset_lens = [len(d) for d in datasets]
 
     samplers = [
