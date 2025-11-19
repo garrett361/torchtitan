@@ -419,7 +419,7 @@ def main(job_config: JobConfig):
                         print(
                             textwrap.indent(
                                 tokenizer.decode(toks),
-                                f"[rank={torch.distributed.get_rank()}, {batch_idx=}, {train_state.step=} INPUTS] ",
+                                f"[{cp_rank=}, {dp_rank=}, {batch_idx=}, {train_state.step=} INPUTS] ",
                             )
                         )
                     label_toks_list = labels.cpu().tolist()
@@ -429,7 +429,7 @@ def main(job_config: JobConfig):
                         print(
                             textwrap.indent(
                                 tokenizer.decode(toks),
-                                f"[rank={torch.distributed.get_rank()}, {batch_idx=}, {train_state.step=} LABELS] ",
+                                f"[{cp_rank=}, {dp_rank=}, {batch_idx=}, {train_state.step=} LABELS] ",
                             )
                         )
 
