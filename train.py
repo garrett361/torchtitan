@@ -413,7 +413,6 @@ def main(job_config: JobConfig):
                     print(f"{input_ids.shape=}")
                     print(f"{input_ids.max()=}")
                     print(f"{lr_schedulers.schedulers[0].get_last_lr()[0]=}")
-                if job_config.training.debug or train_state.step == 1:
                     input_toks_list = input_ids.cpu().tolist()
                     for batch_idx, toks in enumerate(input_toks_list):
                         print(
