@@ -67,6 +67,7 @@ class MoEOverrides:
     # --moe_overrides.no_moe_hooks rather than --moe_overrides.moe_hooks True or
     # --moe_overrides.moe_hooks False. Typing as follows allows a True/False API.
     moe_hooks: bool | None = True
+    moe_reshard_after_forward: bool | None = True
 
 
 @dataclass

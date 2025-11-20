@@ -544,8 +544,7 @@ class MoE(MoEOld):
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
-        # top_scores shape (bs*slen, top_k)
-        # selected_experts_indices shape (bs*slen, top_k)
+        # top_scores and selected_experts_indices shape (bs*slen, top_k)
         # num_tokens_per_expert shape (num_experts,)
         (
             top_scores,
@@ -561,7 +560,7 @@ class MoE(MoEOld):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        # top_scores and token_indices_experts_sorted shape (bs*slen*top_k,)
+        # top_scores_experts_sorted and token_indices_experts_sorted shape (bs*slen*top_k,)
         # num_tokens_per_expert shape (num_experts,)
         # NOTE: the reason we need to compute num_tokens_per_expert again is:
         #       1st computation in router is to update self.tokens_per_expert
@@ -592,21 +591,27 @@ class MoE(MoEOld):
         # to "implicitly" overlap the shared expert compute with token combine communication
         out = self.shared_experts(x) if self.shared_experts is not None else None
 
+        # Unsort routed outputs
+        routed_output_unsorted = torch.zeros(
+            (bs * slen * self.router.top_k, dim),
+            dtype=routed_output.dtype,
+            device=routed_output.device,
+        )
+        routed_output_unsorted[token_indices_experts_sorted] = routed_output
+        routed_output_unsorted = routed_output_unsorted.reshape(
+            -1, self.router.top_k, dim
+        )
         if not self.score_before_experts:
-            # Unsort scores and routed outputs. Also save some allocations: store unsorted scores
-            # and outputs in top_scores and routed_input, respectively.
-            top_scores = top_scores.flatten()
-            top_scores[token_indices_experts_sorted] = top_scores_experts_sorted
-            routed_input[token_indices_experts_sorted] = routed_output
-            routed_input = routed_input.reshape(-1, self.router.top_k, dim)
-            top_scores = top_scores.reshape(-1, 1, self.router.top_k)
             out_experts = (
-                torch.bmm(top_scores, routed_input.float()).to(x.dtype).squeeze(1)
+                torch.bmm(
+                    top_scores.reshape(-1, 1, self.router.top_k),
+                    routed_output_unsorted.float(),
+                )
+                .to(x.dtype)
+                .squeeze(1)
             )
         else:
-            # Unsort routed outputs and save an allocation: store unsorted outputs in routed_input
-            routed_input[token_indices_experts_sorted] = routed_output
-            out_experts = routed_input.reshape(-1, self.router.top_k, dim).sum(dim=1)
+            out_experts = routed_output_unsorted.sum(dim=1)
 
         if out is None:
             return out_experts.reshape(bs, slen, dim)

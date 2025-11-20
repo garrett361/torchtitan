@@ -35,31 +35,29 @@ class MoEHook:
 
     @torch.no_grad
     def gate_hook(self, module: nn.Module, args, output) -> None:
-        self._stats_dict["gate scores mean"].append(output.detach().mean().item())
-        self._stats_dict["gate scores std"].append(output.detach().std().item())
+        self._stats_dict["gate scores mean"].append(output.detach().mean())
+        self._stats_dict["gate scores std"].append(output.detach().std())
 
     @torch.no_grad
     def router_hook(self, module: nn.Module, args, output) -> None:
         inputs, expert_bias = args
         scores, _, _ = output
-        self._stats_dict["inputs mean"].append(inputs.detach().mean().item())
-        self._stats_dict["inputs std"].append(inputs.detach().std().item())
+        self._stats_dict["inputs mean"].append(inputs.detach().mean())
+        self._stats_dict["inputs std"].append(inputs.detach().std())
         # NOTE: @goon - the scores mean will always be 1 if we have route_norm=True
-        self._stats_dict["scores_mean"].append(scores.detach().mean().item())
-        self._stats_dict["scores std"].append(scores.detach().std().item())
+        self._stats_dict["scores mean"].append(scores.detach().mean())
+        self._stats_dict["scores std"].append(scores.detach().std())
         if expert_bias is not None:
-            self._stats_dict["expert bias mean"].append(
-                expert_bias.detach().mean().item()
-            )
-            self._stats_dict["expert bias std"].append(
-                expert_bias.detach().std().item()
-            )
+            self._stats_dict["expert bias mean"].append(expert_bias.detach().mean())
+            self._stats_dict["expert bias std"].append(expert_bias.detach().std())
 
     def get_stats_dict(self) -> dict[str, float]:
         stats_dict = {}
         for k, v in self._stats_dict.items():
             if v:
-                stats_dict[f"moe_router_hook/{self.fqn} {k}"] = sum(v) / len(v)
+                stats_dict[f"moe_router_hook/{self.fqn} {k}"] = (
+                    torch.stack(v).mean().item()
+                )
         return stats_dict
 
     def reset(self) -> None:
@@ -96,11 +94,11 @@ class CustomMetricsProcessor(MetricsProcessor):
                 router_weight = transformer_block.moe.router.gate.weight
                 if isinstance(router_weight, DTensor):
                     router_weight = router_weight.full_tensor()
-                moe_metrics[f"moe_router/layer_{block_idx} abs mean"] = (
+                moe_metrics[f"moe_router_weight/layer_{block_idx} abs mean"] = (
                     router_weight.abs().mean().item()
                 )
                 moe_metrics[
-                    f"moe_router/layer_{block_idx} std"
+                    f"moe_router_weight/layer_{block_idx} std"
                 ] = router_weight.std().item()
 
         for hook in self.hooks:

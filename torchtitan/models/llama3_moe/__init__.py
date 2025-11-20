@@ -159,7 +159,7 @@ llama3_moe_configs = {
         ),
         rope_scaling_args=llama_3p2_3b_rope_cfg,
     ),
-    # NOTE: @goon - the 3B_2layer and 3B_2layer_halfmoe models are used in
+    # NOTE: @goon - the two-layer cfgs are used in
     # torchtitan/tests/llama3_moe/test_dist.py, do not delete!
     #
     "3B_2layer": Llama3MoEModelArgs(
@@ -182,6 +182,7 @@ llama3_moe_configs = {
         ),
         rope_scaling_args=llama_3p2_3b_rope_cfg,
     ),
+    # See VirtualGroupMoE for necessary cfg requirements for virtual_group init.
     "3B_2layer_halfmoe": Llama3MoEModelArgs(
         dim=3072,
         moe_inter_dim=8192,
@@ -192,20 +193,22 @@ llama3_moe_configs = {
         multiple_of=256,
         rope_theta=500000,
         moe_args=MoEArgs(
-            num_experts=8,
+            num_experts=4,
             num_shared_experts=0,
             score_func="softmax",
             route_norm=True,
             score_before_experts=False,
-            top_k=2,
+            top_k=4,
+            route_scale=4,  # Must have route_scale = top_k; see [Virtual Group Initialization].
+            hf_ffn_hidden_dim=8192,  # Must specify for virtual_group router init!
         ),
         is_moe_list=[False, True],
+        custom_moe_impl="virtual_group",  # Must specify for virtual_group router init!
         rope_scaling_args=llama_3p2_3b_rope_cfg,
     ),
-    # See VirtualGroupMoE for necessary cfg requirements for virtual_group init.
-    "3B_2layer_halfmoe_finegrained": Llama3MoEModelArgs(
+    "3B_2layer_halfmoe_vg": Llama3MoEModelArgs(
         dim=3072,
-        moe_inter_dim=8192 // 2,
+        moe_inter_dim=8192 // 2,  # Two groups per vg  replica
         n_layers=2,
         n_heads=24,
         n_kv_heads=8,
@@ -213,7 +216,7 @@ llama3_moe_configs = {
         multiple_of=256,
         rope_theta=500000,
         moe_args=MoEArgs(
-            num_experts=8 * 2,
+            num_experts=4,  # 2 vg replicas, each w/ two experts
             num_shared_experts=0,
             score_func="softmax",
             route_norm=True,
