@@ -21,7 +21,6 @@ from torch.optim import Optimizer
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.llama3_moe.custom_args import Llama3MoEOptimizer
 from torchtitan.models.moe import GroupedExperts, TokenChoiceTopKRouter
 
 __all__ = [
@@ -298,8 +297,6 @@ def build_optimizers(
         optimizer_config (OptimizerConfig): Optimizer config containing the optimizer name and parameters.
         parallel_dims (ParallelDims): Parallel dimensions for the model.
     """
-    if not isinstance(optimizer_config, Llama3MoEOptimizer):
-        raise ValueError(f"Only Llama3MoEOptimizer cfg classes are suported: {optimizer_config=}")
     optim_in_bwd = optimizer_config.early_step_in_backward
     if optim_in_bwd:
         if parallel_dims.ep_enabled:
