@@ -6,7 +6,7 @@
 
 import math
 from collections import defaultdict
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -15,6 +15,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
+from torchtitan.models.llama3_moe.model.model import VirtualGroupMoE
 from torchtitan.models.moe import MoE
 
 if TYPE_CHECKING:
@@ -78,17 +79,24 @@ class CustomMetricsProcessor(MetricsProcessor):
             for block_idx, transformer_block in model_part.layers.items():
                 if not transformer_block.moe_enabled:
                     continue
-                moe_metrics[
-                    f"moe_entropy/layer_{block_idx}"
-                ] = self.get_normalized_entropy(transformer_block)
+                moe_metrics[f"moe_entropy/layer_{block_idx}"] = (
+                    self.get_normalized_entropy(transformer_block)
+                )
                 if (
                     n_expert_groups := model_part.model_args.moe_args.n_expert_groups
                 ) > 1:
-                    moe_metrics[
-                        f"moe_group_entropy/layer_{block_idx}"
-                    ] = self.get_expert_group_normalized_group_entropy(
-                        transformer_block, n_expert_groups
+                    moe_metrics[f"moe_group_entropy/layer_{block_idx}"] = (
+                        self.get_expert_group_normalized_group_entropy(
+                            transformer_block, n_expert_groups
+                        )
                     )
+                if isinstance(transformer_block.moe, VirtualGroupMoE):
+                    for replica_idx, frac in self.get_replica_routing_fraction(
+                        transformer_block
+                    ).items():
+                        moe_metrics[
+                            f"moe_replica/layer_{block_idx} replica_{replica_idx} frac"
+                        ] = frac
                 # Reset
                 transformer_block.moe.tokens_per_expert_cumulative.zero_()
                 router_weight = transformer_block.moe.router.gate.weight
@@ -97,9 +105,9 @@ class CustomMetricsProcessor(MetricsProcessor):
                 moe_metrics[f"moe_router_weight/layer_{block_idx} abs mean"] = (
                     router_weight.abs().mean().item()
                 )
-                moe_metrics[
-                    f"moe_router_weight/layer_{block_idx} std"
-                ] = router_weight.std().item()
+                moe_metrics[f"moe_router_weight/layer_{block_idx} std"] = (
+                    router_weight.std().item()
+                )
 
         for hook in self.hooks:
             moe_metrics = {**moe_metrics, **hook.get_stats_dict()}
@@ -149,6 +157,24 @@ class CustomMetricsProcessor(MetricsProcessor):
         max_entropy = math.log(tokens_per_expert_group_cumulative_prob.numel())
         normalized_entropy = entropy / max_entropy
         return normalized_entropy
+
+    def get_replica_routing_fraction(
+        self, transformer_block: nn.Module
+    ) -> dict[int, float]:
+        moe = transformer_block.moe
+        if not isinstance(moe, VirtualGroupMoE):
+            raise ValueError(f"{moe=} must be a VirtualGroupMoE instance.")
+        tokens_per_replica_cumulative = (
+            moe.tokens_per_expert_cumulative.reshape(moe.n_replicas, -1).sum(dim=-1)
+            + self.eps
+        )
+        tokens_per_replica_cumulative_prob = (
+            tokens_per_replica_cumulative
+        ) / tokens_per_replica_cumulative.sum()
+        return {
+            idx: frac
+            for idx, frac in enumerate(tokens_per_replica_cumulative_prob.tolist())
+        }
 
     def log(
         self,
