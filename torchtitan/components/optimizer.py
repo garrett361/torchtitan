@@ -98,7 +98,7 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
             for module in model.modules():
                 if isinstance(module, TokenChoiceTopKRouter):
                     router_params_set.update(module.parameters())
-                if isinstance(module, GroupedExperts):
+                elif isinstance(module, GroupedExperts):
                     routed_expert_params_set.update(module.parameters())
             non_router_params_set = (
                 all_params_set - router_params_set - routed_expert_params_set
