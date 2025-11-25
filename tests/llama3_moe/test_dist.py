@@ -9,21 +9,21 @@ from copy import deepcopy
 import pytest
 import torch
 from dtest import DTest
+from transformers import AutoTokenizer
 
 from torchtitan.components.checkpoint import CheckpointManager, ModelWrapper
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.llama3_moe import (
     CustomCheckpointManager,
-    get_hf_weight_transform_cls,
-    llama3_moe_configs,
     Llama3MoE,
     Llama3MoEJobConfig,
     Llama3MoEStateDictAdapter,
-    parallelize_llama_moe,
     TransformingHuggingFaceStorageReader,
+    get_hf_weight_transform_cls,
+    llama3_moe_configs,
+    parallelize_llama_moe,
 )
 from torchtitan.models.moe import MoE, MoEArgs
-from transformers import AutoTokenizer
 
 BITTER_LESSON = """
 The biggest lesson that can be read from 70 years of AI research is that general methods that leverage
