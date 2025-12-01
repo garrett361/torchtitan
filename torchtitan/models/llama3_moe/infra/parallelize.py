@@ -10,10 +10,10 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
+    parallelize_module,
     PrepareModuleInput,
     RowwiseParallel,
     SequenceParallel,
-    parallelize_module,
 )
 
 from torchtitan.config import TORCH_DTYPE_MAP
@@ -64,7 +64,9 @@ def parallelize_llama_moe(
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
-    assert job_config.training.seq_len % parallel_dims.seq_len_divisor == 0, f"""
+    assert (
+        job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
+    ), f"""
         Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
