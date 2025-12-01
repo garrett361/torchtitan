@@ -58,6 +58,18 @@ fsdp-8b-sft:
 		# --checkpoint.warm_start_ckpt_path $(LLAMA_3_8B_DCP_PATH) \
 		# --checkpoint.enable_checkpoint
 
+fsdp-8b-sft-constant:
+	torchrun --nproc-per-node 8 train.py --job.config_file ./train_configs/llama3_8b.toml \
+	    --training.batch_size 1 \
+		--dataset.datasets $(SFT_DATA_PATH) \
+		--dataset.dataset_weights 1.0 \
+		--model.tokenizer_path meta-llama/Llama-3.1-8B \
+		--training.sum_loss \
+		--training.warmup_steps 10 \
+		--training.decay_type constant \
+		# --checkpoint.warm_start_ckpt_path $(LLAMA_3_8B_DCP_PATH) \
+		# --checkpoint.enable_checkpoint
+
 fsdp-8b-sft-cp:
 	torchrun --nproc-per-node 8 train.py --job.config_file ./train_configs/llama3_8b.toml \
 		--dataset.dataset_weights 1.0 \
