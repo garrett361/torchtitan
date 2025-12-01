@@ -245,6 +245,13 @@ class JobConfig:
             help="Steps for lr scheduler warmup, normally 1/5 of --training.steps",
         )
         self.parser.add_argument(
+            "--training.decay_type",
+            type=str,
+            default="annealing",
+            choices=["annealing", "constant"],
+            help="Controls the LR schedule class. Currently only annealing (linear decay) and constant supported.",
+        )
+        self.parser.add_argument(
             "--training.max_norm",
             type=float,
             default=1.0,

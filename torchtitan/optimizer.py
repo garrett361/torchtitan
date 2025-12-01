@@ -86,11 +86,35 @@ def annealing(
     return factor
 
 
+def constant(
+    current_step: int, num_steps: int, warmup_steps: int, final_lr_ratio: float
+) -> float:
+    if current_step <= warmup_steps:
+        factor = 1 - (1 - current_step / warmup_steps) ** 2
+    else:
+        if num_steps <= warmup_steps:
+            raise ValueError(
+                f"{warmup_steps=} is larger than {num_steps=}, reduce warmup_steps"
+            )
+        factor = 1
+    return factor
+
+
 def build_lr_schedulers(optimizers, job_config: JobConfig):
     def _build_lr_scheduler(optimizer):
         warmup_steps = int(job_config.training.warmup_steps)
+        decay_type = job_config.training.decay_type
+        if decay_type == "annealing":
+            lr_sched_impl = annealing
+        elif decay_type == "constant":
+            lr_sched_impl = constant
+        else:
+            raise ValueError(f"Unexpected {job_config.training.decay_type=}")
+
         lr_lambda = functools.partial(
-            annealing, warmup_steps=warmup_steps, final_lr_ratio=job_config.training.final_lr_ratio
+            lr_sched_impl,
+            warmup_steps=warmup_steps,
+            final_lr_ratio=job_config.training.final_lr_ratio,
         )
         warmup_scheduler = LambdaLRCustom(optimizer, lr_lambda=lr_lambda)
         return warmup_scheduler
