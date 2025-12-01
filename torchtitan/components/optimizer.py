@@ -21,7 +21,7 @@ from torch.optim import Optimizer
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.moe import TokenChoiceTopKRouter
+from torchtitan.models.moe import GroupedExperts, TokenChoiceTopKRouter
 
 __all__ = [
     "OptimizersContainer",
@@ -76,28 +76,39 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         self.optimizers = []
         self.model_parts = model_parts
         moe_router_lr = optimizer_kwargs.pop("moe_router_lr")
-        if moe_router_lr is None:
-            for model in self.model_parts:
-                params = [p for p in model.parameters() if p.requires_grad]
-                self.optimizers.append(optimizer_cls(params, **optimizer_kwargs))
-                all_params.extend(params)
-        else:
-            non_router_kwargs = optimizer_kwargs.copy()
-            router_kwargs = optimizer_kwargs.copy()
-            router_kwargs["lr"] = moe_router_lr
-            for model in self.model_parts:
-                all_params_set = set(model.parameters())
-                all_params.extend(all_params_set)
-                router_params_set = set()
-                for module in model.modules():
-                    if isinstance(module, TokenChoiceTopKRouter):
-                        router_params_set.update(module.parameters())
-                non_router_params_set = all_params_set - router_params_set
-                arg_list = [
-                    {"params": list(non_router_params_set), **non_router_kwargs},
-                    {"params": list(router_params_set), **router_kwargs},
-                ]
-                self.optimizers.append(optimizer_cls(arg_list))
+        moe_router_lr = (
+            optimizer_kwargs["lr"] if moe_router_lr is None else moe_router_lr
+        )
+        routed_expert_lr = optimizer_kwargs.pop("routed_expert_lr")
+        routed_expert_lr = (
+            optimizer_kwargs["lr"] if routed_expert_lr is None else routed_expert_lr
+        )
+
+        non_router_kwargs = optimizer_kwargs.copy()
+        router_kwargs = optimizer_kwargs.copy()
+        router_kwargs["lr"] = moe_router_lr
+        routed_expert_kwargs = optimizer_kwargs.copy()
+        routed_expert_kwargs["lr"] = routed_expert_lr
+
+        for model in self.model_parts:
+            all_params_set = set(model.parameters())
+            all_params.extend(all_params_set)
+            router_params_set = set()
+            routed_expert_params_set = set()
+            for module in model.modules():
+                if isinstance(module, TokenChoiceTopKRouter):
+                    router_params_set.update(module.parameters())
+                elif isinstance(module, GroupedExperts):
+                    routed_expert_params_set.update(module.parameters())
+            non_router_params_set = (
+                all_params_set - router_params_set - routed_expert_params_set
+            )
+            arg_list = [
+                {"params": list(non_router_params_set), **non_router_kwargs},
+                {"params": list(router_params_set), **router_kwargs},
+                {"params": list(routed_expert_params_set), **routed_expert_kwargs},
+            ]
+            self.optimizers.append(optimizer_cls(arg_list))
 
         self._validate_length(len(self.model_parts))
         self._post_init(all_params, optimizer_kwargs)
@@ -308,6 +319,7 @@ def build_optimizers(
     eps = optimizer_config.eps
     weight_decay = optimizer_config.weight_decay
     moe_router_lr = optimizer_config.moe_router_lr
+    routed_expert_lr = optimizer_config.routed_expert_lr
 
     optim_implementation = optimizer_config.implementation
     assert optim_implementation in ["fused", "foreach", "for-loop"]
@@ -323,6 +335,7 @@ def build_optimizers(
         "fused": fused,
         "foreach": foreach,
         "moe_router_lr": moe_router_lr,
+        "routed_expert_lr": routed_expert_lr,
     }
 
     optimizer_classes = {

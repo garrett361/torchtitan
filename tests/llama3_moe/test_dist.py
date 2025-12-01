@@ -631,3 +631,50 @@ class TestImpls(DTest):
             out = model(inputs)
             out_moe = model_moe(inputs)
             torch.testing.assert_close(out, out_moe, atol=self.atol, rtol=self.rtol)
+
+
+class TestMoENoReshard(DTest):
+    seqlen = 64
+    bsz = 1
+    atol = 1e-1
+    rtol = 1e-1
+
+    @pytest.mark.parametrize("sharding", ["ep"])
+    @pytest.mark.parametrize("moe_reshard_after_forward", [True, False])
+    def test_no_reshard_option(
+        self, sharding: str, moe_reshard_after_forward: bool
+    ) -> None:
+        """
+        Test that the dense and MoE models have the same output with FFN weight replication.
+        """
+        model_args_moe = llama3_moe_configs["3B_2layer_halfmoe"]
+        job_config = Llama3MoEJobConfig()
+        job_config.moe_overrides.moe_reshard_after_forward = moe_reshard_after_forward
+        with torch.device("meta"):
+            model_moe = Llama3MoE(model_args_moe)
+
+        parallel_dims = ParallelDims(
+            dp_shard=-1,
+            dp_replicate=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=self.world_size if sharding == "ep" else 1,
+            etp=1,
+            world_size=self.world_size,
+        )
+
+        model_moe = parallelize_llama_moe(model_moe, parallel_dims, job_config)
+
+        model_moe.to_empty(device=self.device)
+        with torch.no_grad():
+            model_moe.init_weights(buffer_device=None)
+
+        routed_experts = model_moe.layers["1"].moe.experts
+        post_forward_mesh_info = (
+            routed_experts._get_fsdp_state()._fsdp_param_group.post_forward_mesh_info
+        )
+        if moe_reshard_after_forward:
+            assert post_forward_mesh_info is not None
+        else:
+            assert post_forward_mesh_info is None

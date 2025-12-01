@@ -275,36 +275,3 @@ class TestMoE:
             dtype=torch.bfloat16,
         )
         moe(inputs).sum().backward()
-
-
-if __name__ == "__main__":
-    t = TestModel()
-
-    # Collect some accuracy stats
-    moe_old_rel_errs = []
-    moe_rel_errs = []
-    accuracy_iters = 10
-    for idx in range(accuracy_iters):
-        moe_old_rel_err, moe_rel_err = t.test_moe_ffn_equivalence(idx)
-        moe_old_rel_errs.append(moe_old_rel_err)
-        moe_rel_errs.append(moe_rel_err)
-    mean_moe_old_rel_err = torch.tensor(moe_old_rel_errs)
-    mean_moe_rel_err = torch.tensor(moe_rel_errs)
-
-    print(f"\nACCURACY VS FFN: {accuracy_iters} iterations\n")
-    print(f"{mean_moe_old_rel_err.mean()=}, {mean_moe_old_rel_err.std()=}")
-    print(f"{mean_moe_rel_err.mean()=}, {mean_moe_rel_err.std()=}")
-    print(f"{mean_moe_old_rel_err.mean()/mean_moe_rel_err.mean()=}")
-
-    # Perf bsz and seqlen as in torchtitan/models/deepseek_v3/train_configs/deepseek_v3_16b.toml
-    perf_seqlen = 4096
-    perf_bsz = 4
-    print(
-        f"\nTRITON BENCH: {perf_seqlen=} {perf_bsz=} warmups={t.perf_warmups} repeats={t.perf_reps}\n"
-    )
-    t.test_perf(bsz=perf_bsz, seqlen=perf_seqlen)
-
-    t.test_moe_old_moe_equivalence(True)
-    print("\nMoEOld AND MoE CLOSE: score_before_experts=True")
-    t.test_moe_old_moe_equivalence(False)
-    print("\nMoEOld AND MoE CLOSE: score_before_experts=False")

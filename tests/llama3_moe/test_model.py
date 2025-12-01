@@ -9,6 +9,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.models.llama3_moe import (
     llama3_moe_configs,
@@ -219,3 +220,38 @@ class TestHooks:
             h.reset()
         reset_stats = [h.get_stats_dict() for h in hooks]
         assert not any(s for s in reset_stats)
+
+
+class TestOptim:
+    seqlen = 64
+    bsz = 1
+    atol = 1e-1
+    rtol = 1e-1
+
+    def test_per_layer_lrs(self) -> None:
+        model_args_moe = llama3_moe_configs["3B_2layer_halfmoe"]
+        job_config = Llama3MoEJobConfig()
+        lr = 1e-4
+        moe_router_lr = 1e-3
+        routed_expert_lr = 1e-2
+
+        job_config.optimizer.lr = lr
+        job_config.optimizer.moe_router_lr = moe_router_lr
+        job_config.optimizer.routed_expert_lr = routed_expert_lr
+
+        train_spec = train_spec_module.get_train_spec(job_config.model.name)
+        model_moe = Llama3MoE(model_args_moe)
+        optimizers = train_spec.build_optimizers_fn(
+            [model_moe],
+            job_config.optimizer,
+            parallel_dims=None,  # HACK: ok to set to none here.
+            ft_manager=None,
+        )
+        param_groups = optimizers.optimizers[0].param_groups
+        # Not a very detailed test, but good enough.
+        assert len(param_groups) == 3
+        assert set(pg["lr"] for pg in param_groups) == {
+            lr,
+            moe_router_lr,
+            routed_expert_lr,
+        }

@@ -73,6 +73,7 @@ class MoEOverrides:
 @dataclass
 class Llama3MoEOptimizer(Optimizer):
     moe_router_lr: float | None = None
+    routed_expert_lr: float | None = None
 
 
 @dataclass
