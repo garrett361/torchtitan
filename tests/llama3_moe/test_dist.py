@@ -57,7 +57,7 @@ Rabbit with pink eyes ran close by her.
 
 
 class TestHFReader(DTest):
-    hf_assets_path = "/gpfs/goon/models/Llama-3.2-3B-no-tied-weights/"
+    hf_assets_path = "/gpfs/goon/models/Llama-3.2-1B-no-tied-weights/"
     seqlen = 64
     bsz = 1
     tok = AutoTokenizer.from_pretrained(hf_assets_path)
@@ -71,7 +71,7 @@ class TestHFReader(DTest):
         """
         Test e2e equivalence of loading with CustomCheckpointManager.
         """
-        model_args = llama3_moe_configs["3B"]
+        model_args = llama3_moe_configs["1B"]
         job_config = Llama3MoEJobConfig()
         job_config.checkpoint.enable = True
         job_config.checkpoint.initial_load_in_hf = True
@@ -132,8 +132,8 @@ class TestHFReader(DTest):
         """
         Test that Custom loading succeeds with a MoE layer. Uses a truncated model.
         """
-        model_args = llama3_moe_configs["3B_2layer"]
-        model_args_moe = llama3_moe_configs["3B_2layer_halfmoe"]
+        model_args = llama3_moe_configs["1B_2layer"]
+        model_args_moe = llama3_moe_configs["1B_2layer_halfmoe"]
         job_config = Llama3MoEJobConfig()
         job_config.checkpoint.enable = True
         job_config.checkpoint.initial_load_in_hf = True
@@ -226,8 +226,8 @@ class TestHFReader(DTest):
         """
         Test that custom loading succeeds and that virtual group init works.
         """
-        model_args = llama3_moe_configs["3B_2layer"]
-        model_args_moe = llama3_moe_configs["3B_2layer_halfmoe_vg"]
+        model_args = llama3_moe_configs["1B_2layer"]
+        model_args_moe = llama3_moe_configs["1B_2layer_halfmoe_vg"]
         job_config = Llama3MoEJobConfig()
         job_config.checkpoint.enable = True
         job_config.checkpoint.initial_load_in_hf = True
@@ -306,9 +306,9 @@ class TestHFReader(DTest):
     @pytest.mark.parametrize("sharding", ["fsdp", "ep"])
     def test_moe_load_replicate_transform_vg(self, sharding: str) -> None:
         """
-        For inspecting the 3B model with MoE layers.
+        For inspecting the 1B model with MoE layers.
         """
-        model_args = llama3_moe_configs["3B"]
+        model_args = llama3_moe_configs["1B"]
         llama_3b_hidden_dim = 8192
         n_replicas = n_groups = 2
         model_args_moe = deepcopy(model_args)
@@ -416,7 +416,7 @@ class TestHFReader(DTest):
 
 
 class TestImpls(DTest):
-    hf_assets_path = "/gpfs/goon/models/Llama-3.2-3B-no-tied-weights/"
+    hf_assets_path = "/gpfs/goon/models/Llama-3.2-1B-no-tied-weights/"
     seqlen = 64
     bsz = 1
     atol = 1e-1
@@ -431,8 +431,8 @@ class TestImpls(DTest):
         """
         Test that the dense and MoE models have the same output with FFN weight replication.
         """
-        model_args = llama3_moe_configs["3B_2layer"]
-        model_args_moe = llama3_moe_configs["3B_2layer_halfmoe"]
+        model_args = llama3_moe_configs["1B_2layer"]
+        model_args_moe = llama3_moe_configs["1B_2layer_halfmoe"]
         job_config = Llama3MoEJobConfig()
         job_config.checkpoint.enable = True
         job_config.checkpoint.initial_load_in_hf = True
@@ -528,7 +528,7 @@ class TestImpls(DTest):
         Test that the dense and MoE models have the same output with FFN weight replication when
         using virtual group init and any applicable weight transformation strategy.
         """
-        model_args = llama3_moe_configs["3B_2layer"]
+        model_args = llama3_moe_configs["1B_2layer"]
         # Dynamically generate a valid moe cfg for a model with one FFN and one MoE layer.
         llama_3b_hidden_dim = 8192
         model_args_moe = deepcopy(model_args)
@@ -647,7 +647,7 @@ class TestMoENoReshard(DTest):
         """
         Test that the dense and MoE models have the same output with FFN weight replication.
         """
-        model_args_moe = llama3_moe_configs["3B_2layer_halfmoe"]
+        model_args_moe = llama3_moe_configs["1B_2layer_halfmoe"]
         job_config = Llama3MoEJobConfig()
         job_config.moe_overrides.moe_reshard_after_forward = moe_reshard_after_forward
         with torch.device("meta"):
