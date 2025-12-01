@@ -55,7 +55,7 @@ __all__ = [
     "pipeline_llama",
 ]
 
-llama_3p2_3b_rope_cfg = RoPEScalingArgs(
+llama_3p2_1b_3b_rope_cfg = RoPEScalingArgs(
     scaling_factor=32,
     low_freq_factor=1.0,
     high_freq_factor=4.0,
@@ -162,8 +162,10 @@ llama3_moe_configs = {
             score_before_experts=False,
             top_k=2,
         ),
-        rope_scaling_args=llama_3p2_3b_rope_cfg,
+        rope_scaling_args=llama_3p2_1b_3b_rope_cfg,
     ),
+    # NOTE: @goon - the two-layer cfgs are used in
+    # torchtitan/tests/llama3_moe/test_dist.py, do not delete!
     "1B_2layer": Llama3MoEModelArgs(
         dim=2048,
         moe_inter_dim=8192,
@@ -182,34 +184,12 @@ llama3_moe_configs = {
             score_before_experts=False,
             top_k=2,
         ),
-        rope_scaling_args=llama_3p2_3b_rope_cfg,
-    ),
-    "1B_2layer_halfmoe": Llama3MoEModelArgs(
-        dim=2048,
-        moe_inter_dim=8192,
-        n_layers=2,
-        n_heads=32,
-        n_kv_heads=8,
-        ffn_dim_multiplier=1.5,
-        multiple_of=256,
-        rope_theta=500000,
-        moe_args=MoEArgs(
-            num_experts=8,
-            num_shared_experts=0,
-            score_func="softmax",
-            route_norm=True,
-            score_before_experts=False,
-            top_k=2,
-            hf_ffn_hidden_dim=8192,  # Must specify for virtual_group router init!
-        ),
-        is_moe_list=[False, True],
-        custom_moe_impl="virtual_group",  # Must specify for virtual_group router init!
-        rope_scaling_args=llama_3p2_3b_rope_cfg,
+        rope_scaling_args=llama_3p2_1b_3b_rope_cfg,
     ),
     "1B_2layer_halfmoe_vg": Llama3MoEModelArgs(
         dim=2048,
         moe_inter_dim=8192 // 2,  # Two groups per vg  replica
-        n_layers=16,
+        n_layers=2,
         n_heads=32,
         n_kv_heads=8,
         ffn_dim_multiplier=1.5,
@@ -227,7 +207,7 @@ llama3_moe_configs = {
         ),
         is_moe_list=[False, True],
         custom_moe_impl="virtual_group",  # Must specify for virtual_group router init!
-        rope_scaling_args=llama_3p2_3b_rope_cfg,
+        rope_scaling_args=llama_3p2_1b_3b_rope_cfg,
     ),
     # https://huggingface.co/meta-llama/Llama-3.2-3B/blob/main/config.json
     # ffn_dim_multiplier for 8B:
@@ -252,11 +232,8 @@ llama3_moe_configs = {
             score_before_experts=False,
             top_k=2,
         ),
-        rope_scaling_args=llama_3p2_3b_rope_cfg,
+        rope_scaling_args=llama_3p2_1b_3b_rope_cfg,
     ),
-    # NOTE: @goon - the two-layer cfgs are used in
-    # torchtitan/tests/llama3_moe/test_dist.py, do not delete!
-    #
     "3B_2layer": Llama3MoEModelArgs(
         dim=3072,
         moe_inter_dim=8192,
@@ -275,32 +252,9 @@ llama3_moe_configs = {
             score_before_experts=False,
             top_k=2,
         ),
-        rope_scaling_args=llama_3p2_3b_rope_cfg,
+        rope_scaling_args=llama_3p2_1b_3b_rope_cfg,
     ),
     # See VirtualGroupMoE for necessary cfg requirements for virtual_group init.
-    "3B_2layer_halfmoe": Llama3MoEModelArgs(
-        dim=3072,
-        moe_inter_dim=8192,
-        n_layers=2,
-        n_heads=24,
-        n_kv_heads=8,
-        ffn_dim_multiplier=1.0,
-        multiple_of=256,
-        rope_theta=500000,
-        moe_args=MoEArgs(
-            num_experts=4,
-            num_shared_experts=0,
-            score_func="softmax",
-            route_norm=True,
-            score_before_experts=False,
-            top_k=4,
-            route_scale=4,  # Must have route_scale = top_k; see [Virtual Group Initialization].
-            hf_ffn_hidden_dim=8192,  # Must specify for virtual_group router init!
-        ),
-        is_moe_list=[False, True],
-        custom_moe_impl="virtual_group",  # Must specify for virtual_group router init!
-        rope_scaling_args=llama_3p2_3b_rope_cfg,
-    ),
     "3B_2layer_halfmoe_vg": Llama3MoEModelArgs(
         dim=3072,
         moe_inter_dim=8192 // 2,  # Two groups per vg  replica
@@ -322,7 +276,7 @@ llama3_moe_configs = {
         ),
         is_moe_list=[False, True],
         custom_moe_impl="virtual_group",  # Must specify for virtual_group router init!
-        rope_scaling_args=llama_3p2_3b_rope_cfg,
+        rope_scaling_args=llama_3p2_1b_3b_rope_cfg,
     ),
     "8B": Llama3MoEModelArgs(
         dim=4096,
