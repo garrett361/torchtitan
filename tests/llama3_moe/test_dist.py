@@ -376,7 +376,7 @@ class TestImpls(DTest):
         """
         model_args = llama3_moe_configs["1B_2layer"]
         # Dynamically generate a valid moe cfg for a model with one FFN and one MoE layer.
-        llama_3b_hidden_dim = 8192
+        llama_1b_hidden_dim = 8192
         model_args_moe = deepcopy(model_args)
         moe_args = MoEArgs(
             num_experts=n_replicas * n_groups,
@@ -386,10 +386,10 @@ class TestImpls(DTest):
             score_before_experts=False,
             top_k=n_groups,
             route_scale=n_groups,
-            hf_ffn_hidden_dim=llama_3b_hidden_dim,  # Must specify for virtual_group router init!
+            hf_ffn_hidden_dim=llama_1b_hidden_dim,  # Must specify for virtual_group router init!
         )
         model_args_moe.moe_args = moe_args
-        model_args_moe.moe_inter_dim = llama_3b_hidden_dim // n_groups
+        model_args_moe.moe_inter_dim = llama_1b_hidden_dim // n_groups
         model_args_moe.is_moe_list = [True, False]
         model_args_moe.custom_moe_impl = "virtual_group"
 
@@ -493,7 +493,7 @@ class TestMoENoReshard(DTest):
         """
         Test that the dense and MoE models have the same output with FFN weight replication.
         """
-        model_args_moe = llama3_moe_configs["1B_2layer_halfmoe"]
+        model_args_moe = llama3_moe_configs["1B_2layer_halfmoe_vg"]
         job_config = Llama3MoEJobConfig()
         job_config.moe_overrides.moe_reshard_after_forward = moe_reshard_after_forward
         with torch.device("meta"):
