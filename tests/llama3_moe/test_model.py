@@ -19,7 +19,7 @@ from torchtitan.models.llama3_moe import (
     Llama3MoEStateDictAdapter,
 )
 from torchtitan.models.llama3_moe.metrics import MoEHook
-from torchtitan.models.moe import TokenChoiceTopKRouter
+from torchtitan.models.moe import MoE
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 TEST_TEXT = """
@@ -38,8 +38,20 @@ approach tends to complicate methods in ways that make them less suited to takin
 general methods leveraging computation.  There were many examples of AI researchers' belated
 learning of this bitter lesson, and it is instructive to review some of the most prominent.
 """
+
 LLAMA_3B_HF_PATH = "/gpfs/goon/models/Llama-3.2-3B/"
 LLAMA_3B_HF_NO_TIED_PATH = "/gpfs/goon/models/Llama-3.2-3B-no-tied-weights/"
+LLAMA_1B_HF_PATH = "/gpfs/goon/models/Llama-3.2-1B/"
+LLAMA_1B_HF_NO_TIED_PATH = "/gpfs/goon/models/Llama-3.2-1B-no-tied-weights/"
+
+HF_ASSETS_PATHS = {
+    "1B": LLAMA_1B_HF_NO_TIED_PATH,
+    "3B": LLAMA_3B_HF_NO_TIED_PATH,
+}
+HF_PATHS = {
+    "1B": LLAMA_1B_HF_PATH,
+    "3B": LLAMA_3B_HF_PATH,
+}
 
 
 class TestModel:
@@ -53,7 +65,6 @@ class TestModel:
     bsz = 2
     seqlen = 64
     device = "cuda"
-    hf_assets_path = LLAMA_3B_HF_NO_TIED_PATH
 
     def test_model_no_moe(self):
         args = Llama3MoEModelArgs(
@@ -102,13 +113,14 @@ class TestModel:
         # Just testing for no errors:
         model(inputs).sum().backward()
 
-    def test_hf_equivalence(self) -> None:
+    @pytest.mark.parametrize("flavor", ["1B", "3B"], ids=lambda x: f"flavor={x}")
+    def test_hf_equivalence(self, flavor: str) -> None:
         torch.manual_seed(42)
-        model_args = llama3_moe_configs["3B"]
+        model_args = llama3_moe_configs[flavor]
         job_config = Llama3MoEJobConfig()
         job_config.checkpoint.enable = True
         job_config.checkpoint.initial_load_in_hf = True
-        job_config.model.hf_assets_path = self.hf_assets_path
+        job_config.model.hf_assets_path = HF_ASSETS_PATHS[flavor]
         with torch.device("meta"):
             model = Llama3MoE(model_args)
 
@@ -122,7 +134,9 @@ class TestModel:
             "lr_schedulers": None,  # HACK: @goon - ok to set to None for initial load
             "states": {"train_state": self},
             "checkpoint_config": job_config.checkpoint,
-            "sd_adapter": Llama3MoEStateDictAdapter(model_args, self.hf_assets_path),
+            "sd_adapter": Llama3MoEStateDictAdapter(
+                model_args, HF_ASSETS_PATHS[flavor]
+            ),
             "base_folder": "",
             "ft_manager": None,
         }
@@ -130,10 +144,10 @@ class TestModel:
         checkpointer = CheckpointManager(model_parts=[model], **ckpt_kwargs)
         checkpointer.load()
 
-        model_hf = AutoModelForCausalLM.from_pretrained(LLAMA_3B_HF_PATH).to(
+        model_hf = AutoModelForCausalLM.from_pretrained(HF_PATHS[flavor]).to(
             device=self.device
         )
-        tokenizer = AutoTokenizer.from_pretrained(LLAMA_3B_HF_PATH)
+        tokenizer = AutoTokenizer.from_pretrained(HF_PATHS[flavor])
         inputs = tokenizer(TEST_TEXT, return_tensors="pt")
         for k, v in inputs.items():
             inputs[k] = v.cuda()
@@ -204,7 +218,7 @@ class TestHooks:
 
         hooks = []
         for fqn, module in model.named_modules():
-            if isinstance(module, TokenChoiceTopKRouter):
+            if isinstance(module, MoE):
                 hooks.append(MoEHook(module, fqn, parallel_dims=None))
 
         inputs = torch.randint(
@@ -229,7 +243,7 @@ class TestOptim:
     rtol = 1e-1
 
     def test_per_layer_lrs(self) -> None:
-        model_args_moe = llama3_moe_configs["3B_2layer_halfmoe"]
+        model_args_moe = llama3_moe_configs["1B_2layer_halfmoe"]
         job_config = Llama3MoEJobConfig()
         lr = 1e-4
         moe_router_lr = 1e-3

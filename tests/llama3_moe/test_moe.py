@@ -5,9 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 
+import pytest
 import torch
 from einops import rearrange
 
+from torchtitan.models.llama3_moe.model.model import VirtualGroupMoE
 from torchtitan.models.moe import FeedForward, MoE, MoEArgs, MoEOld
 from triton.testing import do_bench
 
@@ -27,7 +29,7 @@ def get_err_ratio(x, y):
 
 def assert_close(prefix, ref, tri, ratio, err_atol=1e-6):
     abs_atol = get_abs_err(ref, tri)
-    msg = f"{prefix:>16} diff: {abs_atol:.6f} ratio: {get_err_ratio(ref, tri):.6f}"
+    msg = f"{prefix:>16} diff: {abs_atol:.6f} ratio: {get_err_ratio(ref, tri):.6f} > {ratio}"
     error_rate = get_err_ratio(ref, tri)
     if abs_atol <= err_atol:
         return
@@ -114,14 +116,13 @@ class TestMoE:
         the same outputs. Accomplished by breaking the FeedForward weights into experts, choosing
         top_k = num_shared_experts, and ensuring that the router gives every expert weight 1.
         """
-        top_k = 4
         moe_args = MoEArgs(
             num_experts=self.num_experts,
             num_shared_experts=0,
             score_func="softmax",
             route_norm=True,
             score_before_experts=False,
-            top_k=self.num_experts,
+            top_k=self.num_experts,  # Route to all experts, for equivalence.
             route_scale=self.num_experts,  # Required for equivalence
             use_grouped_mm=self.use_grouped_mm,
         )
@@ -159,6 +160,51 @@ class TestMoE:
                 p2.data.copy_(p.data)
 
         return moe_old, moe, ffn
+
+    def _get_equiv_vg_ffn_layers(
+        self, n_replicas: int, n_groups: int
+    ) -> tuple[VirtualGroupMoE, FeedForward]:
+        """
+        Create equivalent VirtualGroupMoE, FeedForward layers.
+        """
+        num_experts = n_replicas * n_groups
+        ffn_hidden_dim = self.moe_inter_dim * n_groups
+        moe_args = MoEArgs(
+            num_experts=num_experts,
+            num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
+            top_k=n_groups,  # Route to a fulll replica
+            route_scale=n_groups,  # Required for equivalence
+            use_grouped_mm=self.use_grouped_mm,
+            hf_ffn_hidden_dim=ffn_hidden_dim,
+        )
+        moe_vg = VirtualGroupMoE(
+            moe_args, dim=self.dim, hidden_dim=self.moe_inter_dim
+        ).to(device=self.device, dtype=torch.bfloat16)
+        ffn = FeedForward(dim=self.dim, hidden_dim=ffn_hidden_dim).to(
+            device=self.device, dtype=torch.bfloat16
+        )
+
+        moe_vg.init_weights(1 / self.dim**0.5, self.device)
+        ffn.init_weights(1 / self.dim**0.5)
+
+        with torch.no_grad():
+            ffn_w1_experts = rearrange(ffn.w1.weight, "(e h) d -> e h d", e=n_groups)
+            ffn_w2_experts = rearrange(ffn.w2.weight, "d (e h) -> e d h", e=n_groups)
+            ffn_w3_experts = rearrange(ffn.w3.weight, "(e h) d -> e h d", e=n_groups)
+            moe_vg.experts.w1.data.copy_(
+                torch.cat([ffn_w1_experts for _ in range(n_replicas)], dim=0)
+            )
+            moe_vg.experts.w2.data.copy_(
+                torch.cat([ffn_w2_experts for _ in range(n_replicas)], dim=0)
+            )
+            moe_vg.experts.w3.data.copy_(
+                torch.cat([ffn_w3_experts for _ in range(n_replicas)], dim=0)
+            )
+
+        return moe_vg, ffn
 
     def test_moe_old_moe_equivalence(
         self, score_before_experts: bool = True
@@ -231,6 +277,27 @@ class TestMoE:
             moe_old_rel_err = get_err_ratio(out_ffn, out_moe_old)
             moe_rel_err = get_err_ratio(out_ffn, out_moe)
             return moe_old_rel_err, moe_rel_err
+
+    @pytest.mark.parametrize(
+        "n_replicas", [1, 2, 4, 8], ids=lambda x: f"n_replicas={x}"
+    )
+    @pytest.mark.parametrize("n_groups", [2, 4, 8, 16], ids=lambda x: f"n_groups={x}")
+    def test_moe_vg_ffn_equivalence(self, n_replicas: int, n_groups: int) -> None:
+        torch.manual_seed(42)
+        moe_vg, ffn = self._get_equiv_vg_ffn_layers(
+            n_replicas=n_replicas, n_groups=n_groups
+        )
+        with torch.no_grad():
+            inputs = torch.randn(
+                self.bsz,
+                self.seqlen,
+                self.dim,
+                device=self.device,
+                dtype=torch.bfloat16,
+            )
+            out_vg = moe_vg(inputs)
+            out_ffn = ffn(inputs)
+            assert_close("moe_vg vs ffn", out_ffn, out_vg, self.assert_close_ratio)
 
     def test_perf(
         self, bsz: int | None = None, seqlen: int | None = None
