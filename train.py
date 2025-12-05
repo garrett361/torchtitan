@@ -12,6 +12,7 @@ from datetime import timedelta
 import torch
 import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
+import torch.distributions as distributions
 from torch.distributed import DeviceMesh
 
 from torch.distributed.elastic.multiprocessing.errors import record
@@ -361,6 +362,7 @@ def main(job_config: JobConfig):
     # variables used to keep info for metrics logging
     losses_since_last_log = []
     gnorms_since_last_log = []
+    entropy_since_last_log = []
     nexamples_seen = 0
     ntokens_seen = 0
     npred_tokens_seen = 0
@@ -476,21 +478,32 @@ def main(job_config: JobConfig):
                 # Non-PP forward / backward
                 with train_context(optional_context_parallel_ctx):
                     if job_config.training.debug:
-                        # TODO: @goon - DELETE
                         print(
                             f"CP: {parallel_dims.cp_enabled=} {input_ids.shape=} {labels.shape=} {model.freqs_cis.shape=}"
                         )
-                        # print(f"CP: {input_ids.to_local().shape=} {labels.to_local().shape=} {model.to_local().freqs_cis.shape=}")
                     pred = model(input_ids)
+                    flat_pred = pred.view(-1, pred.size(-1))
+                    flat_input_ids = input_ids.reshape(-1).long()
+                    with torch.no_grad():
+                        flat_pred_not_masked = flat_pred[flat_input_ids != -100].detach()
+                        entropy_pred_tok_sum = (
+                            distributions.Categorical(logits=flat_pred_not_masked).entropy().sum()
+                        )
+
+
                     loss = (
                         loss_fn(pred, labels)
                         / job_config.training.gradient_accumulation_steps
                     )
                     # need to free to before bwd to avoid peaking memory
                     del pred
+                    del flat_pred
+                    del flat_pred_not_masked
+                    del flat_input_ids
                     loss.backward()
 
             losses_since_last_log.append(loss.detach().clone())
+            entropy_since_last_log.append(entropy_pred_tok_sum.detach().clone())
             # sync float8 amaxes and scales
             float8_handler.sync_float8_amax_and_scale_history(model_parts)
 
@@ -540,6 +553,7 @@ def main(job_config: JobConfig):
                     * job_config.training.gradient_accumulation_steps,
                     max(losses),
                 )
+                entropy_sum = sum(entropy.item() for entropy in entropy_since_last_log)
                 gnorms = [gnorm.item() for gnorm in gnorms_since_last_log]
                 avg_gnorm = sum(gnorms) / len(gnorms)
                 if parallel_dims.dp_enabled:
@@ -548,9 +562,11 @@ def main(job_config: JobConfig):
                         utils.dist_max(max_loss, dp_mesh),
                     )
                     global_avg_gnorm = utils.dist_mean(avg_gnorm, dp_mesh)
+                    global_entropy_sum = utils.dist_sum(entropy_sum, dp_mesh)
                 else:
                     global_avg_loss, global_max_loss = avg_loss, max_loss
                     global_avg_gnorm = avg_gnorm
+                    global_entropy_sum = entropy_sum
 
                 # update train state
                 train_state.log_steps.append(train_state.step)
@@ -600,6 +616,7 @@ def main(job_config: JobConfig):
                 avg_gnorm_per_pred_token = (
                     global_avg_gnorm / avg_pred_tok_per_optim_step_per_gpu
                 )
+                avg_entropy_per_pred_tok = global_entropy_sum / new_pred_tokens_seen
 
                 examples_per_optim_step = new_examples_seen / new_optim_steps
                 tokens_per_optim_step = new_tokens_seen / new_optim_steps
@@ -651,6 +668,7 @@ def main(job_config: JobConfig):
                     wandb_metrics = {
                         "loss": global_avg_loss,
                         "loss_per_token": avg_loss_per_token,
+                        "entropy per pred token": avg_entropy_per_pred_tok,
                         "loss_per_pred_token": avg_loss_per_pred_token,
                         "examples_per_step": examples_per_optim_step,
                         "tokens_per_step": tokens_per_optim_step,
@@ -686,6 +704,7 @@ def main(job_config: JobConfig):
                 logger.info(
                     f"\n{color.cyan}optim step: {optim_step_idx:2}  "
                     f"{color.green}loss: {global_avg_loss:7.4f}  "
+                    f"{color.red}entropy/pred_oken: {avg_entropy_per_pred_tok:7.4f}  "
                     f"{color.magenta}loss_per_token: {avg_loss_per_token:7.4f}  "
                     f"{color.white}loss_per_pred_token: {avg_loss_per_pred_token:7.4f}  "
                     f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
@@ -710,6 +729,7 @@ def main(job_config: JobConfig):
 
                 losses_since_last_log.clear()
                 gnorms_since_last_log.clear()
+                entropy_since_last_log.clear()
                 # The global number of tokens, pred tokens, etc seen across the world:
                 ntokens_seen = curr_tokens_seen
                 npred_tokens_seen = curr_pred_tokens_seen

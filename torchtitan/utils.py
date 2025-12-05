@@ -43,6 +43,10 @@ def dist_mean(x: Union[int, float], mesh: DeviceMesh) -> float:
     tensor = torch.tensor(x).to(device_type)
     return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.AVG.name, group=mesh).item()
 
+def dist_sum(x: Union[int, float], mesh: DeviceMesh) -> float:
+    tensor = torch.tensor(x).to(device_type)
+    return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.SUM.name, group=mesh).item()
+
 
 def _warn_overwrite_env(env, val):
     if env in os.environ:
