@@ -11,7 +11,6 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
-import torch.nn as nn
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module

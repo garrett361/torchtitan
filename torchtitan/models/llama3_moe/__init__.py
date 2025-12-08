@@ -42,6 +42,7 @@ from torchtitan.protocols.train_spec import TrainSpec
 __all__ = [
     "CustomCheckpointManager",
     "CustomMetricsProcessor",
+    "apply_custom_init",
     "Llama3MoE",
     "Llama3MoEJobConfig",
     "Llama3MoEModelArgs",
