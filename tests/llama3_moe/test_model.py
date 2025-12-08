@@ -8,20 +8,20 @@
 import pytest
 import torch
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.models.llama3_moe import (
+    apply_custom_init,
+    llama3_moe_configs,
     Llama3MoE,
     Llama3MoEJobConfig,
     Llama3MoEModelArgs,
     Llama3MoEStateDictAdapter,
-    apply_custom_init,
-    llama3_moe_configs,
 )
 from torchtitan.models.llama3_moe.metrics import MoEHook
 from torchtitan.models.moe import MoE
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 TEST_TEXT = """
 The biggest lesson that can be read from 70 years of AI research is that general methods that leverage

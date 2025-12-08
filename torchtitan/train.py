@@ -14,7 +14,6 @@ import torch
 import torch.nn as nn
 from torch.distributed.elastic.multiprocessing.errors import record
 
-from torchtitan.models.llama3_moe.model.model import apply_custom_init
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager, ModelWrapper
 from torchtitan.components.dataloader import DataloaderExhaustedError
@@ -24,18 +23,19 @@ from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
 )
-from torchtitan.config import TORCH_DTYPE_MAP, ConfigManager
+from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import JobConfig
-from torchtitan.distributed import ParallelDims
-from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.models.attention import init_attention_mask
 from torchtitan.models.llama3_moe import (
     CustomCheckpointManager,
-    TransformingHuggingFaceStorageReader,
     get_hf_weight_transform_cls,
+    TransformingHuggingFaceStorageReader,
 )
 from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
 from torchtitan.models.llama3_moe.metrics import CustomMetricsProcessor, MoEHook
+
+from torchtitan.models.llama3_moe.model.model import apply_custom_init
 from torchtitan.models.llama3_moe.top_k_scheduler import get_top_k_scheduler
 from torchtitan.models.moe import MoE
 from torchtitan.protocols.model_converter import build_model_converters
@@ -275,7 +275,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 apply_custom_init(m, job_config)
 
                 m.train()
-
 
             # confirm that user will be able to view loss metrics on the console
             ensure_pp_loss_visible(parallel_dims, job_config, color)
@@ -677,8 +676,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 )
 
                 # Run validation if validator is available
-                if self.job_config.validation.enable and self.validator.should_validate(
-                    self.step
+                if (
+                    self.job_config.validation.enable
+                    and self.validator.should_validate(self.step)
                 ):
                     with self.loss_fn.no_rescale():
                         self.validator.validate(self.model_parts, self.step)
@@ -738,12 +738,12 @@ if __name__ == "__main__":
         trainer = Trainer(config)
 
         if config.checkpoint.create_seed_checkpoint:
-            assert int(os.environ["WORLD_SIZE"]) == 1, (
-                "Must create seed checkpoint using a single device, to disable sharding."
-            )
-            assert config.checkpoint.enable, (
-                "Must enable checkpointing when creating a seed checkpoint."
-            )
+            assert (
+                int(os.environ["WORLD_SIZE"]) == 1
+            ), "Must create seed checkpoint using a single device, to disable sharding."
+            assert (
+                config.checkpoint.enable
+            ), "Must enable checkpointing when creating a seed checkpoint."
             trainer.checkpointer.save(curr_step=0, last_step=True)
             logger.info("Created seed checkpoint")
         else:
