@@ -11,7 +11,6 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
-import torch.nn as nn
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
@@ -34,6 +33,8 @@ from torchtitan.models.llama3_moe import (
 )
 from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
 from torchtitan.models.llama3_moe.metrics import CustomMetricsProcessor, MoEHook
+
+from torchtitan.models.llama3_moe.model.model import apply_custom_init
 from torchtitan.models.llama3_moe.top_k_scheduler import get_top_k_scheduler
 from torchtitan.models.moe import MoE
 from torchtitan.protocols.model_converter import build_model_converters
@@ -268,19 +269,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 m.to_empty(device=init_device)
                 with torch.no_grad():
                     m.init_weights(buffer_device=buffer_device)
+
+                # Custom init, e.g. for router std
+                apply_custom_init(m, job_config)
+
                 m.train()
-                if (
-                    moe_overrides is not None
-                    and (std := moe_overrides.router_init_std) is not None
-                ):
-                    logger.info(f"Intializing router weights with {std=}")
-                    for maybe_moe in model.modules():
-                        if isinstance(maybe_moe, MoE):
-                            nn.init.trunc_normal_(maybe_moe.router.gate.weight, std=std)
-                            if hasattr(maybe_moe, "post_init"):
-                                # Ensure that any post-init steps are handled, e.g. for virtual group
-                                # init.
-                                maybe_moe.post_init()
 
             # confirm that user will be able to view loss metrics on the console
             ensure_pp_loss_visible(parallel_dims, job_config, color)
@@ -291,18 +284,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             model.to_empty(device=init_device)
             with torch.no_grad():
                 model.init_weights(buffer_device=buffer_device)
-            if (
-                moe_overrides is not None
-                and (std := moe_overrides.router_init_std) is not None
-            ):
-                logger.info(f"Intializing router weights with {std=}")
-                for maybe_moe in model.modules():
-                    if isinstance(maybe_moe, MoE):
-                        nn.init.trunc_normal_(maybe_moe.router.gate.weight, std=std)
-                        if hasattr(maybe_moe, "post_init"):
-                            # Ensure that any post-init steps are handled, e.g. for virtual group
-                            # init.
-                            maybe_moe.post_init()
+            # Custom init, e.g. for router std
+            apply_custom_init(m, job_config)
+
             model.train()
 
             self.model_parts = [model]

@@ -27,7 +27,11 @@ from torchtitan.models.llama3_moe.metrics import (
     CustomMetricsProcessor,
 )
 from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs, RoPEScalingArgs
-from torchtitan.models.llama3_moe.model.model import Llama3MoE, VirtualGroupMoE
+from torchtitan.models.llama3_moe.model.model import (
+    apply_custom_init,
+    Llama3MoE,
+    VirtualGroupMoE,
+)
 from torchtitan.models.llama3_moe.model.state_dict_adapter import (
     Llama3MoEStateDictAdapter,
 )
@@ -38,6 +42,7 @@ from torchtitan.protocols.train_spec import TrainSpec
 __all__ = [
     "CustomCheckpointManager",
     "CustomMetricsProcessor",
+    "apply_custom_init",
     "Llama3MoE",
     "Llama3MoEJobConfig",
     "Llama3MoEModelArgs",

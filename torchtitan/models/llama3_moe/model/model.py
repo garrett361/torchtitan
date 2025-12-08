@@ -14,6 +14,7 @@ from einops import rearrange
 from torch import nn
 
 from torchtitan.models.llama3.model.model import Attention, FeedForward
+from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
 from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs, RoPEScalingArgs
 from torchtitan.models.moe import MoE, MoEArgs
 from torchtitan.protocols.train_spec import ModelProtocol
@@ -587,3 +588,24 @@ class Llama3MoE(nn.Module, ModelProtocol):
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h
         return output
+
+
+@torch.no_grad
+def apply_custom_init(model: Llama3MoE, job_config: Llama3MoEJobConfig) -> None:
+    if not isinstance(model, Llama3MoE):
+        raise ValueError(f"{model=} is not a Llama3MoE instance.")
+    if not isinstance(job_config, Llama3MoEJobConfig):
+        raise ValueError(f"{job_config=} is not a Llama3MoEJobConfig instance")
+    if (
+        job_config.moe_overrides is not None
+        and (std := job_config.moe_overrides.router_init_std) is not None
+    ):
+        logger.info(f"Intializing router weights with {std=}")
+        for maybe_moe in model.modules():
+            if isinstance(maybe_moe, MoE):
+                logger.info(f"Setting {maybe_moe} router gate weight {std=}")
+                nn.init.trunc_normal_(maybe_moe.router.gate.weight, std=std)
+                if hasattr(maybe_moe, "post_init"):
+                    # Ensure that any post-init steps are handled, e.g. for virtual group
+                    # init.
+                    maybe_moe.post_init()

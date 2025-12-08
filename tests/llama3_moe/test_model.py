@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.models.llama3_moe import (
+    apply_custom_init,
     llama3_moe_configs,
     Llama3MoE,
     Llama3MoEJobConfig,
@@ -188,6 +189,28 @@ class TestModel:
             model = Llama3MoE(args)
         moe_enabled_list = [l.moe_enabled for l in model.layers.values()]
         assert moe_enabled_list == [False, True, True, False]
+
+    def test_model_router_init(self):
+        job_config = Llama3MoEJobConfig()
+        job_config.moe_overrides.router_init_std = 1.0
+        args = Llama3MoEModelArgs(
+            dim=self.dim,
+            moe_inter_dim=self.moe_inter_dim,
+            n_layers=self.n_layers,
+            n_heads=self.n_heads,
+            vocab_size=self.vocab_size,
+            is_moe_list=[True for _ in range(self.n_layers)],
+        )
+        args.moe_args.load_balance_coeff = 1e-4
+        args.moe_args.n_expert_groups = 2
+        model = Llama3MoE(args)
+        model.init_weights()
+
+        before_std = model.layers["0"].moe.router.gate.weight.std()
+        apply_custom_init(model, job_config)
+        after_std = model.layers["0"].moe.router.gate.weight.std()
+
+        assert not torch.isclose(before_std, after_std)
 
 
 class TestHooks:
