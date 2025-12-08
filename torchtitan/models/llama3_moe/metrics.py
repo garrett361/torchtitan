@@ -80,13 +80,13 @@ class CustomMetricsProcessor(MetricsProcessor):
                 if not transformer_block.moe_enabled:
                     continue
                 moe_metrics[
-                    f"moe_entropy/layer_{block_idx}"
+                    f"moe_entropy/layers.{block_idx}"
                 ] = self.get_normalized_entropy(transformer_block)
                 if (
                     n_expert_groups := model_part.model_args.moe_args.n_expert_groups
                 ) > 1:
                     moe_metrics[
-                        f"moe_group_entropy/layer_{block_idx}"
+                        f"moe_group_entropy/layers.{block_idx}"
                     ] = self.get_expert_group_normalized_group_entropy(
                         transformer_block, n_expert_groups
                     )
@@ -95,18 +95,18 @@ class CustomMetricsProcessor(MetricsProcessor):
                         transformer_block
                     ).items():
                         moe_metrics[
-                            f"moe_replica/layer_{block_idx} replica_{replica_idx} frac"
+                            f"moe_replica/layers.{block_idx} replica_{replica_idx} frac"
                         ] = frac
                 # Reset
                 transformer_block.moe.tokens_per_expert_cumulative.zero_()
                 router_weight = transformer_block.moe.router.gate.weight
                 if isinstance(router_weight, DTensor):
                     router_weight = router_weight.full_tensor()
-                moe_metrics[f"moe_router_weight/layer_{block_idx} abs mean"] = (
+                moe_metrics[f"moe_router_weight/layers.{block_idx} abs mean"] = (
                     router_weight.abs().mean().item()
                 )
                 moe_metrics[
-                    f"moe_router_weight/layer_{block_idx} std"
+                    f"moe_router_weight/layers.{block_idx} std"
                 ] = router_weight.std().item()
 
         for hook in self.hooks:
