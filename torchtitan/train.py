@@ -285,7 +285,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with torch.no_grad():
                 model.init_weights(buffer_device=buffer_device)
             # Custom init, e.g. for router std
-            apply_custom_init(m, job_config)
+            apply_custom_init(model, job_config)
 
             model.train()
 
