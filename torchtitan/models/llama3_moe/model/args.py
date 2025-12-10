@@ -95,7 +95,7 @@ class Llama3MoEModelArgs(BaseModelArgs):
             )
 
         if (
-            getattr(self, "is_moe_list") is not None
+            getattr(self, "is_moe_list", None) is not None
             and len(self.is_moe_list) != self.n_layers
         ):
             raise ValueError(
