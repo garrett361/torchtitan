@@ -8,6 +8,7 @@
 
 
 import math
+import warnings
 
 import torch
 from einops import rearrange
@@ -592,10 +593,13 @@ class Llama3MoE(nn.Module, ModelProtocol):
 
 @torch.no_grad
 def apply_custom_init(model: Llama3MoE, job_config: Llama3MoEJobConfig) -> None:
-    if not isinstance(model, Llama3MoE):
-        raise ValueError(f"{model=} is not a Llama3MoE instance.")
-    if not isinstance(job_config, Llama3MoEJobConfig):
-        raise ValueError(f"{job_config=} is not a Llama3MoEJobConfig instance")
+    if not isinstance(model, Llama3MoE) or not isinstance(
+        job_config, Llama3MoEJobConfig
+    ):
+        warnings.warn(
+            f"Skipping custom init, {model=} and {job_config=} are not for llama3 moe modelsj "
+        )
+        return
     if (
         job_config.moe_overrides is not None
         and (std := job_config.moe_overrides.router_init_std) is not None
