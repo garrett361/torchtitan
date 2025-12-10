@@ -85,6 +85,20 @@ llama3_moe_configs = {
         ),
         is_moe_list=[False for _ in range(6)],
     ),
+    "debugmodel_full_vocab": Llama3MoEModelArgs(
+        dim=256,
+        n_layers=6,
+        n_heads=16,
+        rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=1,
+            num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
+        ),
+        is_moe_list=[False for _ in range(6)],
+    ),
     "debugmodel_1exp": Llama3MoEModelArgs(
         dim=256,
         moe_inter_dim=1024,
