@@ -12,6 +12,7 @@ from typing import Any, Generator, Iterable, Optional
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed as dist
 
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager, ModelWrapper
@@ -530,7 +531,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred
+                dist.barrier()
+                logger.info(f"FINISHED FORWARD {self.step=}")
                 loss.backward()
+                dist.barrier()
+                logger.info(f"FINISHED BACKWARD {self.step=}")
 
         return loss
 
