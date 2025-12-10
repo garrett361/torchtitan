@@ -47,7 +47,7 @@ _op_sac_save_list = {
 # Adapted from deepseek_v3/infra/parallelize.py
 
 
-# TODO: @goon - check whas is different here, just import if possible
+# TODO: @goon - check what is different here, just import if possible
 def parallelize_llama_moe(
     model: nn.Module,
     parallel_dims: ParallelDims,
@@ -184,6 +184,10 @@ def parallelize_llama_moe(
         )
 
     return model
+
+# DELETE: hack for testing parllel impls
+from torchtitan.models.llama3.infra.parallelize import parallelize_llama
+parallelize_llama_moe = parallelize_llama
 
 
 def apply_non_moe_tp(
