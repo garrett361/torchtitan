@@ -69,6 +69,22 @@ llama_3p2_1b_3b_rope_cfg = RoPEScalingArgs(
 
 
 llama3_moe_configs = {
+    # As close to as llama3 debugmodel as possible
+    "debugmodel": Llama3MoEModelArgs(
+        dim=256,
+        n_layers=6,
+        n_heads=16,
+        vocab_size=2048,
+        rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=1,
+            num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
+        ),
+        is_moe_list=[False for _ in range(6)],
+    ),
     "debugmodel_1exp": Llama3MoEModelArgs(
         dim=256,
         moe_inter_dim=1024,
