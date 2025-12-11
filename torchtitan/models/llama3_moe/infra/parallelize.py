@@ -92,6 +92,7 @@ def parallelize_llama_moe(
                 "Currently, float8 tensorwise TP is not supported for llama-3-moe"
             )
 
+        logger.info("Calling apply_non_moe_tp")
         apply_non_moe_tp(
             model,
             world_mesh["tp"],
@@ -101,6 +102,7 @@ def parallelize_llama_moe(
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        logger.info("Calling apply_moe_ep_tp")
         apply_moe_ep_tp(
             model,
             tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
@@ -120,6 +122,7 @@ def parallelize_llama_moe(
     )
 
     if job_config.activation_checkpoint.mode != "none":
+        logger.info("Calling apply_ac")
         apply_ac(
             model,
             job_config.activation_checkpoint,
@@ -129,6 +132,7 @@ def parallelize_llama_moe(
         )
 
     if model_compile_enabled:
+        logger.info("Calling apply_compile")
         apply_compile(model, job_config.compile)
 
     dp_mesh: DeviceMesh | None = None
@@ -150,6 +154,7 @@ def parallelize_llama_moe(
         # DELETE
         from torchtitan.models.llama3.infra.parallelize import apply_fsdp
 
+        logger.info("Calling apply_fsdp")
         apply_fsdp(
             model,
             world_mesh[tuple(dp_mesh_dim_names)],
@@ -191,6 +196,7 @@ def parallelize_llama_moe(
         if world_mesh.ndim > 1:
             raise RuntimeError("DDP has not supported > 1D parallelism")
         dp_mesh = world_mesh
+        logger.info("Calling apply_ddp")
         apply_ddp(
             model,
             dp_mesh,
