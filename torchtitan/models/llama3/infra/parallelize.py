@@ -83,6 +83,7 @@ def parallelize_llama(
         # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
+        logger.info("Calling apply_tp")
         apply_tp(
             model,
             world_mesh["tp"],
@@ -96,6 +97,7 @@ def parallelize_llama(
     )
 
     if job_config.activation_checkpoint.mode != "none":
+        logger.info("Calling apply_cp")
         apply_ac(
             model,
             job_config.activation_checkpoint,
@@ -106,6 +108,7 @@ def parallelize_llama(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
+        logger.info("Calling apply_compile")
         apply_compile(model, job_config.compile)
 
     if parallel_dims.fsdp_enabled:
@@ -115,6 +118,7 @@ def parallelize_llama(
         else:
             dp_mesh_dim_names = ("dp_shard_cp",)
 
+        logger.info("Calling apply_fsdp")
         apply_fsdp(
             model,
             world_mesh[tuple(dp_mesh_dim_names)],
@@ -138,6 +142,7 @@ def parallelize_llama(
     elif parallel_dims.dp_replicate_enabled:
         if world_mesh.ndim > 1:
             raise RuntimeError("DDP has not supported > 1D parallelism")
+        logger.info("Calling apply_ddp")
         apply_ddp(
             model,
             world_mesh,

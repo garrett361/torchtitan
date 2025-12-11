@@ -53,9 +53,9 @@ def parallelize_llama_moe(
     parallel_dims: ParallelDims,
     job_config: Llama3MoEJobConfig,
 ):
-    # # DELETE: hack for testing parllel impls
-    # from torchtitan.models.llama3.infra.parallelize import parallelize_llama
-    # return parallelize_llama(model, parallel_dims, job_config)
+    # DELETE: hack for testing parllel impls
+    from torchtitan.models.llama3.infra.parallelize import parallelize_llama
+    return parallelize_llama(model, parallel_dims, job_config)
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data
     parallelism to the model.
