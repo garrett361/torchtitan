@@ -97,7 +97,7 @@ def parallelize_llama(
     )
 
     if job_config.activation_checkpoint.mode != "none":
-        logger.info("Calling apply_cp")
+        logger.info("Calling apply_ac")
         apply_ac(
             model,
             job_config.activation_checkpoint,
