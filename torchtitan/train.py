@@ -12,6 +12,7 @@ from typing import Any, Generator, Iterable, Optional
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
+import torch.distributed as dist
 
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager, ModelWrapper
@@ -22,14 +23,21 @@ from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
 )
-from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
+from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.models.attention import init_attention_mask
 from torchtitan.models.llama3_moe import (
     CustomCheckpointManager,
-    ReplicateMoETransform,
+    get_hf_weight_transform_cls,
     TransformingHuggingFaceStorageReader,
 )
+from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
+from torchtitan.models.llama3_moe.metrics import CustomMetricsProcessor, MoEHook
+
+from torchtitan.models.llama3_moe.model.model import apply_custom_init
+from torchtitan.models.llama3_moe.top_k_scheduler import get_top_k_scheduler
+from torchtitan.models.moe import MoE
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -78,6 +86,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         torch._C._log_api_usage_once("torchtitan.train")
 
         self.job_config = job_config
+        moe_overrides = getattr(job_config, "moe_overrides", None)
 
         logger.info(f"Starting job: {job_config.job.description}")
 
@@ -261,6 +270,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 m.to_empty(device=init_device)
                 with torch.no_grad():
                     m.init_weights(buffer_device=buffer_device)
+
+                # Custom init, e.g. for router std
+                apply_custom_init(m, job_config)
+
                 m.train()
 
             # confirm that user will be able to view loss metrics on the console
@@ -272,6 +285,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             model.to_empty(device=init_device)
             with torch.no_grad():
                 model.init_weights(buffer_device=buffer_device)
+            # Custom init, e.g. for router std
+            apply_custom_init(model, job_config)
+
             model.train()
 
             self.model_parts = [model]
@@ -308,6 +324,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         self.metrics_processor.optimizers = self.optimizers
         self.metrics_processor.model_parts = self.model_parts
+        if moe_overrides is not None:
+            if moe_overrides.moe_hooks:
+                for mp in self.model_parts:
+                    for fqn, module in mp.named_modules():
+                        if isinstance(module, MoE):
+                            assert isinstance(
+                                self.metrics_processor, CustomMetricsProcessor
+                            )
+                            self.metrics_processor.hooks.append(
+                                MoEHook(module, fqn, parallel_dims)
+                            )
 
         # Initialize trainer states that will be saved in checkpoint.
         # These attributes must be initialized before checkpoint loading.
@@ -321,10 +348,25 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             if self.train_spec.state_dict_adapter
             else None
         )
+
+        states = {"train_state": self}
+        self.top_k_scheduler = (
+            get_top_k_scheduler(
+                model_args=model_args,
+                top_k_args=job_config.top_k_args,
+                model_parts=self.model_parts,
+            )
+            if isinstance(job_config, Llama3MoEJobConfig)
+            else None
+        )
+        if self.top_k_scheduler is not None:
+            states["self.top_k_scheduler"] = self.top_k_scheduler
         self.checkpointer = CustomCheckpointManager(
             hf_storage_reader=TransformingHuggingFaceStorageReader,
             hf_storage_reader_kwargs={
-                "transform_fn": ReplicateMoETransform(
+                "transform_fn": get_hf_weight_transform_cls(
+                    job_config.custom_args.hf_weight_transform
+                )(
                     model_args=self.model_args,
                     hf_to_titan_fqn_map=sd_adapter.from_hf_map,
                 ),
@@ -335,7 +377,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            states={"train_state": self},
+            states=states,
             checkpoint_config=job_config.checkpoint,
             sd_adapter=sd_adapter,
             base_folder=job_config.job.dump_folder,
@@ -432,6 +474,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         parallel_dims = self.parallel_dims
 
         inputs = input_dict["input"]
+        print(f"{inputs.max()=}")
         extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
         # Create the FlexAttention mask according to the input
         if getattr(self.model_args, "use_flex_attn", False):
@@ -489,7 +532,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred
+                dist.barrier()
+                logger.info(f"FINISHED FORWARD {self.step=}")
                 loss.backward()
+                dist.barrier()
+                logger.info(f"FINISHED BACKWARD {self.step=}")
 
         return loss
 
@@ -528,6 +575,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Reduce the data collected over gradient accumulation steps.
         loss = torch.sum(torch.stack(accumulated_losses))
 
+        # NOTE: @goon - we're now reducing the loss every step because we want the top_k_scheduler to see the
+        # same loss on every rank, which is sub-optimal for perf.
+        if parallel_dims.dp_cp_enabled:
+            loss = loss.detach()
+            ft_pg = self.ft_manager.loss_sync_pg
+            global_avg_loss = dist_utils.dist_mean(
+                loss, parallel_dims.world_mesh["dp_cp"], ft_pg
+            )
+        else:
+            global_avg_loss = global_max_loss = loss.detach().item()
+
+        if self.top_k_scheduler is not None:
+            self.top_k_scheduler.step(global_avg_loss)
+
         # log metrics
         if not self.metrics_processor.should_log(self.step):
             return
@@ -535,8 +596,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
             ft_pg = self.ft_manager.loss_sync_pg
-            global_avg_loss, global_max_loss, global_ntokens_seen = (
-                dist_utils.dist_mean(loss, parallel_dims.world_mesh["dp_cp"], ft_pg),
+            global_max_loss, global_ntokens_seen = (
                 dist_utils.dist_max(loss, parallel_dims.world_mesh["dp_cp"], ft_pg),
                 dist_utils.dist_sum(
                     torch.tensor(
@@ -547,13 +607,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 ),
             )
         else:
-            global_avg_loss = global_max_loss = loss.detach().item()
             global_ntokens_seen = self.ntokens_seen
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
         }
+        if self.top_k_scheduler is not None:
+            for layer_idx, top_k in self.top_k_scheduler.layer_idx_to_top_k.items():
+                extra_metrics[f"top_k/layer_{layer_idx}"] = top_k
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
@@ -667,7 +729,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
 if __name__ == "__main__":
     init_logger()
-    config_manager = ConfigManager()
+    # NOTE: @goon - specifying our custom class as the config_cls allows us to specify all
+    # Llama3MoEJobConfig fields we add via cli/toml cfg.
+    config_manager = ConfigManager(config_cls=Llama3MoEJobConfig)
     config = config_manager.parse_args()
     trainer: Optional[Trainer] = None
 

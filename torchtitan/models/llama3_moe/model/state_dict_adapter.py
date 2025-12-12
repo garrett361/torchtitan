@@ -4,22 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import logging
 from typing import Any
-from warnings import warn
 
-from torchtitan.distributed import utils as dist_utils
-from torchtitan.models.llama3_moe.model.args import TransformerModelArgs
+from torchtitan.models.llama3_moe.model.args import Llama3MoEModelArgs
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
-
-logger = logging.getLogger()
+from torchtitan.tools.logging import logger, warn_once
 
 
 # Modified from Llama3StateDictAdapter
 class Llama3MoEStateDictAdapter(StateDictAdapter):
     def __init__(
         self,
-        model_args: TransformerModelArgs,
+        model_args: Llama3MoEModelArgs,
         hf_assets_path: str | None,
     ):
         super().__init__(model_args, hf_assets_path)
@@ -76,7 +72,6 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
                     self.from_hf_map[
                         f"model.layers.{layer_idx}.{hf_name}.weight"
                     ] = f"layers.{layer_idx}.{titan_name}.weight"
-            dist_utils.rank_zero_print(f"{self.from_hf_map=}")
 
     # HuggingFace permutation function (exact copy from their conversion script)
     def _permute(self, w, n_heads_arg, dim1=None, dim2=None):
@@ -108,7 +103,8 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
         conventions, possibly also changing tensor layouts, if necessary.
 
         Only used when loading from or saving to an HF ckpt (dcp_load,{save}) and in a conversion
-        utility script.
+        utility script. NOTE: @goon - we will need separate versions of this function for weight
+        loading and HF ckpt saving at some point.
         """
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
@@ -122,13 +118,11 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
         head_dim = dim // n_heads
         hf_state_dict = {}
 
+        missing_keys = []
         for key, value in state_dict.items():
             if "layers" in key:
-                # NOTE: @goon - added the ability here to only load a portion of the serialized HF
-                # model's weights, e.g. if testing out with fewer layers than actually exist in the
-                # real model.
                 if key not in to_hf_map:
-                    warn(f"{key=} not found in {list(to_hf_map)=}. Skipping.")
+                    missing_keys.append(key)
                     continue
                 else:
                     new_key = to_hf_map[key]
@@ -146,6 +140,12 @@ class Llama3MoEStateDictAdapter(StateDictAdapter):
                 new_key = to_hf_map[key]
 
             hf_state_dict[new_key] = value
+        if missing_keys:
+            warn_once(
+                logger,
+                f"{missing_keys=} are not specified in {self.__class__.__name__}.from_hf_map, "
+                "will not get state loaded into them.",
+            )
 
         return hf_state_dict
 

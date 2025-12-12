@@ -7,19 +7,29 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from torch import nn
 
-from torchtitan.config import JobConfig
+from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
 from torchtitan.models.moe import MoEArgs
-from torchtitan.models.utils import get_dense_model_nparams_and_flops
+from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.tools.logging import logger
 
 
+# From
+# https://github.com/pytorch/torchtitan/blob/89c631cdcefd05885af511513507099148f2bd1d/torchtitan/models/llama3/model/model.py?plain=1#L30
 @dataclass
-class TransformerModelArgs(BaseModelArgs):
+class RoPEScalingArgs:
+    scaling_factor: float = 8.0
+    low_freq_factor: float = 1.0
+    high_freq_factor: float = 4.0
+    original_max_position_embeddings: int = 8192
+
+
+@dataclass
+class Llama3MoEModelArgs(BaseModelArgs):
     dim: int = 4096
     moe_inter_dim: int = 14336
     n_layers: int = 32
@@ -29,13 +39,12 @@ class TransformerModelArgs(BaseModelArgs):
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     ffn_dim_multiplier: float | None = None
     norm_eps: float = 1e-5
-    rope_theta: float = 10000
+    rope_theta: float = 500000.0
+    custom_moe_impl: str | None = None
+    rope_scaling_args: RoPEScalingArgs = field(default_factory=RoPEScalingArgs)
 
     # MoE
     moe_args: MoEArgs = field(default_factory=MoEArgs)
-    # TODO: node-limited routing is not supported yet
-    n_expert_groups: int = 1
-    n_limited_groups: int = 1
     is_moe_list: list[bool] | None = None
 
     max_seq_len: int = 131072
@@ -49,11 +58,9 @@ class TransformerModelArgs(BaseModelArgs):
 
     # yarn: https://arxiv.org/pdf/2309.00071
     original_seq_len: int = 8192
-    rope_factor: float = 20  # s in 2309.00071 (I believe); see eq (25)
-    beta_fast: int = 32  # \alpha in 2309.00071; see around eq (23)
-    beta_slow: int = 1  # \beta in 2309.00071; see around eq (23)
+    rope_impl: str = "llama"  # llama or dsv3
 
-    def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
+    def update_from_config(self, job_config: Llama3MoEJobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
         if seq_len > self.max_seq_len:
             logger.warning(
@@ -66,11 +73,31 @@ class TransformerModelArgs(BaseModelArgs):
                 "CP support for FlexAttention is still in progress."
             )
 
-        # NOTE: @goon - custom args we've added are processed here
-        if job_config.custom_args.load_balance_coeff is not None:
-            self.moe_args.load_balance_coeff = job_config.custom_args.load_balance_coeff
+        # NOTE: @goon - processing overrides
+        for k, v in asdict(job_config.model_overrides).items():
+            if v is not None and hasattr(self, k):
+                setattr(self, k, v)
+        for k, v in asdict(job_config.moe_overrides).items():
+            if v is not None and hasattr(self.moe_args, k):
+                setattr(self.moe_args, k, v)
+        # Special arg handling:
+        if (n_moe_layers := job_config.model_overrides.n_moe_layers) is not None:
+            if n_moe_layers > self.n_layers - 1:
+                raise ValueError(
+                    f"Must have {n_moe_layers=} less than or equal to {self.n_layers-1=}"
+                    "n_moe_layers inserts MoE layers starting from the second to last layer"
+                    " following the advice of https://arxiv.org/pdf/2403.17887 sec 4.4"
+                )
+            self.is_moe_list = (
+                (self.n_layers - n_moe_layers - 1) * [False]
+                + n_moe_layers * [True]
+                + [False]
+            )
 
-        if self.is_moe_list is not None and len(self.is_moe_list) != self.n_layers:
+        if (
+            getattr(self, "is_moe_list", None) is not None
+            and len(self.is_moe_list) != self.n_layers
+        ):
             raise ValueError(
                 f"{self.is_moe_list=} must be None or have {self.n_layers=} elements."
             )
@@ -78,4 +105,4 @@ class TransformerModelArgs(BaseModelArgs):
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:
-        return get_dense_model_nparams_and_flops(self, model, seq_len)
+        return get_moe_model_nparams_and_flops(self, model, seq_len)

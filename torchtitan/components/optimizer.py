@@ -21,6 +21,7 @@ from torch.optim import Optimizer
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.models.moe import GroupedExperts, TokenChoiceTopKRouter
 
 __all__ = [
     "OptimizersContainer",
@@ -74,10 +75,41 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         all_params = []
         self.optimizers = []
         self.model_parts = model_parts
+        moe_router_lr = optimizer_kwargs.pop("moe_router_lr")
+        moe_router_lr = (
+            optimizer_kwargs["lr"] if moe_router_lr is None else moe_router_lr
+        )
+        routed_expert_lr = optimizer_kwargs.pop("routed_expert_lr")
+        routed_expert_lr = (
+            optimizer_kwargs["lr"] if routed_expert_lr is None else routed_expert_lr
+        )
+
+        non_router_kwargs = optimizer_kwargs.copy()
+        router_kwargs = optimizer_kwargs.copy()
+        router_kwargs["lr"] = moe_router_lr
+        routed_expert_kwargs = optimizer_kwargs.copy()
+        routed_expert_kwargs["lr"] = routed_expert_lr
+
         for model in self.model_parts:
-            params = [p for p in model.parameters() if p.requires_grad]
-            self.optimizers.append(optimizer_cls(params, **optimizer_kwargs))
-            all_params.extend(params)
+            all_params_set = set(model.parameters())
+            all_params.extend(all_params_set)
+            router_params_set = set()
+            routed_expert_params_set = set()
+            for module in model.modules():
+                if isinstance(module, TokenChoiceTopKRouter):
+                    router_params_set.update(module.parameters())
+                elif isinstance(module, GroupedExperts):
+                    routed_expert_params_set.update(module.parameters())
+            non_router_params_set = (
+                all_params_set - router_params_set - routed_expert_params_set
+            )
+            arg_list = [
+                {"params": list(non_router_params_set), **non_router_kwargs},
+                {"params": list(router_params_set), **router_kwargs},
+                {"params": list(routed_expert_params_set), **routed_expert_kwargs},
+            ]
+            self.optimizers.append(optimizer_cls(arg_list))
+
         self._validate_length(len(self.model_parts))
         self._post_init(all_params, optimizer_kwargs)
 
@@ -286,6 +318,8 @@ def build_optimizers(
     beta2 = optimizer_config.beta2
     eps = optimizer_config.eps
     weight_decay = optimizer_config.weight_decay
+    moe_router_lr = optimizer_config.moe_router_lr
+    routed_expert_lr = optimizer_config.routed_expert_lr
 
     optim_implementation = optimizer_config.implementation
     assert optim_implementation in ["fused", "foreach", "for-loop"]
@@ -300,6 +334,8 @@ def build_optimizers(
         "weight_decay": weight_decay,
         "fused": fused,
         "foreach": foreach,
+        "moe_router_lr": moe_router_lr,
+        "routed_expert_lr": routed_expert_lr,
     }
 
     optimizer_classes = {
@@ -311,11 +347,13 @@ def build_optimizers(
     optimizer_cls = optimizer_classes[name]
 
     if optim_in_bwd:
+        raise ValueError("optim_in_bwd disabled")
         return OptimizersInBackwardContainer(
             model_parts, optimizer_cls, optimizer_kwargs
         )
 
     if ft_manager and ft_manager.enabled:
+        raise ValueError("ft optim disabled")
         return FTOptimizersContainer(
             model_parts,
             optimizer_cls,
@@ -345,7 +383,7 @@ def build_optimizers_with_moe_load_balancing(
             for transformer_block in model_part.layers.values():
                 if transformer_block.moe_enabled:
                     # Assumption: load_balance_coeff is set universally on all moe blocks.
-                    return bool(transformer_block.moe.load_balance_coeff)
+                    return transformer_block.moe.load_balance_coeff is not None
         return False
 
     # for MoE auxiliary-loss-free load balancing
@@ -366,8 +404,6 @@ def build_optimizers_with_moe_load_balancing(
             for transformer_block in model_part.layers.values():
                 if not transformer_block.moe_enabled:
                     continue
-                if transformer_block.moe.load_balance_coeff is None:
-                    return
                 tokens_per_expert = transformer_block.moe.tokens_per_expert
                 if _is_recomputation_enabled(transformer_block):
                     # TODO: This is a hack, we assume with full AC, the tokens_per_expert is counted twice.
@@ -401,12 +437,14 @@ def build_optimizers_with_moe_load_balancing(
 
                     # update the expert bias
                     # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
-                    expert_bias_delta = moe.load_balance_coeff * torch.sign(
-                        tokens_per_expert.mean() - tokens_per_expert
-                    )
-                    expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
-                    moe.expert_bias.add_(expert_bias_delta)
+                    if transformer_block.moe.load_balance_coeff != 0.0:
+                        expert_bias_delta = moe.load_balance_coeff * torch.sign(
+                            tokens_per_expert.mean() - tokens_per_expert
+                        )
+                        expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
+                        moe.expert_bias.add_(expert_bias_delta)
                     moe.tokens_per_expert.zero_()
+                    moe.tokens_per_expert_cumulative.add_(tokens_per_expert)
 
     if _should_register_moe_balancing_hook(model_parts):
         optimizers.register_step_pre_hook(

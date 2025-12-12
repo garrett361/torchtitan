@@ -5,15 +5,81 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field
+from typing import Literal
 
-from torchtitan.config.job_config import JobConfig
-
-
-@dataclass
-class CustomArgs:
-    load_balance_coeff: float | None = None
+from torchtitan.config.job_config import JobConfig, Optimizer
 
 
 @dataclass
-class JobConfig(JobConfig):
-    custom_args: CustomArgs = field(default_factory=CustomArgs)
+class Llama3MoECustomArgs:
+    """
+    Catch-all, misc. cfg.
+    """
+
+    hf_weight_transform: str = "replicate"
+
+
+@dataclass
+class TopKSchedulerArgs:
+    name: str = "no_op"
+    # For constant:
+    min_top_k: int | None = None
+    step_interval: int | None = None
+    warmup_steps: int | None = None
+    # For loss-based:
+    min_steps: int | None = None
+    beta: float | None = None
+    target_loss: float | None = None
+
+
+# Classes for overriding model architecture configurations, which can't be done via the CLI or toml
+# files otherwise. When non-None values are supplied here, a value will be overridden. Some
+# convenience fields are also added:
+# - n_moe_layers: int, use this many moe layers starting from the final layer.
+
+
+@dataclass
+class ModelOverrides:
+    moe_inter_dim: int | None = None
+    n_layers: int | None = None
+    custom_moe_impl: str | None = None
+    # Covenience args below:
+    n_moe_layers: int | None = None
+
+
+@dataclass
+class MoEOverrides:
+    num_experts: int | None = None
+    num_shared_experts: int | None = None
+    score_func: Literal["softmax", "sigmoid"] | None = None
+    route_norm: bool | None = None
+    route_scale: float | None = None
+    score_before_experts: bool | None = None
+    top_k: int | None = None
+    use_grouped_mm: bool | None = None
+    load_balance_coeff: float | None | None = None
+    hf_ffn_hidden_dim: int | None | None = None
+    n_expert_groups: int | None = None
+    top_k_group: int | None = None
+    # Custom args
+    router_init_std: float | None = None
+    # HACK: @goon - typing as bool alone means that torchtitan expects --moe_overrides.moe_hooks or
+    # --moe_overrides.no_moe_hooks rather than --moe_overrides.moe_hooks True or
+    # --moe_overrides.moe_hooks False. Typing as follows allows a True/False API.
+    moe_hooks: bool | None = True
+    moe_reshard_after_forward: bool | None = True
+
+
+@dataclass
+class Llama3MoEOptimizer(Optimizer):
+    moe_router_lr: float | None = None
+    routed_expert_lr: float | None = None
+
+
+@dataclass
+class Llama3MoEJobConfig(JobConfig):
+    custom_args: Llama3MoECustomArgs = field(default_factory=Llama3MoECustomArgs)
+    top_k_args: TopKSchedulerArgs = field(default_factory=TopKSchedulerArgs)
+    model_overrides: ModelOverrides = field(default_factory=ModelOverrides)
+    moe_overrides: MoEOverrides = field(default_factory=MoEOverrides)
+    optimizer: Llama3MoEOptimizer = field(default_factory=Llama3MoEOptimizer)

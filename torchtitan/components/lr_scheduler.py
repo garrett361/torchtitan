@@ -149,6 +149,7 @@ def build_lr_schedulers(
         1. `linear`: decays linearly from 1 to 0 over the decay period.
         2. `sqrt`: decays as 1 minus the square root of the decay progress.
         3. `cosine`: follows a cosine curve, decaying according to the values of the half-period of the cosine function.
+        4. `constant`: just constant, after the warmup phase.
 
         If `min_lr_factor` is specified, the decay range is scaled from 1 to `min_lr_factor`
         to ensure the learning rate does not drop below this minimum value.
@@ -176,6 +177,10 @@ def build_lr_schedulers(
                 curr_adjustment = 1 - math.sqrt(progress)
             elif lr_decay_type == "cosine":
                 curr_adjustment = 0.5 * (1.0 + math.cos(math.pi * progress))
+            elif lr_decay_type == "constant":
+                curr_adjustment = 1
+            else:
+                raise ValueError(f"Unexpected {lr_decay_type=}")
             curr_adjustment = min_lr_factor + (1 - min_lr_factor) * curr_adjustment
         return curr_adjustment
 

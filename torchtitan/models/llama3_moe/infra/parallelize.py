@@ -16,7 +16,7 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
@@ -26,8 +26,8 @@ from torchtitan.experiments.llama4.infra.parallelize import (
     apply_moe_ep_tp,
 )
 from torchtitan.models.llama3.infra.parallelize import apply_ddp
+from torchtitan.models.llama3_moe.custom_args import Llama3MoEJobConfig
 from torchtitan.tools.logging import logger
-
 
 # for selective op activation checkpointing
 _op_sac_save_list = {
@@ -46,12 +46,16 @@ _op_sac_save_list = {
 
 # Adapted from deepseek_v3/infra/parallelize.py
 
-# TODO: @goon - check whas is different here, just import if possible
+
+# TODO: @goon - check what is different here, just import if possible
 def parallelize_llama_moe(
     model: nn.Module,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    job_config: Llama3MoEJobConfig,
 ):
+    # DELETE: hack for testing parllel impls
+    from torchtitan.models.llama3.infra.parallelize import parallelize_llama
+    return parallelize_llama(model, parallel_dims, job_config)
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data
     parallelism to the model.
@@ -151,6 +155,7 @@ def parallelize_llama_moe(
             pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
+            moe_reshard_after_forward=job_config.moe_overrides.moe_reshard_after_forward,
             ep_degree=parallel_dims.ep,
             dp_mod_ep_mesh=(
                 world_mesh[tuple(dp_mod_ep_mesh_dim_names)]
@@ -182,6 +187,7 @@ def parallelize_llama_moe(
         )
 
     return model
+
 
 
 def apply_non_moe_tp(
@@ -236,15 +242,20 @@ def apply_non_moe_tp(
             "attention.wv": colwise_parallel(),
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
-            # llama-3-moe does not have FFN, only MOE
-            # "feed_forward": prepare_module_input(
-            #     input_layouts=(Shard(1),),
-            #     desired_input_layouts=(Replicate(),),
-            # ),
-            # "feed_forward.w1": colwise_parallel(),
-            # "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
-            # "feed_forward.w3": colwise_parallel(),
         }
+
+        if not transformer_block.moe_enabled:
+            layer_plan.update(
+                {
+                    "feed_forward": prepare_module_input(
+                        input_layouts=(Shard(1),),
+                        desired_input_layouts=(Replicate(),),
+                    ),
+                    "feed_forward.w1": colwise_parallel(),
+                    "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
+                    "feed_forward.w3": colwise_parallel(),
+                }
+            )
 
         parallelize_module(
             module=transformer_block,

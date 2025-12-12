@@ -1,6 +1,20 @@
-# We define a custom JobConfig class with an addition catch-all custom_args field
-[experimental]
-custom_args_module = "torchtitan.models.llama3_moe.custom_args"
+[custom_args]
+hf_weight_transform = "replicate"
+
+[moe_overrides]
+load_balance_coeff = 0.0
+hf_ffn_hidden_dim = 8192
+route_norm = true
+top_k = 2
+route_scale = 1
+num_shared_experts = 0
+
+[model_overrides]
+custom_moe_impl = "virtual_group"
+moe_inter_dim = 8192
+
+[top_k_args]
+name = "no_op"
 
 [job]
 dump_folder = "./outputs"
@@ -52,10 +66,9 @@ context_parallel_degree = 1
 enable = false
 folder = "checkpoint"
 interval = 9999999999999999999
-last_save_model_only = true
+last_save_model_only = false # Set to false so we can test continued training.
 export_dtype = "bfloat16"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
-exclude_from_loading = [""]
 
 
 [compile]
@@ -63,7 +76,7 @@ enable=false
 components = ["model", "loss"]
 
 [activation_checkpoint]
-mode = "none"  # ["none", "selective", "full"]
+mode = "selective"  # ["none", "selective", "full"]
 selective_ac_option = "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
 
 [quantize.linear.float8]

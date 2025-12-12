@@ -6,45 +6,113 @@
 
 from copy import deepcopy
 
+import pytest
 import torch
-import torch.distributed as dist
 from dtest import DTest
 
 from torchtitan.components.checkpoint import CheckpointManager, ModelWrapper
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims
 from torchtitan.models.llama3_moe import (
     CustomCheckpointManager,
+    get_hf_weight_transform_cls,
     llama3_moe_configs,
+    Llama3MoE,
+    Llama3MoEJobConfig,
     Llama3MoEStateDictAdapter,
     parallelize_llama_moe,
-    ReplicateMoETransform,
-    Transformer,
     TransformingHuggingFaceStorageReader,
 )
-from torchtitan.models.llama3_moe.custom_args import JobConfig
+from torchtitan.models.moe import MoE, MoEArgs
+from transformers import AutoTokenizer
+
+BITTER_LESSON = """
+The biggest lesson that can be read from 70 years of AI research is that general methods that leverage
+computation are ultimately the most effective, and by a large margin. The ultimate reason for this is
+Moore's law, or rather its generalization of continued exponentially falling cost per unit of
+computation. Most AI research has been conducted as if the computation available to the agent were
+constant (in which case leveraging human knowledge would be one of the only ways to improve
+performance) but, over a slightly longer time than a typical research project, massively more
+computation inevitably becomes available. Seeking an improvement that makes a difference in the
+shorter term, researchers seek to leverage their human knowledge of the domain, but the only thing
+that matters in the long run is the leveraging of computation. These two need not run counter to each
+other, but in practice they tend to. Time spent on one is time not spent on the other. There are
+psychological commitments to investment in one approach or the other. And the human-knowledge
+approach tends to complicate methods in ways that make them less suited to taking advantage of
+general methods leveraging computation.  There were many examples of AI researchers' belated
+learning of this bitter lesson, and it is instructive to review some of the most prominent.
+"""
+ALICE = """
+  Alice was beginning to get very tired of sitting by her sister
+on the bank, and of having nothing to do:  once or twice she had
+peeped into the book her sister was reading, but it had no
+pictures or conversations in it, `and what is the use of a book,'
+thought Alice `without pictures or conversation?'
+
+  So she was considering in her own mind (as well as she could,
+for the hot day made her feel very sleepy and stupid), whether
+the pleasure of making a daisy-chain would be worth the trouble
+of getting up and picking the daisies, when suddenly a White
+Rabbit with pink eyes ran close by her.
+"""
+
+# Torch's testing.assert_close is very strict and we get a lot of noisy fails  of the form
+#     Mismatched elements: 6 / 8208384 (0.0%)
+#     Greatest absolute difference: 0.125 at index (0, 41, 59315) (up to 0.1 allowed)
+#     Greatest relative difference: 6.4375 at index (0, 41, 37684) (up to 0.1 allowed)
+#
+# These don't seem like big enough issues to worry about, so we use FLA's more lenient assert_close
+# which should still surface major issues.
+
+
+# Slightly modified from FLA
+def get_abs_err(x, y):
+    return (x.detach() - y.detach()).flatten().abs().max().item()
+
+
+def get_err_ratio(x, y):
+    err = (x.detach() - y.detach()).flatten().square().mean().sqrt().item()
+    base = (x.detach()).flatten().square().mean().sqrt().item()
+    return err / (base + 1e-8)
+
+
+def assert_close(prefix, ref, tri, ratio: float = 1e-5, warning=False, err_atol=1e-6):
+    abs_atol = get_abs_err(ref, tri)
+    msg = f"{prefix:>16} diff: {abs_atol:.6f} ratio: {get_err_ratio(ref, tri):.6f} > {ratio=}"
+    error_rate = get_err_ratio(ref, tri)
+    if abs_atol <= err_atol:
+        return
+    if warning:
+        if error_rate > ratio:
+            warnings.warn(msg)
+    else:
+        assert error_rate < ratio, msg
 
 
 class TestHFReader(DTest):
-    hf_assets_path = "/gpfs/goon/models/Llama-3.2-3B-no-tied-weights/"
+    hf_assets_path = "/gpfs/goon/models/Llama-3.2-1B-no-tied-weights/"
     seqlen = 64
     bsz = 1
+    tok = AutoTokenizer.from_pretrained(hf_assets_path)
+    tol = 1e-2
+
     """
     Test loading correctness
     """
 
-    def test_non_moe_load_equivalence(self) -> None:
+    def test_custom_load_equivalence(self) -> None:
         """
-        Test e2e equivlance on the full 3B model.
+        Test e2e equivalence of loading with CustomCheckpointManager using a non-MoE model.
         """
-        model_args = llama3_moe_configs["3B"]
-        job_config = JobConfig()
+        model_args = llama3_moe_configs["1B"]
+        job_config = Llama3MoEJobConfig()
         job_config.checkpoint.enable = True
         job_config.checkpoint.initial_load_in_hf = True
         job_config.model.hf_assets_path = self.hf_assets_path
         with torch.device("meta"):
-            model = Transformer(model_args)
+            model = Llama3MoE(model_args)
         model_copy = deepcopy(model)
 
+        # FSDP
         parallel_dims = ParallelDims(
             dp_shard=-1,
             dp_replicate=1,
@@ -60,11 +128,9 @@ class TestHFReader(DTest):
         model_copy = parallelize_llama_moe(model_copy, parallel_dims, job_config)
 
         model.to_empty(device=self.device)
-        with torch.no_grad():
-            model.init_weights(buffer_device=None)
-
         model_copy.to_empty(device=self.device)
         with torch.no_grad():
+            model.init_weights(buffer_device=None)
             model_copy.init_weights(buffer_device=None)
 
         ckpt_kwargs = {
@@ -85,28 +151,29 @@ class TestHFReader(DTest):
             model_parts=[model_copy], **ckpt_kwargs
         )
         custom_checkpointer.load()
-        torch.manual_seed(42 + dist.get_rank())
+        inputs = self.tok(BITTER_LESSON, return_tensors="pt")["input_ids"].to(
+            self.device
+        )
         with torch.no_grad():
-            inputs = torch.randint(
-                model_args.vocab_size, size=(self.bsz, self.seqlen), device=self.device
-            )
             out = model(inputs)
-            out_copy = model(inputs)
-            torch.testing.assert_close(out, out_copy)
+            out_copy = model_copy(inputs)
+            assert_close("load_equiv", out, out_copy, 1e-5)
 
-    def test_small_non_moe_load_equivalence(self) -> None:
+    @pytest.mark.parametrize("sharding", ["fsdp", "ep"])
+    def test_small_moe_load_replicate_transform_vg(self, sharding: str) -> None:
         """
-        Test equivalence (and that load succeeds) on a truncated version of the model with fewer
-        layers.
+        Test that custom loading succeeds and that virtual group init works.
         """
-        model_args = llama3_moe_configs["3B_2layer"]
-        job_config = JobConfig()
+        model_args = llama3_moe_configs["1B_2layer"]
+        model_args_moe = llama3_moe_configs["1B_2layer_halfmoe_vg"]
+        job_config = Llama3MoEJobConfig()
         job_config.checkpoint.enable = True
         job_config.checkpoint.initial_load_in_hf = True
         job_config.model.hf_assets_path = self.hf_assets_path
+
         with torch.device("meta"):
-            model = Transformer(model_args)
-        model_copy = deepcopy(model)
+            model = Llama3MoE(model_args)
+            model_moe = Llama3MoE(model_args_moe)
 
         parallel_dims = ParallelDims(
             dp_shard=-1,
@@ -114,21 +181,23 @@ class TestHFReader(DTest):
             cp=1,
             tp=1,
             pp=1,
-            ep=1,
+            ep=self.world_size if sharding == "ep" else 1,
             etp=1,
             world_size=self.world_size,
         )
 
         model = parallelize_llama_moe(model, parallel_dims, job_config)
-        model_copy = parallelize_llama_moe(model_copy, parallel_dims, job_config)
+        model_moe = parallelize_llama_moe(model_moe, parallel_dims, job_config)
 
         model.to_empty(device=self.device)
+        model_moe.to_empty(device=self.device)
         with torch.no_grad():
             model.init_weights(buffer_device=None)
+            model_moe.init_weights(buffer_device=None)
 
-        model_copy.to_empty(device=self.device)
-        with torch.no_grad():
-            model_copy.init_weights(buffer_device=None)
+        # Sanity checks:
+        assert not any(isinstance(m, MoE) for m in model.modules())
+        assert any(isinstance(m, MoE) for m in model_moe.modules())
 
         ckpt_kwargs = {
             "dataloader": None,
@@ -136,44 +205,78 @@ class TestHFReader(DTest):
             "lr_schedulers": None,  # HACK: @goon - ok to set to None for initial load
             "states": {"train_state": self},
             "checkpoint_config": job_config.checkpoint,
-            "sd_adapter": Llama3MoEStateDictAdapter(model_args, self.hf_assets_path),
             "base_folder": "",
             "ft_manager": None,
         }
 
-        checkpointer = CheckpointManager(model_parts=[model], **ckpt_kwargs)
+        checkpointer = CheckpointManager(
+            model_parts=[model],
+            sd_adapter=Llama3MoEStateDictAdapter(model_args, self.hf_assets_path),
+            **ckpt_kwargs,
+        )
         checkpointer.load()
 
+        sd_adapter_moe = Llama3MoEStateDictAdapter(model_args_moe, self.hf_assets_path)
         custom_checkpointer = CustomCheckpointManager(
-            model_parts=[model_copy], **ckpt_kwargs
+            hf_storage_reader=TransformingHuggingFaceStorageReader,
+            hf_storage_reader_kwargs={
+                "transform_fn": get_hf_weight_transform_cls("replicate")(
+                    model_args=model_args_moe,
+                    hf_to_titan_fqn_map=sd_adapter_moe.from_hf_map,
+                ),
+                "state_dict": ModelWrapper([model_moe]).state_dict(),
+                "sd_adapter": sd_adapter_moe,
+            },
+            model_parts=[model_moe],
+            sd_adapter=sd_adapter_moe,
+            **ckpt_kwargs,
         )
-        torch.manual_seed(42 + dist.get_rank())
-        with torch.no_grad():
-            inputs = torch.randint(
-                model_args.vocab_size, size=(self.bsz, self.seqlen), device=self.device
-            )
-            out = model(inputs)
-            out_copy = model(inputs)
-            torch.testing.assert_close(out, out_copy)
+        custom_checkpointer.load()
 
-    def test_small_moe_load_replicate_transform(self) -> None:
+        inputs = self.tok(BITTER_LESSON, return_tensors="pt")["input_ids"].to(
+            self.device
+        )
+        with torch.no_grad():
+            out = model(inputs)
+            out_copy = model_moe(inputs)
+            assert_close("hf_reader_small_vg_out", out, out_copy, ratio=self.tol)
+
+    @pytest.mark.parametrize("sharding", ["fsdp", "ep"])
+    def test_full_1b_model_vg(self, sharding: str) -> None:
         """
-        Test  (and that load succeeds) on a truncated version of the model with fewer
-        layers.
+        For inspecting the full 1B model with MoE layers.
         """
-        model_args = llama3_moe_configs["3B_2layer"]
-        model_args_moe = llama3_moe_configs["3B_2layer_halfmoe"]
-        job_config = JobConfig()
+        model_args = llama3_moe_configs["1B"]
+        llama_3b_hidden_dim = 8192
+        n_replicas = n_groups = 2
+        model_args_moe = deepcopy(model_args)
+        moe_args = MoEArgs(
+            num_experts=n_replicas * n_groups,
+            num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
+            top_k=n_groups,
+            route_scale=n_groups,
+            hf_ffn_hidden_dim=llama_3b_hidden_dim,  # Must specify for virtual_group router init!
+        )
+        model_args_moe.moe_args = moe_args
+        model_args_moe.moe_inter_dim = llama_3b_hidden_dim // n_groups
+        # Set some number of layers to be MoEs
+        n_moe = 8
+        model_args_moe.is_moe_list = (
+            (model_args.n_layers - 1 - n_moe) * [False] + n_moe * [True] + [False]
+        )
+        model_args_moe.custom_moe_impl = "virtual_group"
+
+        job_config = Llama3MoEJobConfig()
         job_config.checkpoint.enable = True
         job_config.checkpoint.initial_load_in_hf = True
         job_config.model.hf_assets_path = self.hf_assets_path
 
         with torch.device("meta"):
-            model = Transformer(model_args)
-            model_moe = Transformer(model_args_moe)
-
-        dist_utils.rank_zero_print(f"{model=}")
-        dist_utils.rank_zero_print(f"{model_moe=}")
+            model = Llama3MoE(model_args)
+            model_moe = Llama3MoE(model_args_moe)
 
         parallel_dims = ParallelDims(
             dp_shard=-1,
@@ -181,7 +284,143 @@ class TestHFReader(DTest):
             cp=1,
             tp=1,
             pp=1,
-            ep=1,
+            ep=self.world_size if sharding == "ep" else 1,
+            etp=1,
+            world_size=self.world_size,
+        )
+
+        model = parallelize_llama_moe(model, parallel_dims, job_config)
+        model_moe = parallelize_llama_moe(model_moe, parallel_dims, job_config)
+
+        model.to_empty(device=self.device)
+        model_moe.to_empty(device=self.device)
+        with torch.no_grad():
+            model.init_weights(buffer_device=None)
+            model_moe.init_weights(buffer_device=None)
+
+        # Sanity checks:
+        assert not any(isinstance(m, MoE) for m in model.modules())
+        assert any(isinstance(m, MoE) for m in model_moe.modules())
+
+        ckpt_kwargs = {
+            "dataloader": None,
+            "optimizers": None,  # HACK: @goon - ok to set to None for initial load
+            "lr_schedulers": None,  # HACK: @goon - ok to set to None for initial load
+            "states": {"train_state": self},
+            "checkpoint_config": job_config.checkpoint,
+            "base_folder": "",
+            "ft_manager": None,
+        }
+
+        checkpointer = CheckpointManager(
+            model_parts=[model],
+            sd_adapter=Llama3MoEStateDictAdapter(model_args, self.hf_assets_path),
+            **ckpt_kwargs,
+        )
+        checkpointer.load()
+
+        sd_adapter_moe = Llama3MoEStateDictAdapter(model_args_moe, self.hf_assets_path)
+        custom_checkpointer = CustomCheckpointManager(
+            hf_storage_reader=TransformingHuggingFaceStorageReader,
+            hf_storage_reader_kwargs={
+                "transform_fn": get_hf_weight_transform_cls("replicate")(
+                    model_args=model_args_moe,
+                    hf_to_titan_fqn_map=sd_adapter_moe.from_hf_map,
+                ),
+                "state_dict": ModelWrapper([model_moe]).state_dict(),
+                "sd_adapter": sd_adapter_moe,
+            },
+            model_parts=[model_moe],
+            sd_adapter=sd_adapter_moe,
+            **ckpt_kwargs,
+        )
+        custom_checkpointer.load()
+
+        bitter_inputs = self.tok(BITTER_LESSON, return_tensors="pt")["input_ids"].to(
+            self.device
+        )
+        alice_inputs = self.tok(ALICE, return_tensors="pt")["input_ids"].to(self.device)
+        # Alice inputs are shorter
+        inputs = torch.cat(
+            [bitter_inputs[:, : alice_inputs.shape[1]], alice_inputs], dim=0
+        )
+        with torch.no_grad():
+            out = model(inputs)
+            out_moe = model_moe(inputs)
+            abs_err = get_abs_err(out, out_moe)
+            err_ratio = get_err_ratio(out, out_moe)
+            # NOTE: @goon - not asserting anything, as this test is mostly just for debugging and
+            # model inspection.
+            print(f"{abs_err=}, {err_ratio=}")
+
+
+class TestImpls(DTest):
+    hf_assets_path = "/gpfs/goon/models/Llama-3.2-1B-no-tied-weights/"
+    seqlen = 64
+    bsz = 1
+    tol = 1e-2
+    """
+    Test impl correctness
+    """
+
+    @pytest.mark.parametrize("n_groups", [2, 4], ids=lambda x: f"n_groups={x}")
+    @pytest.mark.parametrize("n_replicas", [4, 8], ids=lambda x: f"n_replicas={x}")
+    @pytest.mark.parametrize("hf_weight_transform", ["replicate", "replicate_shuffle"])
+    @pytest.mark.parametrize("sharding", ["fsdp", "ep"])
+    def test_virtual_group(
+        self, sharding: str, n_groups: int, n_replicas: int, hf_weight_transform: str
+    ) -> None:
+        """
+        Test that the dense and MoE models have the same output with FFN weight replication when
+        using virtual group init and any applicable weight transformation strategy.
+        """
+        model_args = llama3_moe_configs["1B_2layer"]
+        # Dynamically generate a valid moe cfg for a model with one FFN and one MoE layer.
+        llama_1b_hidden_dim = 8192
+        model_args_moe = deepcopy(model_args)
+        moe_args = MoEArgs(
+            num_experts=n_replicas * n_groups,
+            num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
+            top_k=n_groups,
+            route_scale=n_groups,
+            hf_ffn_hidden_dim=llama_1b_hidden_dim,  # Must specify for virtual_group router init!
+        )
+        model_args_moe.moe_args = moe_args
+        model_args_moe.moe_inter_dim = llama_1b_hidden_dim // n_groups
+        model_args_moe.is_moe_list = [True, False]
+        model_args_moe.custom_moe_impl = "virtual_group"
+
+        job_config = Llama3MoEJobConfig()
+        job_config.checkpoint.enable = True
+        job_config.checkpoint.initial_load_in_hf = True
+        job_config.model.hf_assets_path = self.hf_assets_path
+
+        moe_args = model_args_moe.moe_args
+        assert moe_args.score_func == "softmax"
+        assert moe_args.route_norm is True
+        assert moe_args.score_before_experts is False
+        assert moe_args.hf_ffn_hidden_dim is not None
+        assert model_args.custom_moe_impl is None
+        assert model_args_moe.custom_moe_impl == "virtual_group"
+
+        with torch.device("meta"):
+            model = Llama3MoE(model_args)
+            model_moe = Llama3MoE(model_args_moe)
+
+        # Sanity checks:
+        assert not any(isinstance(m, MoE) for m in model.modules())
+        assert any(isinstance(m, MoE) for m in model_moe.modules())
+
+        parallel_dims = ParallelDims(
+            dp_shard=-1,
+            dp_replicate=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=self.world_size if sharding == "ep" else 1,
             etp=1,
             world_size=self.world_size,
         )
@@ -218,7 +457,7 @@ class TestHFReader(DTest):
         custom_checkpointer = CustomCheckpointManager(
             hf_storage_reader=TransformingHuggingFaceStorageReader,
             hf_storage_reader_kwargs={
-                "transform_fn": ReplicateMoETransform(
+                "transform_fn": get_hf_weight_transform_cls(hf_weight_transform)(
                     model_args=model_args_moe,
                     hf_to_titan_fqn_map=sd_adapter_moe.from_hf_map,
                 ),
@@ -230,23 +469,58 @@ class TestHFReader(DTest):
             **ckpt_kwargs,
         )
         custom_checkpointer.load()
-        with torch.no_grad():
-            # Verify weight correctness:
-            sd = model.state_dict()
-            sd_moe = model_moe.state_dict()
-            for k_moe in sd_moe:
-                if "moe" not in k_moe:
-                    w, w_moe = sd[k_moe].full_tensor(), sd_moe[k_moe].full_tensor()
-                    torch.testing.assert_close(w, w_moe)
 
-                elif "moe.experts" in k_moe:
-                    # Grab the MoE expert weights and the FFN weight they should have originated
-                    # from.
-                    k = k_moe.replace("moe.experts", "feed_forward") + ".weight"
-                    w, w_moe = sd[k].full_tensor(), sd_moe[k_moe].full_tensor()
-                    assert (
-                        torch.Size((model_args_moe.moe_args.num_experts,)) + w.shape
-                        == w_moe.shape
-                    ), f"{w.shape=}, {w_moe.shape=}"
-                    for w_moe_expert_shard in w_moe:
-                        torch.testing.assert_close(w, w_moe_expert_shard)
+        with torch.no_grad():
+            inputs = torch.randint(
+                model_args.vocab_size, size=(self.bsz, self.seqlen), device=self.device
+            )
+            out = model(inputs)
+            out_moe = model_moe(inputs)
+            assert_close("vg_out", out, out_moe, ratio=self.tol)
+
+
+class TestMoENoReshard(DTest):
+    seqlen = 64
+    bsz = 1
+    atol = 1e-1
+    rtol = 1e-1
+
+    @pytest.mark.parametrize("sharding", ["ep"])
+    @pytest.mark.parametrize("moe_reshard_after_forward", [True, False])
+    def test_no_reshard_option(
+        self, sharding: str, moe_reshard_after_forward: bool
+    ) -> None:
+        """
+        Test that the dense and MoE models have the same output with FFN weight replication.
+        """
+        model_args_moe = llama3_moe_configs["1B_2layer_halfmoe_vg"]
+        job_config = Llama3MoEJobConfig()
+        job_config.moe_overrides.moe_reshard_after_forward = moe_reshard_after_forward
+        with torch.device("meta"):
+            model_moe = Llama3MoE(model_args_moe)
+
+        parallel_dims = ParallelDims(
+            dp_shard=-1,
+            dp_replicate=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=self.world_size if sharding == "ep" else 1,
+            etp=1,
+            world_size=self.world_size,
+        )
+
+        model_moe = parallelize_llama_moe(model_moe, parallel_dims, job_config)
+
+        model_moe.to_empty(device=self.device)
+        with torch.no_grad():
+            model_moe.init_weights(buffer_device=None)
+
+        routed_experts = model_moe.layers["1"].moe.experts
+        post_forward_mesh_info = (
+            routed_experts._get_fsdp_state()._fsdp_param_group.post_forward_mesh_info
+        )
+        if moe_reshard_after_forward:
+            assert post_forward_mesh_info is not None
+        else:
+            assert post_forward_mesh_info is None

@@ -280,6 +280,7 @@ def apply_fsdp(
     pp_enabled: bool,
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
+    moe_reshard_after_forward: bool | None = None,
     ep_degree: int = 1,
     dp_mod_ep_mesh: DeviceMesh | None = None,
     gradient_divide_factor: int | None = None,
@@ -320,6 +321,9 @@ def apply_fsdp(
                 f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
             )
 
+    if moe_reshard_after_forward is None:
+        moe_reshard_after_forward = reshard_after_forward
+
     if model.tok_embeddings is not None:
         fully_shard(
             model.tok_embeddings,
@@ -353,7 +357,7 @@ def apply_fsdp(
             fully_shard(
                 transformer_block.moe.experts,
                 **fsdp_mod_ep_config,
-                reshard_after_forward=reshard_after_forward,
+                reshard_after_forward=moe_reshard_after_forward,
                 shard_placement_fn=_experts_shard_placement_fn,
             )
 
