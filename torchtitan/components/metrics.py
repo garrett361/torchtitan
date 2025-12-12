@@ -7,7 +7,7 @@
 import os
 import time
 from collections import namedtuple
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
 import torch
@@ -143,12 +143,14 @@ class WandBLogger(BaseLogger):
         # Create logging directory
         os.makedirs(log_dir, exist_ok=True)
 
+        logger.info("!!! Initializing logger with timeout 180")
         self.wandb.init(
             entity=os.getenv("WANDB_TEAM", None),
             project=os.getenv("WANDB_PROJECT", "torchtitan"),
             name=os.getenv("WANDB_RUN_NAME", None),
             dir=log_dir,
             config=job_config.to_dict(),
+            settings=wandb.Settings(init_timeout=180),  # !!! changed (default is 90s)
         )
         logger.info("WandB logging enabled")
 
@@ -319,7 +321,7 @@ def _build_metric_logger(
         logger_container.add_logger(tensorboard_logger)
 
     if logger_container.number_of_loggers == 0:
-        logger.debug("No loggers enabled, returning an emtpy LoggerContainer")
+        logger.debug("No loggers enabled, returning an empty LoggerContainer")
     return logger_container
 
 
@@ -436,15 +438,9 @@ class MetricsProcessor:
 
         self.logger.log(metrics, step)
 
-        steps_remaining = self.job_config.training.steps - step
-        secs_remaining = steps_remaining * time_end_to_end
-        time_remaining = timedelta(seconds=secs_remaining)
-
         color = self.color
-
         logger.info(
             f"{color.red}step: {step:2}  "
-            f"{color.yellow}time remaining: {time_remaining}  "
             f"{color.green}loss: {global_avg_loss:7.4f}  "
             f"{color.orange}grad_norm: {grad_norm:7.4f}  "
             f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
