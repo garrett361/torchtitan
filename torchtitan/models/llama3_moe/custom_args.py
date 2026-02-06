@@ -7,7 +7,7 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
-from torchtitan.config.job_config import JobConfig, Optimizer
+from torchtitan.config.job_config import JobConfig, LRScheduler, Optimizer
 
 
 @dataclass
@@ -57,8 +57,8 @@ class MoEOverrides:
     score_before_experts: bool | None = None
     top_k: int | None = None
     use_grouped_mm: bool | None = None
-    load_balance_coeff: float | None | None = None
-    hf_ffn_hidden_dim: int | None | None = None
+    load_balance_coeff: float | None = None
+    hf_ffn_hidden_dim: int | None = None
     n_expert_groups: int | None = None
     top_k_group: int | None = None
     # Custom args
@@ -77,9 +77,15 @@ class Llama3MoEOptimizer(Optimizer):
 
 
 @dataclass
+class Llama3MoELRScheduler(LRScheduler):
+    zero_lr_steps: int = 0
+
+
+@dataclass
 class Llama3MoEJobConfig(JobConfig):
     custom_args: Llama3MoECustomArgs = field(default_factory=Llama3MoECustomArgs)
     top_k_args: TopKSchedulerArgs = field(default_factory=TopKSchedulerArgs)
     model_overrides: ModelOverrides = field(default_factory=ModelOverrides)
     moe_overrides: MoEOverrides = field(default_factory=MoEOverrides)
     optimizer: Llama3MoEOptimizer = field(default_factory=Llama3MoEOptimizer)
+    lr_scheduler: Llama3MoELRScheduler = field(default_factory=Llama3MoELRScheduler)

@@ -49,9 +49,9 @@ class LRSchedulersContainer(Stateful):
     schedulers: list[LRScheduler]
 
     def __init__(self, optimizers: OptimizersContainer, lr_lambda: Callable) -> None:
-        assert (
-            len(optimizers) > 0
-        ), "Must have at least one optimizer to create LRScheduler"
+        assert len(optimizers) > 0, (
+            "Must have at least one optimizer to create LRScheduler"
+        )
 
         self.schedulers = [LambdaLR(optimizer, lr_lambda) for optimizer in optimizers]
 
@@ -104,33 +104,34 @@ def build_lr_schedulers(
         lr_scheduler_config (LRSchedulerConfig): The lr scheduler config.
         training_steps (int): The total number of training steps.
     """
+    zero_lr_steps = int(getattr(lr_scheduler_config, "zero_lr_steps", 0))
     warmup_steps = int(lr_scheduler_config.warmup_steps)
 
-    if warmup_steps > training_steps:
-        logger.warning(
-            f"Warmup steps ({warmup_steps}) exceed total training steps ({training_steps}). "
-            f"Adjusting warmup steps to {training_steps}."
+    if warmup_steps + zero_lr_steps > training_steps:
+        raise ValueError(
+            f"{warmup_steps + zero_lr_steps=} must be smaller than {training_steps=}"
         )
-        warmup_steps = training_steps
+    warmup_zero_steps = warmup_steps + zero_lr_steps
 
     if lr_scheduler_config.decay_ratio is not None:
         decay_steps = round(training_steps * lr_scheduler_config.decay_ratio)
-        if warmup_steps + decay_steps > training_steps:
+        if warmup_zero_steps + decay_steps > training_steps:
             logger.warning(
-                f"Warmup ({warmup_steps}) + decay ({decay_steps}) steps exceed "
+                f"Warmup plus zero ({warmup_zero_steps}) + decay ({decay_steps}) steps exceed "
                 f"total training steps ({training_steps}). "
-                f"Adjusting decay steps to {training_steps - warmup_steps}."
+                f"Adjusting decay steps to {training_steps - warmup_zero_steps}."
             )
-            decay_steps = training_steps - warmup_steps
+            decay_steps = training_steps - warmup_zero_steps
     else:
-        decay_steps = training_steps - warmup_steps
+        decay_steps = training_steps - warmup_zero_steps
     # Add a virtual last step to prevent the learning rate from dropping to 0
-    stable_steps = training_steps + 1 - warmup_steps - decay_steps
+    stable_steps = training_steps + 1 - warmup_zero_steps - decay_steps
     lr_decay_type = lr_scheduler_config.decay_type
     min_lr_factor = lr_scheduler_config.min_lr_factor
 
     def linear_warmup_stable_decay(
         current_step: int,
+        zero_lr_steps: int,
         warmup_steps: int,
         stable_steps: int,
         decay_steps: int,
@@ -154,22 +155,26 @@ def build_lr_schedulers(
         If `min_lr_factor` is specified, the decay range is scaled from 1 to `min_lr_factor`
         to ensure the learning rate does not drop below this minimum value.
         """
-        warmup_stable_steps = warmup_steps + stable_steps
-        if current_step < warmup_steps:
+        warmup_zero_steps = warmup_steps + zero_lr_steps
+        warmup_zero_stable_steps = warmup_zero_steps + stable_steps
+        if current_step < zero_lr_steps:
+            current_step += 1
+            curr_adjustment = 0.0
+        elif current_step < warmup_zero_steps:
             # linear warmup
             # 0-indexed step, hence + 1 adjustments
             current_step += 1
-            assert (
-                warmup_steps != 0
-            ), "warmup_steps must not be zero to reach this branch"
-            curr_adjustment = float(current_step / warmup_steps)
-        elif current_step < warmup_stable_steps:
+            assert warmup_steps != 0, (
+                "warmup_steps must not be zero to reach this branch"
+            )
+            curr_adjustment = float((current_step - zero_lr_steps) / warmup_steps)
+        elif current_step < warmup_zero_stable_steps:
             curr_adjustment = 1.0
         else:
             # 0-indexed step, hence + 1 adjustments
             current_step += 1
             assert decay_steps != 0, "decay_steps must not be zero to reach this branch"
-            progress = float(current_step - warmup_stable_steps) / decay_steps
+            progress = float(current_step - warmup_zero_stable_steps) / decay_steps
 
             if lr_decay_type == "linear":
                 curr_adjustment = 1 - progress
@@ -186,6 +191,7 @@ def build_lr_schedulers(
 
     lr_lambda = functools.partial(
         linear_warmup_stable_decay,
+        zero_lr_steps=zero_lr_steps,
         warmup_steps=warmup_steps,
         stable_steps=stable_steps,
         decay_steps=decay_steps,
