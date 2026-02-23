@@ -11,9 +11,9 @@ import torch
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
     get_optimizer_state_dict,
     set_optimizer_state_dict,
-    StateDictOptions,
 )
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
@@ -438,10 +438,34 @@ def build_optimizers_with_moe_load_balancing(
                     # update the expert bias
                     # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
                     if transformer_block.moe.load_balance_coeff != 0.0:
-                        expert_bias_delta = moe.load_balance_coeff * torch.sign(
-                            tokens_per_expert.mean() - tokens_per_expert
-                        )
-                        expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
+                        tok_deficit = tokens_per_expert.mean() - tokens_per_expert
+                        if (
+                            not hasattr(optimizer_config, "lbc_strat")
+                            or optimizer_config.lbc_strat == "sign"
+                        ):
+                            expert_bias_delta = moe.load_balance_coeff * torch.sign(
+                                tok_deficit
+                            )
+                            expert_bias_delta = (
+                                expert_bias_delta - expert_bias_delta.mean()
+                            )
+                        elif optimizer_config.lbc_strat == "centered":
+                            expert_bias_delta = tok_deficit
+                            expert_bias_delta = (
+                                expert_bias_delta / expert_bias_delta.std()
+                            )
+                            expert_bias_delta = (
+                                moe.load_balance_coeff * expert_bias_delta
+                            )
+                        elif optimizer_config.lbc_strat == "mean":
+                            expert_bias_delta = tok_deficit / tokens_per_expert.mean()
+                            expert_bias_delta = (
+                                moe.load_balance_coeff * expert_bias_delta
+                            )
+                        else:
+                            raise ValueError(
+                                f"Unrecognized {optimizer_config.lbc_strat=}"
+                            )
                         moe.expert_bias.add_(expert_bias_delta)
                     moe.tokens_per_expert.zero_()
                     moe.tokens_per_expert_cumulative.add_(tokens_per_expert)
