@@ -145,6 +145,8 @@ class GroupedExperts(nn.Module):
         use_grouped_mm: bool,
     ):
         super().__init__()
+        self.dim = dim
+        self.hidden_dim = hidden_dim
         self.num_experts = num_experts
         self.w1 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
         self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
@@ -169,6 +171,18 @@ class GroupedExperts(nn.Module):
         nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.w2, mean=0.0, std=init_std)
         nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std)
+
+    # TODO(@goon): Delete this __repr__ after debugging
+    def __repr__(self) -> str:
+        dim = self.w1.shape[2]
+        hidden_dim = self.w1.shape[1]
+        return (
+            f"{self.__class__.__name__}("
+            f"num_experts={self.num_experts}, "
+            f"dim={dim}, "
+            f"hidden_dim={hidden_dim}, "
+            f"use_grouped_mm={self.use_grouped_mm})"
+        )
 
 
 class TokenChoiceTopKRouter(nn.Module):

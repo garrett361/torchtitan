@@ -368,7 +368,16 @@ class VirtualGroupMoE(_CustomMoE):
 def get_moe_impl_cls(name: str | None = None) -> type[MoE]:
     if name is None:
         return MoE
-    moe_map = {sc.name: sc for sc in _CustomMoE.__subclasses__() if hasattr(sc, "name")}
+    # Recursively build out all subclasses of _CustomMoE
+    moe_map = {}
+
+    def _populate_subclasses(cls):
+        for sc in cls.__subclasses__():
+            if sc not in moe_map:
+                moe_map[sc.name] = sc
+                _populate_subclasses(sc)
+
+    _populate_subclasses(_CustomMoE)
     return moe_map[name]
 
 

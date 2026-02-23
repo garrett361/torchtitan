@@ -32,6 +32,9 @@ from torchtitan.models.llama3_moe.model.model import (
     Llama3MoE,
     VirtualGroupMoE,
 )
+
+from torchtitan.models.sonic_moe import  SonicVirtualGroupMoE, SonicMoE, SonicGroupedExperts
+
 from torchtitan.models.llama3_moe.model.state_dict_adapter import (
     Llama3MoEStateDictAdapter,
 )
@@ -48,9 +51,13 @@ __all__ = [
     "Llama3MoEModelArgs",
     "Llama3MoEStateDictAdapter",
     "ReplicateMoETransform",
+    "SonicGroupedExperts",
+    "SonicMoE",
+    "SonicVirtualGroupMoE",
     "TopKSchedulerArgs",
     "TopKSchedulerArgs",
     "TransformingHuggingFaceStorageReader",
+    "VirtualGroupMoE",
     "VirtualGroupMoE",
     "build_custom_metrics_processor",
     "get_hf_weight_transform_cls",
