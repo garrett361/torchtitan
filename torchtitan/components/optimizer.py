@@ -11,9 +11,9 @@ import torch
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
     get_optimizer_state_dict,
     set_optimizer_state_dict,
-    StateDictOptions,
 )
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
@@ -22,6 +22,7 @@ from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.moe import GroupedExperts, TokenChoiceTopKRouter
+from torchtitan.tools.logging import logger
 
 __all__ = [
     "OptimizersContainer",
@@ -438,16 +439,28 @@ def build_optimizers_with_moe_load_balancing(
                     # update the expert bias
                     # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
                     if transformer_block.moe.load_balance_coeff != 0.0:
-                        if not hasattr(optimizer_config, "lbc_strat") or optimizer_config.lbc_strat == "sign":
+                        if (
+                            not hasattr(optimizer_config, "lbc_strat")
+                            or optimizer_config.lbc_strat == "sign"
+                        ):
                             expert_bias_delta = moe.load_balance_coeff * torch.sign(
                                 tokens_per_expert.mean() - tokens_per_expert
                             )
-                            expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
+                            expert_bias_delta = (
+                                expert_bias_delta - expert_bias_delta.mean()
+                            )
                         elif optimizer_config.lbc_strat == "centered":
-                            expert_bias_delta =  tokens_per_expert.mean() - tokens_per_expert
-                            expert_bias_delta =  expert_bias_delta / expert_bias_delta.std()
-                            expert_bias_delta = moe.load_balance_coeff * expert_bias_delta
+                            expert_bias_delta = (
+                                tokens_per_expert.mean() - tokens_per_expert
+                            )
+                            expert_bias_delta = (
+                                expert_bias_delta / expert_bias_delta.std()
+                            )
+                            expert_bias_delta = (
+                                moe.load_balance_coeff * expert_bias_delta
+                            )
                         moe.expert_bias.add_(expert_bias_delta)
+                    logger.info(f"{moe_layer_idx=}: {moe.expert_bias=}")
                     moe.tokens_per_expert.zero_()
                     moe.tokens_per_expert_cumulative.add_(tokens_per_expert)
 
