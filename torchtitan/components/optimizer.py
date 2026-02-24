@@ -439,27 +439,32 @@ def build_optimizers_with_moe_load_balancing(
                     # update the expert bias
                     # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
                     if transformer_block.moe.load_balance_coeff != 0.0:
+                        tok_deficit = tokens_per_expert.mean() - tokens_per_expert
                         if (
                             not hasattr(optimizer_config, "lbc_strat")
                             or optimizer_config.lbc_strat == "sign"
                         ):
                             expert_bias_delta = moe.load_balance_coeff * torch.sign(
-                                tokens_per_expert.mean() - tokens_per_expert
+                                tok_deficit
                             )
                             expert_bias_delta = (
                                 expert_bias_delta - expert_bias_delta.mean()
                             )
                         elif optimizer_config.lbc_strat == "centered":
-                            expert_bias_delta = (
-                                tokens_per_expert.mean() - tokens_per_expert
-                            )
+                            expert_bias_delta = tok_deficit
                             expert_bias_delta = (
                                 expert_bias_delta / expert_bias_delta.std()
                             )
                             expert_bias_delta = (
                                 moe.load_balance_coeff * expert_bias_delta
                             )
-                        logger.info(f"{moe_layer_idx=}: {moe.expert_bias=}\n{expert_bias_delta=}\n")
+                        else:
+                            raise ValueError(
+                                f"Unrecognized {optimizer_config.lbc_strat=}"
+                            )
+                        logger.info(
+                            f"{moe_layer_idx=}: {tok_deficit=}\n{moe.expert_bias=}\n{expert_bias_delta=}\n"
+                        )
                         moe.expert_bias.add_(expert_bias_delta)
                     moe.tokens_per_expert.zero_()
                     moe.tokens_per_expert_cumulative.add_(tokens_per_expert)
