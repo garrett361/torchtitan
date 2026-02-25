@@ -462,11 +462,12 @@ def build_optimizers_with_moe_load_balancing(
                             raise ValueError(
                                 f"Unrecognized {optimizer_config.lbc_strat=}"
                             )
-                        logger.info( f"""
-                        {moe_layer_idx=}: {tok_deficit=}\n
-                        {moe_layer_idx=}: {moe.expert_bias=}\n
-                        {moe_layer_idx=}: {expert_bias_delta=}\n
-                        """)
+                        if moe_layer_idx == 14:
+                            logger.info( f"""
+                            {moe_layer_idx=}: {tok_deficit=}\n
+                            {moe_layer_idx=}: {moe.expert_bias=}\n
+                            {moe_layer_idx=}: {expert_bias_delta=}\n
+                            """)
                         moe.expert_bias.add_(expert_bias_delta)
                     moe.tokens_per_expert.zero_()
                     moe.tokens_per_expert_cumulative.add_(tokens_per_expert)
