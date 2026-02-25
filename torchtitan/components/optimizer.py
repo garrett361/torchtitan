@@ -458,9 +458,12 @@ def build_optimizers_with_moe_load_balancing(
                             expert_bias_delta = (
                                 moe.load_balance_coeff * expert_bias_delta
                             )
-                        elif optimizer_config.lbc_strat == "sum":
+                        elif optimizer_config.lbc_strat == "mean":
                             expert_bias_delta = tok_deficit
-                            expert_bias_delta = expert_bias_delta / tokens_per_expert.sum()                             expert_bias_delta = (
+                            expert_bias_delta = (
+                                expert_bias_delta / tokens_per_expert.mean()
+                            )
+                            expert_bias_delta = (
                                 moe.load_balance_coeff * expert_bias_delta
                             )
                         else:
@@ -468,7 +471,7 @@ def build_optimizers_with_moe_load_balancing(
                                 f"Unrecognized {optimizer_config.lbc_strat=}"
                             )
                         if moe_layer_idx == 14:
-                            logger.info( f"""
+                            logger.info(f"""
                             {moe_layer_idx=}: {tok_deficit=}\n
                             {moe_layer_idx=}: {moe.expert_bias=}\n
                             {moe_layer_idx=}: {expert_bias_delta=}\n
