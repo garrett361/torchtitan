@@ -169,6 +169,30 @@ llama3_moe_configs = {
         ),
         rope_scaling_args=llama_3p2_1b_3b_rope_cfg,
     ),
+    # NOTE: @fasoli
+    "1B_14moe_vg": Llama3MoEModelArgs(
+        dim=2048,
+        moe_inter_dim=8192 // 64,  # 64 groups per vg replica
+        n_layers=16,
+        n_heads=32,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.5,
+        multiple_of=256,
+        rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=128,  # 2 vg replicas, each w/ 64 experts
+            num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
+            top_k=64,
+            route_scale=64,  # Must have route_scale = top_k; see [Virtual Group Initialization].
+            hf_ffn_hidden_dim=8192,  # Must specify for virtual_group router init!
+        ),
+        is_moe_list=[False, True, True, True, True, True, True, True, True, True, True, True, True, True, True, False],
+        custom_moe_impl="virtual_group",  # Must specify for virtual_group router init!
+        rope_scaling_args=llama_3p2_1b_3b_rope_cfg,
+    ),
     # NOTE: @goon - the two-layer cfgs are used in
     # torchtitan/tests/llama3_moe/test_dist.py, do not delete!
     "1B_2layer": Llama3MoEModelArgs(
