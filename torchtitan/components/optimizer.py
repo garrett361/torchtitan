@@ -459,10 +459,7 @@ def build_optimizers_with_moe_load_balancing(
                                 moe.load_balance_coeff * expert_bias_delta
                             )
                         elif optimizer_config.lbc_strat == "mean":
-                            expert_bias_delta = tok_deficit
-                            expert_bias_delta = (
-                                expert_bias_delta / tokens_per_expert.mean()
-                            )
+                            expert_bias_delta = tok_deficit / tokens_per_expert.mean()
                             expert_bias_delta = (
                                 moe.load_balance_coeff * expert_bias_delta
                             )
