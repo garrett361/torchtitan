@@ -13,7 +13,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--methods",
         nargs="+",
-        default=["bmm"],
+        default=list(IMPLS.keys()),
         choices=list(IMPLS.keys()),
         help=f"Combine methods. Choices: {list(IMPLS.keys())}. Default: bmm",
     )
@@ -30,48 +30,38 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def print_table(
+def print_tables(
     results: dict[str, dict[str, tuple[float, float]]], methods: list[str]
 ) -> None:
-    """Print benchmark results as markdown table with ratios to baseline."""
+    """Print benchmark results as two markdown tables (fwd and fwd+bwd)."""
     baseline = methods[0]
     base_abbrev = "bcast" if baseline == "broadcast_sum" else baseline
 
     def abbrev(m: str) -> str:
         return "bcast" if m == "broadcast_sum" else m
 
-    # Build header: baseline fwd ms, ratios for fwd, baseline bwd ms, ratios for bwd
-    header_parts = ["Model", f"{base_abbrev} fwd ms"]
-    for method in methods[1:]:
-        header_parts.append(f"{abbrev(method)}/{base_abbrev} fwd")
-    header_parts.append(f"{base_abbrev} fwd+bwd ms")
-    for method in methods[1:]:
-        header_parts.append(f"{abbrev(method)}/{base_abbrev} fwd+bwd")
-
-    # Build separator
-    sep_parts = ["---"] * len(header_parts)
-
-    # Build rows
-    rows = []
-    for model, method_results in results.items():
-        base_fwd, base_fwd_bwd = method_results[baseline]
-        row = [model, f"{base_fwd:.2f}"]
+    def print_single_table(title: str, idx: int) -> None:
+        suffix = "fwd" if idx == 0 else "fwd+bwd"
+        header = ["Model", f"{base_abbrev} {suffix} ms"]
         for method in methods[1:]:
-            fwd_ms, _ = method_results[method]
-            ratio = fwd_ms / base_fwd if base_fwd > 0 else 0
-            row.append(f"{ratio:.2f}x")
-        row.append(f"{base_fwd_bwd:.2f}")
-        for method in methods[1:]:
-            _, fwd_bwd_ms = method_results[method]
-            ratio = fwd_bwd_ms / base_fwd_bwd if base_fwd_bwd > 0 else 0
-            row.append(f"{ratio:.2f}x")
-        rows.append(row)
+            header.append(f"{abbrev(method)}/{base_abbrev}")
+        sep = ["---"] * len(header)
 
-    # Print table
-    print(f"| {' | '.join(header_parts)} |")
-    print(f"| {' | '.join(sep_parts)} |")
-    for row in rows:
-        print(f"| {' | '.join(row)} |")
+        print(f"### {title}")
+        print(f"| {' | '.join(header)} |")
+        print(f"| {' | '.join(sep)} |")
+        for model, method_results in results.items():
+            base_val = method_results[baseline][idx]
+            row = [model, f"{base_val:.2f}"]
+            for method in methods[1:]:
+                val = method_results[method][idx]
+                ratio = val / base_val if base_val > 0 else 0
+                row.append(f"{ratio:.2f}x")
+            print(f"| {' | '.join(row)} |")
+        print()
+
+    print_single_table("Forward", 0)
+    print_single_table("Forward + Backward", 1)
 
 
 def main():
@@ -117,7 +107,7 @@ def main():
             fwd_bwd_ms = do_bench(fwd_bwd)
             results[model][method] = (fwd_ms, fwd_bwd_ms)
 
-    print_table(results, args.methods)
+    print_tables(results, args.methods)
 
 
 if __name__ == "__main__":
