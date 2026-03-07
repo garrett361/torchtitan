@@ -3,9 +3,8 @@
 import argparse
 
 import torch
-from triton.testing import do_bench
-
 from impls import DEEPSEEK_CONFIGS, IMPLS
+from triton.testing import do_bench
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,7 +24,11 @@ def parse_args() -> argparse.Namespace:
         help=f"DeepSeek model configs. Default: all ({list(DEEPSEEK_CONFIGS.keys())})",
     )
     parser.add_argument(
-        "--tokens", "-t", type=int, default=65536, help="Number of tokens. Default: 65536"
+        "--tokens",
+        "-t",
+        type=int,
+        default=65536,
+        help="Number of tokens. Default: 65536",
     )
     return parser.parse_args()
 
@@ -35,16 +38,12 @@ def print_tables(
 ) -> None:
     """Print benchmark results as two markdown tables (fwd and fwd+bwd)."""
     baseline = methods[0]
-    base_abbrev = "bcast" if baseline == "broadcast_sum" else baseline
-
-    def abbrev(m: str) -> str:
-        return "bcast" if m == "broadcast_sum" else m
 
     def print_single_table(title: str, idx: int) -> None:
         suffix = "fwd" if idx == 0 else "fwd+bwd"
-        header = ["Model", f"{base_abbrev} {suffix} ms"]
+        header = ["Model", f"{baseline} {suffix} ms"]
         for method in methods[1:]:
-            header.append(f"{abbrev(method)}/{base_abbrev}")
+            header.append(f"{method}/{baseline}")
         sep = ["---"] * len(header)
 
         print(f"### {title}")

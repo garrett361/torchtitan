@@ -17,13 +17,13 @@ def bmm(top_scores: Tensor, routed_output: Tensor) -> Tensor:
     return torch.bmm(top_scores.unsqueeze(1), routed_output).squeeze(1)
 
 
-def broadcast_sum(top_scores: Tensor, routed_output: Tensor) -> Tensor:
-    """Combine via broadcast multiply and sum: (T, K, 1) * (T, K, D) -> sum -> (T, D)."""
+def bcast_sum(top_scores: Tensor, routed_output: Tensor) -> Tensor:
+    """Combine via bcast multiply and sum: (T, K, 1) * (T, K, D) -> sum -> (T, D)."""
     return (top_scores.unsqueeze(-1) * routed_output).sum(dim=1)
 
 @torch.compile
-def broadcast_sum_compiled(top_scores: Tensor, routed_output: Tensor) -> Tensor:
-    """Combine via broadcast multiply and sum: (T, K, 1) * (T, K, D) -> sum -> (T, D)."""
+def bcast_sum_compiled(top_scores: Tensor, routed_output: Tensor) -> Tensor:
+    """Combine via bcast multiply and sum: (T, K, 1) * (T, K, D) -> sum -> (T, D)."""
     return (top_scores.unsqueeze(-1) * routed_output).sum(dim=1)
 
 def einsum(top_scores: Tensor, routed_output: Tensor) -> Tensor:
@@ -33,7 +33,7 @@ def einsum(top_scores: Tensor, routed_output: Tensor) -> Tensor:
 
 IMPLS: dict[str, Callable[[Tensor, Tensor], Tensor]] = {
     "bmm": bmm,
-    "broadcast_sum": broadcast_sum,
-    "broadcast_sum_compiled": broadcast_sum_compiled,
+    "bcast_sum": bcast_sum,
+    "bcast_sum_compiled": bcast_sum_compiled,
     "einsum": einsum,
 }
