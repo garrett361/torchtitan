@@ -11,95 +11,113 @@ from impls import DEEPSEEK_CONFIGS, IMPLS
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--method",
-        type=str,
-        default="bmm",
+        "--methods",
+        nargs="+",
+        default=["bmm"],
         choices=list(IMPLS.keys()),
-        help=f"Combine method. Choices: {list(IMPLS.keys())}. Default: bmm",
+        help=f"Combine methods. Choices: {list(IMPLS.keys())}. Default: bmm",
     )
     parser.add_argument(
-        "--model",
-        type=str,
+        "--models",
+        nargs="+",
+        default=list(DEEPSEEK_CONFIGS.keys()),
         choices=list(DEEPSEEK_CONFIGS.keys()),
-        help="DeepSeek model config. Sets top_k and dim.",
+        help=f"DeepSeek model configs. Default: all ({list(DEEPSEEK_CONFIGS.keys())})",
     )
     parser.add_argument(
         "--tokens", "-t", type=int, default=65536, help="Number of tokens. Default: 65536"
     )
-    parser.add_argument(
-        "--top_k", "-k", type=int, default=None, help="Top-k experts."
-    )
-    parser.add_argument(
-        "--dim", "-d", type=int, default=None, help="Model dimension."
-    )
     return parser.parse_args()
+
+
+def print_table(
+    results: dict[str, dict[str, tuple[float, float]]], methods: list[str]
+) -> None:
+    """Print benchmark results as markdown table with ratios to baseline."""
+    baseline = methods[0]
+    base_abbrev = "bcast" if baseline == "broadcast_sum" else baseline
+
+    def abbrev(m: str) -> str:
+        return "bcast" if m == "broadcast_sum" else m
+
+    # Build header: baseline fwd ms, ratios for fwd, baseline bwd ms, ratios for bwd
+    header_parts = ["Model", f"{base_abbrev} fwd ms"]
+    for method in methods[1:]:
+        header_parts.append(f"{abbrev(method)}/{base_abbrev} fwd")
+    header_parts.append(f"{base_abbrev} fwd+bwd ms")
+    for method in methods[1:]:
+        header_parts.append(f"{abbrev(method)}/{base_abbrev} fwd+bwd")
+
+    # Build separator
+    sep_parts = ["---"] * len(header_parts)
+
+    # Build rows
+    rows = []
+    for model, method_results in results.items():
+        base_fwd, base_fwd_bwd = method_results[baseline]
+        row = [model, f"{base_fwd:.2f}"]
+        for method in methods[1:]:
+            fwd_ms, _ = method_results[method]
+            ratio = fwd_ms / base_fwd if base_fwd > 0 else 0
+            row.append(f"{ratio:.2f}x")
+        row.append(f"{base_fwd_bwd:.2f}")
+        for method in methods[1:]:
+            _, fwd_bwd_ms = method_results[method]
+            ratio = fwd_bwd_ms / base_fwd_bwd if base_fwd_bwd > 0 else 0
+            row.append(f"{ratio:.2f}x")
+        rows.append(row)
+
+    # Print table
+    print(f"| {' | '.join(header_parts)} |")
+    print(f"| {' | '.join(sep_parts)} |")
+    for row in rows:
+        print(f"| {' | '.join(row)} |")
 
 
 def main():
     args = parse_args()
     tokens = args.tokens
-    combine_fn = IMPLS[args.method]
+    device = torch.device("cuda")
 
-    # Resolve top_k and dim from model config or defaults
-    if args.model:
-        config = DEEPSEEK_CONFIGS[args.model]
+    print(f"Device: {torch.cuda.get_device_name()}")
+    print(f"Tokens: {tokens}")
+    print()
+
+    # {model: {method: (fwd_ms, fwd_bwd_ms)}}
+    results: dict[str, dict[str, tuple[float, float]]] = {}
+
+    for model in args.models:
+        config = DEEPSEEK_CONFIGS[model]
         top_k = config["top_k"]
         dim = config["dim"]
 
-        # Warn if CLI overrides model config
-        if args.top_k is not None and args.top_k != top_k:
-            print(f"Warning: --top_k overrides model {args.model} config ({top_k} -> {args.top_k})")
-            top_k = args.top_k
-        if args.dim is not None and args.dim != dim:
-            print(f"Warning: --dim overrides model {args.model} config ({dim} -> {args.dim})")
-            dim = args.dim
-    else:
-        # Defaults when no model specified
-        top_k = args.top_k if args.top_k is not None else 6
-        dim = args.dim if args.dim is not None else 2048
+        # Create tensors once per model
+        top_scores = torch.randn(
+            tokens, top_k, device=device, dtype=torch.float32, requires_grad=True
+        )
+        routed_output = torch.randn(
+            tokens, top_k, dim, device=device, dtype=torch.float32, requires_grad=True
+        )
 
-    device = torch.device("cuda")
+        results[model] = {}
 
-    # top_scores: (tokens, top_k), routed_output: (tokens, top_k, dim)
-    top_scores = torch.randn(tokens, top_k, device=device, dtype=torch.float32, requires_grad=True)
-    routed_output = torch.randn(
-        tokens, top_k, dim, device=device, dtype=torch.float32, requires_grad=True
-    )
+        for method in args.methods:
+            combine_fn = IMPLS[method]
 
-    def fwd():
-        return combine_fn(top_scores, routed_output)
+            def fwd():
+                return combine_fn(top_scores, routed_output)
 
-    def fwd_bwd():
-        out = combine_fn(top_scores, routed_output)
-        out.sum().backward()
-        top_scores.grad = None
-        routed_output.grad = None
+            def fwd_bwd():
+                out = combine_fn(top_scores, routed_output)
+                out.sum().backward()
+                top_scores.grad = None
+                routed_output.grad = None
 
-    fwd_ms = do_bench(fwd, quantiles=[0.5, 0.0, 1.0])
-    fwd_bwd_ms = do_bench(fwd_bwd, quantiles=[0.5, 0.0, 1.0])
+            fwd_ms = do_bench(fwd)
+            fwd_bwd_ms = do_bench(fwd_bwd)
+            results[model][method] = (fwd_ms, fwd_bwd_ms)
 
-    # FLOPs: tokens * top_k * dim multiplies + tokens * top_k * dim adds
-    fwd_flops = 2 * tokens * top_k * dim
-    bwd_flops = 2 * fwd_flops
-    total_flops = fwd_flops + bwd_flops
-
-    def tflops(flops, ms):
-        return (flops / 1e12) / (ms / 1e3) if ms > 0 else 0
-
-    print(f"Method: {args.method}")
-    print(f"Shapes: top_scores=({tokens}, {top_k}), routed_output=({tokens}, {top_k}, {dim})")
-    print(f"Device: {torch.cuda.get_device_name()}")
-    print()
-    print(
-        f"{'Operation':<12} {'Median (ms)':>12} {'Min (ms)':>10} {'Max (ms)':>10} {'TFLOP/s':>10}"
-    )
-    print("-" * 56)
-    print(
-        f"{'forward':<12} {fwd_ms[0]:>12.3f} {fwd_ms[1]:>10.3f} {fwd_ms[2]:>10.3f} {tflops(fwd_flops, fwd_ms[0]):>10.2f}"
-    )
-    print(
-        f"{'fwd+bwd':<12} {fwd_bwd_ms[0]:>12.3f} {fwd_bwd_ms[1]:>10.3f} {fwd_bwd_ms[2]:>10.3f} {tflops(total_flops, fwd_bwd_ms[0]):>10.2f}"
-    )
+    print_table(results, args.methods)
 
 
 if __name__ == "__main__":
