@@ -7,6 +7,8 @@ Device: NVIDIA H100 80GB HBM3
 Tokens: 65536
 ```
 
+`dim` and `top_k`  taken from deepseek cfgs.
+
 ### Forward
 | Model | bmm fwd ms | bcast_sum/bmm | bcast_sum_compiled/bmm | einsum/bmm |
 | --- | --- | --- | --- | --- |
