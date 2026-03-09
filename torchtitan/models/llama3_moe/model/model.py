@@ -428,25 +428,29 @@ class Llama3MoEBlock(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
-    ):
+        past_key_value: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
         Perform a forward pass through the Llama3MoEBlock.
 
         Args:
             x (torch.Tensor): Input tensor.
-            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
+            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies, already
+                sliced to the current token positions.
+            past_key_value (tuple[Tensor, Tensor] | None): Cached (key, value) tensors
+                from previous decoding steps. None during training.
 
         Returns:
-            torch.Tensor: Output tensor after applying attention and feedforward layers.
+            tuple: (output tensor, updated (key, value) cache for this layer)
 
         """
-
-        h = x + self.attention(self.attention_norm(x), freqs_cis)
+        attn_out, new_key_value = self.attention(self.attention_norm(x), freqs_cis, past_key_value)
+        h = x + attn_out
         if self.moe_enabled:
             out = h + self.moe(self.ffn_norm(h))
         else:
             out = h + self.feed_forward(self.ffn_norm(h))
-        return out
+        return out, new_key_value
 
     def init_weights(self, buffer_device: torch.device | None = None):
         for norm in (self.attention_norm, self.ffn_norm):
@@ -562,6 +566,7 @@ class Llama3MoE(nn.Module, ModelProtocol):
         self,
         tokens: torch.Tensor,
         input_batch: torch.Tensor | None = None,
+        past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
     ):
         """
         Perform a forward pass through the Llama3MoE model.
@@ -575,19 +580,41 @@ class Llama3MoE(nn.Module, ModelProtocol):
                 This will always be the input batch regardless of the pipeline stage.
                 This field is required for non-first PP stages to perform document
                 masking attention (to analyze the boundary of the document).
+            past_key_values (list[tuple[Tensor, Tensor]] | None): Per-layer KV cache from
+                previous decoding steps. None during training or on the first (prefill) call.
+                Each element is (key, value) of shape (bs, past_len, n_kv_heads, head_dim).
 
         Returns:
-            torch.Tensor: Output logits after applying the Llama3MoE model.
+            If past_key_values is None (training / prefill without cache):
+                torch.Tensor: Output logits.
+            If past_key_values is provided:
+                tuple: (logits, new_past_key_values) where new_past_key_values is a list of
+                updated (key, value) tuples, one per layer.
 
         """
+        use_cache = past_key_values is not None
 
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
-        for layer in self.layers.values():
-            h = layer(h, self.freqs_cis)
+        # Slice freqs_cis to the current token positions.
+        # start_pos > 0 only during incremental decode (non-empty cache).
+        seqlen = tokens.shape[1]
+        # Check if we have populated cache (not just an empty list or list of Nones)
+        has_cache = use_cache and len(past_key_values) > 0 and past_key_values[0] is not None
+        start_pos = past_key_values[0][0].shape[1] if has_cache else 0
+        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+
+        new_past_key_values = []
+        for i, layer in enumerate(self.layers.values()):
+            past_kv = past_key_values[i] if has_cache else None
+            h, new_kv = layer(h, freqs_cis, past_kv)
+            new_past_key_values.append(new_kv)
 
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h
+
+        if use_cache:
+            return output, new_past_key_values
         return output
 
 

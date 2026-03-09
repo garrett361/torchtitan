@@ -156,16 +156,22 @@ class Attention(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
-    ):
+        past_key_value: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
         Forward pass of the attention module.
 
         Args:
             x (torch.Tensor): Input tensor.
-            freqs_cis (torch.Tensor): Precomputed frequency tensor.
+            freqs_cis (torch.Tensor): Precomputed frequency tensor, already sliced to
+                the positions of the current tokens (i.e. freqs_cis[start_pos:start_pos+seqlen]).
+            past_key_value (tuple[Tensor, Tensor] | None): Cached (key, value) tensors from
+                previous decoding steps, each of shape (bs, past_len, n_kv_heads, head_dim).
+                None during training or on the first (prefill) forward pass.
 
         Returns:
-            torch.Tensor: Output tensor after attention.
+            tuple: (output tensor after attention,
+                    updated (key, value) cache for this layer)
 
         """
 
@@ -181,13 +187,19 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
+        # Append current keys/values to the cache (before GQA expansion to save memory)
+        if past_key_value is not None:
+            xk = torch.cat([past_key_value[0], xk], dim=1)
+            xv = torch.cat([past_key_value[1], xv], dim=1)
+        new_key_value = (xk, xv)
+
         # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+        keys = repeat_kv(xk, self.n_rep)  # (bs, full_seqlen, n_local_heads, head_dim)
+        values = repeat_kv(xv, self.n_rep)  # (bs, full_seqlen, n_local_heads, head_dim)
 
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        xk = keys.transpose(1, 2)  # (bs, n_local_heads, full_seqlen, head_dim)
+        xv = values.transpose(1, 2)  # (bs, n_local_heads, full_seqlen, head_dim)
 
         output = self.sdpa(xq, xk, xv)
 
@@ -195,7 +207,7 @@ class Attention(nn.Module):
             1, 2
         ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         output = output.view(bs, seqlen, -1)
-        return self.wo(output)
+        return self.wo(output), new_key_value
 
 
 class FeedForward(nn.Module):
@@ -285,21 +297,26 @@ class TransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
-    ):
+        past_key_value: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
         Perform a forward pass through the TransformerBlock.
 
         Args:
             x (torch.Tensor): Input tensor.
-            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
+            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies, already
+                sliced to the current token positions.
+            past_key_value (tuple[Tensor, Tensor] | None): Cached (key, value) tensors
+                from previous decoding steps. None during training.
 
         Returns:
-            torch.Tensor: Output tensor after applying attention and feedforward layers.
+            tuple: (output tensor, updated (key, value) cache for this layer)
 
         """
-        h = x + self.attention(self.attention_norm(x), freqs_cis)
+        attn_out, new_key_value = self.attention(self.attention_norm(x), freqs_cis, past_key_value)
+        h = x + attn_out
         out = h + self.feed_forward(self.ffn_norm(h))
-        return out
+        return out, new_key_value
 
     def init_weights(self):
         for norm in (self.attention_norm, self.ffn_norm):
@@ -417,7 +434,7 @@ class Transformer(nn.Module, ModelProtocol):
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis)
+            h, _ = layer(h, self.freqs_cis)
 
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h
