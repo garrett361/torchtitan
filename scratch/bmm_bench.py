@@ -1,27 +1,27 @@
-"""Benchmark token combining methods for MoE."""
+"""Benchmark token combining impls for MoE."""
 
 import argparse
 
 import torch
-from impls import DEEPSEEK_CONFIGS, IMPLS
+from impls import IMPLS, MODEL_CFGS
 from triton.testing import do_bench
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--methods",
+        "--impls",
         nargs="+",
         default=list(IMPLS.keys()),
         choices=list(IMPLS.keys()),
-        help=f"Combine methods. Choices: {list(IMPLS.keys())}. Default: bmm",
+        help=f"Impls Choices: {list(IMPLS.keys())}. Default: bmm",
     )
     parser.add_argument(
         "--models",
         nargs="+",
-        default=list(DEEPSEEK_CONFIGS.keys()),
-        choices=list(DEEPSEEK_CONFIGS.keys()),
-        help=f"DeepSeek model configs. Default: all ({list(DEEPSEEK_CONFIGS.keys())})",
+        default=list(MODEL_CFGS.keys()),
+        choices=list(MODEL_CFGS.keys()),
+        help=f"DeepSeek model configs. Default: all ({list(MODEL_CFGS.keys())})",
     )
     parser.add_argument(
         "--tokens",
@@ -34,15 +34,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def print_tables(
-    results: dict[str, dict[str, tuple[float, float]]], methods: list[str]
+    results: dict[str, dict[str, tuple[float, float]]], impls: list[str]
 ) -> None:
     """Print benchmark results as two markdown tables (fwd and fwd+bwd)."""
-    baseline = methods[0]
+    baseline = impls[0]
 
     def print_single_table(title: str, idx: int) -> None:
         suffix = "fwd" if idx == 0 else "fwd+bwd"
         header = ["Model", f"{baseline} {suffix} ms"]
-        for method in methods[1:]:
+        for method in impls[1:]:
             header.append(f"{method}/{baseline}")
         sep = ["---"] * len(header)
 
@@ -52,7 +52,7 @@ def print_tables(
         for model, method_results in results.items():
             base_val = method_results[baseline][idx]
             row = [model, f"{base_val:.2f}"]
-            for method in methods[1:]:
+            for method in impls[1:]:
                 val = method_results[method][idx]
                 ratio = val / base_val if base_val > 0 else 0
                 row.append(f"{ratio:.2f}x")
@@ -76,7 +76,7 @@ def main():
     results: dict[str, dict[str, tuple[float, float]]] = {}
 
     for model in args.models:
-        config = DEEPSEEK_CONFIGS[model]
+        config = MODEL_CFGS[model]
         top_k = config["top_k"]
         dim = config["dim"]
 
@@ -90,23 +90,23 @@ def main():
 
         results[model] = {}
 
-        for method in args.methods:
-            combine_fn = IMPLS[method]
+        for impl_str in args.impls:
+            impl = IMPLS[impl_str]
 
             def fwd():
-                return combine_fn(top_scores, routed_output)
+                return impl(top_scores, routed_output)
 
             def fwd_bwd():
-                out = combine_fn(top_scores, routed_output)
+                out = impl(top_scores, routed_output)
                 out.sum().backward()
                 top_scores.grad = None
                 routed_output.grad = None
 
             fwd_ms = do_bench(fwd)
             fwd_bwd_ms = do_bench(fwd_bwd)
-            results[model][method] = (fwd_ms, fwd_bwd_ms)
+            results[model][impl_str] = (fwd_ms, fwd_bwd_ms)
 
-    print_tables(results, args.methods)
+    print_tables(results, args.impls)
 
 
 if __name__ == "__main__":
