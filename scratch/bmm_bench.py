@@ -55,7 +55,8 @@ def print_tables(
             for method in impls[1:]:
                 val = method_results[method][idx]
                 ratio = val / base_val if base_val > 0 else 0
-                row.append(f"{ratio:.2f}x")
+                rocket = " 🚀" if ratio < 1.0 else ""
+                row.append(f"{ratio:.2f}x{rocket}")
             print(f"| {' | '.join(row)} |")
         print()
 
