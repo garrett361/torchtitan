@@ -11,6 +11,7 @@ Tokens: 65536
 
 Timing of different methods.
 * bmm: `torch.bmm(top_scores.unsqueeze(1), routed_output).squeeze(1)`
+* bmm_compiled: the above, with `torch.compile`
 * bcast_sum: `(top_scores.unsqueeze(-1) * routed_output).sum(dim=1)`
 * bcast_sum_compiled: the above, with `torch.compile`
 * einsum: `torch.einsum("tk,tkd->td", top_scores, routed_output)`
