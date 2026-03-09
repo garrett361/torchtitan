@@ -15,7 +15,7 @@ Timing of different methods.
 * bcast_sum_compiled: the above, with `torch.compile`
 * einsum: `torch.einsum("tk,tkd->td", top_scores, routed_output)`
 
-Reporting the absolute bmm time in milliseconds and time ratios relative to bmm for all other cases:
+Reporting the absolute bmm time in milliseconds and time ratios relative to bmm for all other cases. 🚀 = faster.
 
 ### Forward
 | Model | bmm fwd ms | bcast_sum/bmm | bcast_sum_compiled/bmm | einsum/bmm |
