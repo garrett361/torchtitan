@@ -26,6 +26,11 @@ def bmm(top_scores: Tensor, routed_output: Tensor) -> Tensor:
     """Combine via batched matrix multiply: (T, 1, K) @ (T, K, D) -> (T, 1, D)."""
     return torch.bmm(top_scores.unsqueeze(1), routed_output.float()).squeeze(1)
 
+@torch.compile
+def bmm_compiled(top_scores: Tensor, routed_output: Tensor) -> Tensor:
+    """Combine via batched matrix multiply: (T, 1, K) @ (T, K, D) -> (T, 1, D)."""
+    return torch.bmm(top_scores.unsqueeze(1), routed_output.float()).squeeze(1)
+
 
 def bcast_sum(top_scores: Tensor, routed_output: Tensor) -> Tensor:
     """Combine via bcast multiply and sum: (T, K, 1) * (T, K, D) -> sum -> (T, D)."""
@@ -45,6 +50,7 @@ def einsum(top_scores: Tensor, routed_output: Tensor) -> Tensor:
 
 IMPLS: dict[str, Callable[[Tensor, Tensor], Tensor]] = {
     "bmm": bmm,
+    "bmm_compiled": bmm_compiled,
     "bcast_sum": bcast_sum,
     "bcast_sum_compiled": bcast_sum_compiled,
     "einsum": einsum,

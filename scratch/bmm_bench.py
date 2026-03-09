@@ -69,6 +69,7 @@ def main():
     tokens = args.tokens
     device = torch.device("cuda")
 
+    print(f"PyTorch: {torch.__version__}")
     print(f"Device: {torch.cuda.get_device_name()}")
     print(f"Tokens: {tokens}")
     print()

@@ -112,6 +112,7 @@ def main():
     print(
         f"Shapes: top_scores=({tokens}, {top_k}), routed_output=({tokens}, {top_k}, {dim})"
     )
+    print(f"PyTorch: {torch.__version__}")
     print(f"Device: {torch.cuda.get_device_name()}")
     print()
     print("CUDA Kernels by PyTorch Op:")
