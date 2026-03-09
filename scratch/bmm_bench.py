@@ -81,12 +81,13 @@ def main():
         top_k = config["top_k"]
         dim = config["dim"]
 
-        # Create tensors once per model
-        top_scores = torch.randn(
+        # Create tensors once per model. For the MoE BMM setup the scores are in float32 and the
+        # routed_output is usually in low-precision.
+        top_scores = torch.randn( 
             tokens, top_k, device=device, dtype=torch.float32, requires_grad=True
         )
         routed_output = torch.randn(
-            tokens, top_k, dim, device=device, dtype=torch.float32, requires_grad=True
+            tokens, top_k, dim, device=device, dtype=torch.bfloat16, requires_grad=True
         )
 
         results[model] = {}
