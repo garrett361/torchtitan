@@ -9,6 +9,14 @@ Tokens: 65536
 
 `dim` and `top_k`  taken from deepseek cfgs.
 
+Timing of different methods.
+* bmm: `torch.bmm(top_scores.unsqueeze(1), routed_output).squeeze(1)`
+* bcast_sum: `(top_scores.unsqueeze(-1) * routed_output).sum(dim=1)`
+* bcast_sum_compiled: the above, with `torch.compile`
+* einsum: `torch.einsum("tk,tkd->td", top_scores, routed_output)`
+
+Reporting the absolute bmm time in milliseconds and time ratios relative to bmm for all other cases:
+
 ### Forward
 | Model | bmm fwd ms | bcast_sum/bmm | bcast_sum_compiled/bmm | einsum/bmm |
 | --- | --- | --- | --- | --- |
