@@ -218,9 +218,9 @@ class ScaledDotProductAttention(torch.nn.Module):
         scale: float | None = None,
     ) -> torch.Tensor:
         assert self.backends, "SDPA Backends should not be empty."
-        # During KV cache decode, query length (1) != key length (N)
-        # In this case, is_causal must be False since the single query attends to all keys
-        # During training/prefill, query length == key length, so is_causal=True for autoregressive masking
+        # During decode with KV cache, query length (1) != key length (N).
+        # In this case, we set is_causal to False (follows HF practice).
+        # During training/prefill, query length == key length, so is_causal=True.
         is_causal = (q.shape[2] == k.shape[2])
         with sdpa_kernel(self.backends, set_priority=True):
             return F.scaled_dot_product_attention(q, k, v, is_causal=is_causal, scale=scale)
