@@ -8,20 +8,20 @@
 import pytest
 import torch
 import torch.nn.functional as F
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.models.llama3_moe import (
-    apply_custom_init,
-    llama3_moe_configs,
     Llama3MoE,
     Llama3MoEJobConfig,
     Llama3MoEModelArgs,
     Llama3MoEStateDictAdapter,
+    apply_custom_init,
+    llama3_moe_configs,
 )
 from torchtitan.models.llama3_moe.metrics import MoEHook
 from torchtitan.models.moe import MoE
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 TEST_TEXT = """
 The biggest lesson that can be read from 70 years of AI research is that general methods that leverage
@@ -212,6 +212,29 @@ class TestModel:
 
         assert not torch.isclose(before_std, after_std)
 
+    def test_model_kv_cache(self):
+        with torch.inference_mode():
+            args = Llama3MoEModelArgs(
+                dim=self.dim,
+                moe_inter_dim=self.moe_inter_dim,
+                n_layers=self.n_layers,
+                n_heads=self.n_heads,
+                vocab_size=self.vocab_size,
+                is_moe_list=None,
+            )
+            model = Llama3MoE(args)
+            model.init_weights()
+            model.to(self.device)
+            # KV-cache for bs=1 only, apparently.
+            inputs = torch.randint(
+                self.vocab_size, size=(1, self.seqlen), device=self.device
+            )
+            inputs_except_last = inputs[:, :-1]
+            inputs_only_last = inputs[:, -1:]
+            _, past_key_values = model(inputs_except_last, past_key_values=[])
+            out_last_only, _ = model(inputs_only_last, past_key_values=past_key_values)
+            out_ref = model(inputs)
+            torch.testing.assert_close(out_ref[:, -1], out_last_only[:, -1])
 
 class TestHooks:
     # Small Defaults
