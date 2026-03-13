@@ -15,15 +15,14 @@ from torch.distributed._functional_collectives import (
 )
 from torch.distributed.tensor import (
     DeviceMesh,
-    distribute_module,
-    distribute_tensor,
     DTensor,
     Shard,
+    distribute_module,
+    distribute_tensor,
 )
 from torch.distributed.tensor.parallel import ParallelStyle
 
 from torchtitan.tools.utils import _round_up
-
 
 TOKEN_GROUP_ALIGN_SIZE_M = 8
 ValidTokenGroupAlignmentSize = Literal[8, 16, 32]
@@ -157,6 +156,13 @@ class ExpertParallel(ParallelStyle):
         return routed_output
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        from torchtitan.models.llama3_moe import SonicGroupedExperts
+
+        if isinstance(module, SonicGroupedExperts):
+            raise NotImplementedError(
+                "SonicGroupedExperts does not currently support EP"
+            )
+
         return distribute_module(
             module,
             device_mesh,
