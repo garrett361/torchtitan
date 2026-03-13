@@ -74,6 +74,7 @@ class MoEOverrides:
 class Llama3MoEOptimizer(Optimizer):
     moe_router_lr: float | None = None
     routed_expert_lr: float | None = None
+    lbc_strat: Literal["sign", "centered", "mean"] = "sign"
 
 
 @dataclass
