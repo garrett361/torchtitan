@@ -24,7 +24,6 @@ group.add_argument("--sonic", action="store_true")
 group.add_argument("--grouped-mm", action="store_true")
 parser.add_argument("--sync-fwd", action="store_true", help="torch.cuda.synchronize() before forward compute per layer")
 parser.add_argument("--sync-bwd", action="store_true", help="torch.cuda.synchronize() before backward compute per layer")
-parser.add_argument("--patch-dlpack", action="store_true", help="Bypass _TensorWithStream DLPack wrapper")
 parser.add_argument("--steps", type=int, default=100_000)
 parser.add_argument("--num-experts", type=int, default=128)
 parser.add_argument("--num-layers", type=int, default=4)
@@ -53,18 +52,6 @@ if __name__ == "__main__":
         if args.sonic:
             from sonicmoe.enums import ActivationType
             from sonicmoe.functional import moe_general_routing_inputs
-
-        if args.patch_dlpack:
-            import sonicmoe.utils as _utils
-            _orig_convert = _utils.convert_torch_tensor_to_cute_tensor
-            def _convert_no_stream(x, stride_order, leading_dim, alignment, divisibility, stream=None):
-                return _orig_convert(x, stride_order, leading_dim, alignment, divisibility, stream=None)
-            _utils.convert_torch_tensor_to_cute_tensor = _convert_no_stream
-            import sonicmoe.functional.forward as _fwd
-            _fwd.convert_torch_tensor_to_cute_tensor = _convert_no_stream
-            import sonicmoe.functional.backward as _bwd
-            _bwd.convert_torch_tensor_to_cute_tensor = _convert_no_stream
-            log("PATCHED: DLPack stream wrapper bypassed")
 
         class BaseMoELayer(nn.Module):
             def __init__(self, dim, hidden_dim, num_experts, top_k):
