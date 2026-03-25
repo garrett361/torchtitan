@@ -563,7 +563,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ep_enabled=parallel_dims.ep_enabled,
         )
         self.checkpointer.maybe_wait_for_staging()
-        self.optimizers.step()
+        if not torch.isnan(grad_norm).any():
+            self.optimizers.step()
+        else:
+            logger.warning(f"Skipping optim step at {self.step + 1} due to {grad_norm=} nan")
         self.lr_schedulers.step()
 
         # Reduce the data collected over gradient accumulation steps.
