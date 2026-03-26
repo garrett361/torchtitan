@@ -45,6 +45,9 @@ from torchtitan.tools.profiling import (
     maybe_enable_profiling,
 )
 
+import logging
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # core configs
