@@ -162,33 +162,18 @@ class TestSonicMoE:
             inputs_moe.grad, inputs_sonic.grad, rtol=self.rtol, atol=self.atol
         )
 
-        # Compare router gradients
-        torch.testing.assert_close(
-            moe.router.gate.weight.grad,
-            sonic_moe.router.gate.weight.grad,
-            rtol=self.rtol,
-            atol=self.atol,
-        )
-
-        # Compare expert weight gradients (same layout - direct comparison)
-        torch.testing.assert_close(
-            moe.experts.w1.grad,
-            sonic_moe.experts.w1.grad,
-            rtol=self.rtol,
-            atol=self.atol,
-        )
-        torch.testing.assert_close(
-            moe.experts.w3.grad,
-            sonic_moe.experts.w3.grad,
-            rtol=self.rtol,
-            atol=self.atol,
-        )
-        torch.testing.assert_close(
-            moe.experts.w2.grad,
-            sonic_moe.experts.w2.grad,
-            rtol=self.rtol,
-            atol=self.atol,
-        )
+        # And all params:
+        for (n, p), (n_moe, p_moe) in zip(
+            moe.named_parameters(), sonic_moe.named_parameters(), strict=True
+        ):
+            assert n == n_moe, f"{n=}, {n_moe=}"
+            torch.testing.assert_close(
+                p.grad,
+                p_moe.grad,
+                rtol=self.rtol,
+                atol=self.atol,
+                msg=f"Failed on {n=}"
+            )
 
     @pytest.mark.parametrize("use_vg", [True, False], ids=["vg", "no_vg"])
     def test_state_dict_compatibility(self, use_vg: bool) -> None:
