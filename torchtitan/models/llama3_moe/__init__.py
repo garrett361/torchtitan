@@ -144,6 +144,11 @@ llama3_moe_configs = {
         ),
         is_moe_list=[True if n == 0 else False for n in range(6)],
     ),
+
+    # ============================================================
+    # 1B llamas
+    # ============================================================
+
     # https://huggingface.co/meta-llama/Llama-3.2-1B/blob/main/config.json
     # ffn_dim_multiplier for 1B:
     # HF: intermediate_size = 8192, hidden_size = 2048.
@@ -159,18 +164,17 @@ llama3_moe_configs = {
         multiple_of=256,
         rope_theta=500000,
         is_moe_list=None,
-        moe_args=MoEArgs(
-            num_experts=8,
-            num_shared_experts=0,
-            score_func="softmax",
-            route_norm=True,
-            score_before_experts=False,
-            top_k=2,
-        ),
+        # moe_args=MoEArgs(
+        #     num_experts=8,
+        #     num_shared_experts=0,
+        #     score_func="softmax",
+        #     route_norm=True,
+        #     score_before_experts=False,
+        #     top_k=2,
+        # ),
         rope_scaling_args=llama_3p2_1b_3b_rope_cfg,
     ),
-    # NOTE: @fasoli
-    "1B_14moe_vg": Llama3MoEModelArgs(
+    "1B_14moe_e2g64t64": Llama3MoEModelArgs(
         dim=2048,
         moe_inter_dim=8192 // 64,  # 64 groups per vg replica
         n_layers=16,
@@ -189,7 +193,30 @@ llama3_moe_configs = {
             route_scale=64,  # Must have route_scale = top_k; see [Virtual Group Initialization].
             hf_ffn_hidden_dim=8192,  # Must specify for virtual_group router init!
         ),
-        is_moe_list=[False, True, True, True, True, True, True, True, True, True, True, True, True, True, True, False],
+        is_moe_list=[False] + [True] * 14 + [False],
+        custom_moe_impl="virtual_group",  # Must specify for virtual_group router init!
+        rope_scaling_args=llama_3p2_1b_3b_rope_cfg,
+    ),
+    "1B_14moe_e2g64t48": Llama3MoEModelArgs(
+        dim=2048,
+        moe_inter_dim=8192 // 64,  # 64 groups per vg replica
+        n_layers=16,
+        n_heads=32,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.5,
+        multiple_of=256,
+        rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=128,  # 2 vg replicas, each w/ 64 experts
+            num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
+            top_k=48,  # selected tokens < experts => lower FLOPs
+            route_scale=48,  # Must have route_scale = top_k; see [Virtual Group Initialization].
+            hf_ffn_hidden_dim=8192,  # Must specify for virtual_group router init!
+        ),
+        is_moe_list=[False] + [True] * 14 + [False],
         custom_moe_impl="virtual_group",  # Must specify for virtual_group router init!
         rope_scaling_args=llama_3p2_1b_3b_rope_cfg,
     ),
@@ -238,8 +265,13 @@ llama3_moe_configs = {
         custom_moe_impl="virtual_group",  # Must specify for virtual_group router init!
         rope_scaling_args=llama_3p2_1b_3b_rope_cfg,
     ),
+
+    # ============================================================
+    # 3B llamas
+    # ============================================================
+
     # https://huggingface.co/meta-llama/Llama-3.2-3B/blob/main/config.json
-    # ffn_dim_multiplier for 8B:
+    # ffn_dim_multiplier for 3B:
     # HF: intermediate_size = 8192, hidden_size = 3072.
     # torchtitan: intermediate_size = round_up(int(4 * 2 * cfg.dim * cfg.ffn_dim_multiplier / 3),
     # multiple_of=cfg.multiple_of)
@@ -253,14 +285,14 @@ llama3_moe_configs = {
         multiple_of=256,
         rope_theta=500000,
         is_moe_list=None,
-        moe_args=MoEArgs(
-            num_experts=8,
-            num_shared_experts=0,
-            score_func="softmax",
-            route_norm=True,
-            score_before_experts=False,
-            top_k=2,
-        ),
+        # moe_args=MoEArgs(
+        #     num_experts=8,
+        #     num_shared_experts=0,
+        #     score_func="softmax",
+        #     route_norm=True,
+        #     score_before_experts=False,
+        #     top_k=2,
+        # ),
         rope_scaling_args=llama_3p2_1b_3b_rope_cfg,
     ),
     "3B_2layer": Llama3MoEModelArgs(
@@ -307,6 +339,60 @@ llama3_moe_configs = {
         custom_moe_impl="virtual_group",  # Must specify for virtual_group router init!
         rope_scaling_args=llama_3p2_1b_3b_rope_cfg,
     ),
+    "3B_14moe_e2g64t48": Llama3MoEModelArgs(
+        dim=3072,
+        moe_inter_dim=8192 // 64,  # 64 groups per vg replica
+        n_layers=28,
+        n_heads=24,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.0,
+        multiple_of=256,
+        rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=128,  # 2 vg replicas, each w/ 64 experts
+            num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
+            top_k=48,
+            route_scale=48,  # Must have route_scale = top_k; see [Virtual Group Initialization].
+            hf_ffn_hidden_dim=8192,  # Must specify for virtual_group router init!
+        ),
+        # 28 layers total: first 13 are False, next 14 are True (MoE), last 1 is False
+        is_moe_list=[False] * 13 + [True] * 14 + [False],
+        custom_moe_impl="virtual_group",  # Must specify for virtual_group router init!
+        rope_scaling_args=llama_3p2_1b_3b_rope_cfg,
+    ),
+    "3B_26moe_e2g64t48": Llama3MoEModelArgs(
+        dim=3072,
+        moe_inter_dim=8192 // 64,  # 64 groups per vg replica
+        n_layers=28,
+        n_heads=24,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.0,
+        multiple_of=256,
+        rope_theta=500000,
+        moe_args=MoEArgs(
+            num_experts=128,  # 2 vg replicas, each w/ 64 experts
+            num_shared_experts=0,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
+            top_k=48,
+            route_scale=48,  # Must have route_scale = top_k; see [Virtual Group Initialization].
+            hf_ffn_hidden_dim=8192,  # Must specify for virtual_group router init!
+        ),
+        # 28 layers total: first 1 is False, next 26 are True (MoE), last 1 is False
+        is_moe_list=[False] + [True] * 26 + [False],
+        custom_moe_impl="virtual_group",  # Must specify for virtual_group router init!
+        rope_scaling_args=llama_3p2_1b_3b_rope_cfg,
+    ),
+
+    # ============================================================
+    # 8B llamas
+    # ============================================================
+
+
     "8B": Llama3MoEModelArgs(
         dim=4096,
         moe_inter_dim=14336,
