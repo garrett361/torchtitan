@@ -685,6 +685,7 @@ class GQAttention(BaseAttention):
         qkv_linear: BaseQKVLinear.Config
         wo: Linear.Config
         qk_norm: RMSNorm.Config | None = None
+        attn_scale: float | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
         use_rope: bool = True
@@ -719,8 +720,12 @@ class GQAttention(BaseAttention):
             self.q_norm = config.qk_norm.build()
             self.k_norm = config.qk_norm.build()
 
-        # Scaling factor (needed when head_dim differs from dim // n_heads)
-        self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
+        # Explicit attn_scale takes priority; else fall back to head_dim**-0.5 if set.
+        self.scaling = (
+            config.attn_scale
+            if config.attn_scale is not None
+            else (self.head_dim**-0.5 if config.head_dim is not None else None)
+        )
 
     def forward(
         self,

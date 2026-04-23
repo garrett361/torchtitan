@@ -75,6 +75,7 @@ def make_gqa_config(
     mask_type: str = "causal",
     rope_backend: str = "complex",
     qk_norm: RMSNorm.Config | None = None,
+    attn_scale: float | None = None,
 ) -> GQAttention.Config:
     """Build a fully-specified GQAttention.Config."""
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
@@ -118,6 +119,7 @@ def make_gqa_config(
             param_init=wo_param_init,
         ),
         qk_norm=qk_norm,
+        attn_scale=attn_scale,
         use_rope=use_rope,
         inner_attention=inner_attention,
         mask_type=mask_type,
