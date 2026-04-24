@@ -327,6 +327,14 @@ class ChatDataset(IterableDataset, Stateful):
                 f"Second message must be 'assistant', got '{messages[1]['role']}'"
             )
 
+    def _prompt_messages(self, messages: list[dict]) -> list[dict]:
+        """Messages used to compute prompt length for label masking.
+
+        Subclasses override this when the prompt includes more than just the
+        first message (e.g. a leading system turn).
+        """
+        return messages[:1]
+
     def _tokenize_sample(
         self, sample: dict[str, Any]
     ) -> tuple[list[int], list[int]] | None:
@@ -365,10 +373,10 @@ class ChatDataset(IterableDataset, Stateful):
         input_ids = full_tokens[:-1]
         label_ids = full_tokens[1:]
 
-        # Find prompt/response boundary by tokenizing just the user message
-        # with add_generation_prompt=True.
+        # Find prompt/response boundary by re-tokenizing everything up to (but
+        # not including) the final assistant turn with add_generation_prompt=True.
         prompt_text = self._tokenizer.apply_chat_template(
-            messages[:1], add_generation_prompt=True
+            self._prompt_messages(messages), add_generation_prompt=True
         )
         prompt_tokens = self._tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
         prompt_len = len(prompt_tokens)
@@ -491,6 +499,8 @@ class ChatDataset(IterableDataset, Stateful):
 class ChatDataLoader(ParallelAwareDataloader):
     """Chat dataloader for instruction/conversation datasets."""
 
+    _dataset_class = ChatDataset
+
     @dataclass(kw_only=True, slots=True)
     class Config(ParallelAwareDataloader.Config):
         dataset_path: str | None = None
@@ -524,7 +534,7 @@ class ChatDataLoader(ParallelAwareDataloader):
 
         dataset = load_dataset(config.dataset_path, **config.load_dataset_kwargs)
 
-        chat_ds = ChatDataset(
+        chat_ds = self._dataset_class(
             dataset=dataset,
             tokenizer=tokenizer,
             sample_processor=config.sample_processor,

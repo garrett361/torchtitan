@@ -116,7 +116,8 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseTokenizer.Config):
-        pass  # no fields — tokenizer_path passed at build time
+        chat_template_path: str | None = None
+        """Path to a .jinja chat template file, overrides the auto-loaded template."""
 
     def __init__(
         self,
@@ -162,6 +163,11 @@ class HuggingFaceTokenizer(BaseTokenizer):
                     self.set_chat_template(f.read())
             elif "chat_template" in self._hf_config:
                 self.set_chat_template(self._hf_config["chat_template"])
+
+        # Explicit template path overrides the auto-loaded template above.
+        if config is not None and config.chat_template_path is not None:
+            with open(config.chat_template_path) as f:
+                self.set_chat_template(f.read())
 
     def _load_config(self, config_path: str) -> dict | None:
         """Load configuration from JSON file if it exists."""
