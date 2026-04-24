@@ -234,10 +234,10 @@ class TestGraniteRealCheckpoint(unittest.TestCase):
         from dotenv import load_dotenv
 
         load_dotenv()
-        self.ckpt_path = os.getenv("GRANITE_CKPT_PATH")
+        self.ckpt_path = os.getenv("GRANITE_HF_ASSETS_PATH")
         if self.ckpt_path is None:
             raise EnvironmentError(
-                "GRANITE_CKPT_PATH not set. Add it to .env or export it before "
+                "GRANITE_HF_ASSETS_PATH not set. Add it to .env or export it before "
                 "running real-checkpoint tests."
             )
 
@@ -250,7 +250,7 @@ class TestGraniteRealCheckpoint(unittest.TestCase):
         shards = sorted(glob.glob(f"{self.ckpt_path}/model*.safetensors")) or sorted(
             glob.glob(f"{self.ckpt_path}/*.safetensors")
         )
-        self.assertTrue(shards, "No safetensors found in GRANITE_CKPT_PATH")
+        self.assertTrue(shards, "No safetensors found in GRANITE_HF_ASSETS_PATH")
         hf_sd = {}
         for shard in shards:
             hf_sd.update(load_file(shard, device="cpu"))
@@ -394,7 +394,7 @@ class TestGraniteSFTDataFormat(unittest.TestCase):
 class TestGraniteSFTData(unittest.TestCase):
     """End-to-end tokenization and masking tests for Granite SFT with thinking template.
 
-    Requires GRANITE_CKPT_PATH and GRANITE_DATA1_PATH.
+    Requires GRANITE_HF_ASSETS_PATH and GRANITE_DATA1_PATH.
     Skips if any variable is absent.
     """
 
@@ -412,7 +412,7 @@ class TestGraniteSFTData(unittest.TestCase):
         from torchtitan.hf_datasets.text_datasets import IGNORE_INDEX
 
         load_dotenv()
-        ckpt_path = os.getenv("GRANITE_CKPT_PATH")
+        ckpt_path = os.getenv("GRANITE_HF_ASSETS_PATH")
         data_path = os.getenv("GRANITE_DATA1_PATH")
         if any(v is None for v in (ckpt_path, data_path)):
             return
@@ -453,9 +453,9 @@ class TestGraniteSFTData(unittest.TestCase):
         load_dotenv()
         if any(
             os.getenv(v) is None
-            for v in ("GRANITE_CKPT_PATH", "GRANITE_DATA1_PATH")
+            for v in ("GRANITE_HF_ASSETS_PATH", "GRANITE_DATA1_PATH")
         ):
-            self.skipTest("GRANITE_CKPT_PATH and GRANITE_DATA1_PATH must both be set")
+            self.skipTest("GRANITE_HF_ASSETS_PATH and GRANITE_DATA1_PATH must both be set")
 
     def test_chat_template_renders_system_and_thinking(self):
         rendered = self._tokenizer.apply_chat_template(self._sample_msgs)
