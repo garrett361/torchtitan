@@ -337,6 +337,7 @@ class Trainer(ForgeEngine):
             global_max_loss,
             grad_norm.item(),
             total_steps=self.config.training.steps,
+            steps_to_next_ckpt=self.checkpointer.interval - self.step % self.checkpointer.interval if self.checkpointer.enable else None,
         )
 
     @record

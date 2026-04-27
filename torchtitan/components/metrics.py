@@ -459,6 +459,7 @@ class MetricsProcessor(Configurable):
         grad_norm: float,
         *,
         total_steps: int,
+        steps_to_next_ckpt: int | None = None,
         extra_metrics: dict[str, Any] | None = None,
     ):
         """
@@ -495,6 +496,11 @@ class MetricsProcessor(Configurable):
 
         time_end_to_end = time_delta / self.config.log_freq
         eta = timedelta(seconds=int(time_end_to_end * (total_steps - step)))
+        eta_ckpt = (
+            timedelta(seconds=int(time_end_to_end * steps_to_next_ckpt))
+            if steps_to_next_ckpt is not None
+            else None
+        )
         time_data_loading = sum(self.data_loading_times) / len(self.data_loading_times)
         time_data_loading_pct = 100 * sum(self.data_loading_times) / time_delta
 
@@ -535,7 +541,9 @@ class MetricsProcessor(Configurable):
             f"{color.blue}tps: {round(tps):,}  "
             f"{color.cyan}tflops: {tflops:,.2f}  "
             f"{color.magenta}mfu: {mfu_str}  "
-            f"{color.white}eta: {eta}{color.reset}"
+            f"{color.white}eta: {eta}"
+            + (f"  eta-ckpt: {eta_ckpt}" if eta_ckpt is not None else "")
+            + color.reset
         )
 
         data_items = sorted(

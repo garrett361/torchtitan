@@ -323,5 +323,6 @@ class FluxTrainer(Trainer):
             global_max_loss,
             float(grad_norm.item()),
             total_steps=self.config.training.steps,
+            steps_to_next_ckpt=self.checkpointer.interval - self.step % self.checkpointer.interval if self.checkpointer.enable else None,
             extra_metrics=extra_metrics,
         )
