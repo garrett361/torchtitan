@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 import torch
+from torch.distributed.tensor import DTensor, Replicate
 
 from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
@@ -78,24 +79,44 @@ class GraniteStateDictAdapter(StateDictAdapter):
             dim1 = w.shape[0]
         if dim2 is None:
             dim2 = w.shape[1]
-        return (
+        # When w is an FSDP DTensor, the intermediate view(n_heads_arg, ...) may have a leading
+        # dim smaller than the mesh size. All-gather to Replicate so the intermediate reshapes
+        # are unconstrained, then re-shard the shape-preserving result back to the original
+        # placement (final dim1 is always divisible by the fsdp mesh size).
+        if isinstance(w, DTensor):
+            mesh, placements = w.device_mesh, w.placements
+            w = w.redistribute(device_mesh=mesh, placements=[Replicate()] * mesh.ndim)
+        else:
+            mesh = placements = None
+        result = (
             w.view(n_heads_arg, dim1 // n_heads_arg // 2, 2, dim2)
             .transpose(1, 2)
             .reshape(dim1, dim2)
             .clone()
         )
+        if placements is not None:
+            return result.redistribute(device_mesh=mesh, placements=placements)
+        return result
 
     def _reverse_permute(self, w, n_heads_arg, dim1=None, dim2=None):
         if dim1 is None:
             dim1 = w.shape[0]
         if dim2 is None:
             dim2 = w.shape[1]
-        return (
+        if isinstance(w, DTensor):
+            mesh, placements = w.device_mesh, w.placements
+            w = w.redistribute(device_mesh=mesh, placements=[Replicate()] * mesh.ndim)
+        else:
+            mesh = placements = None
+        result = (
             w.view(n_heads_arg, 2, dim1 // n_heads_arg // 2, dim2)
             .transpose(1, 2)
             .reshape(dim1, dim2)
             .clone()
         )
+        if placements is not None:
+            return result.redistribute(device_mesh=mesh, placements=placements)
+        return result
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         n_heads = self.model_config.layers[0].attention.n_heads
