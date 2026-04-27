@@ -284,7 +284,27 @@ class ChatDataset(IterableDataset, Stateful):
                 "ChatDataset requires a tokenizer with a valid EOS token."
             )
 
-        self._original_data = split_dataset_by_node(dataset, dp_rank, dp_world_size)
+        # `split_dataset_by_node` shards a map-style Dataset contiguously by row. When
+        # source files are ordered by length or topic, different DP ranks receive skewed
+        # length distributions, causing significant packing-density imbalance. Shuffling
+        # before splitting ensures every shard is a representative sample of the full
+        # length distribution.
+        #
+        # Disjointness invariant: `split_dataset_by_node` partitions the row set once;
+        # the per-epoch reshuffle in `_iter_greedy_packed` only reorders rows within each
+        # shard, so different DP ranks always operate on completely disjoint rows at every
+        # epoch index.
+        #
+        # Epoch-boundary alignment: shard sizes differ by at most 1 row, so ranks exhaust
+        # their shards at nearly the same step. Small cross-rank variation in epoch
+        # boundaries is expected but washes out over training.
+        #
+        # Seed 42 covers epoch 0; `_iter_greedy_packed` reshuffles with seed 42+epoch at
+        # each epoch boundary, giving a clean per-epoch sequence: 42, 43, 44, ...
+        self._original_data = split_dataset_by_node(
+          dataset.shuffle(seed=42), dp_rank, dp_world_size
+        )
+
         self._data = self._original_data
         self._tokenizer = tokenizer
         self._eos_id = tokenizer.eos_id
