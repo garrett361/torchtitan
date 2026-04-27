@@ -322,5 +322,6 @@ class FluxTrainer(Trainer):
             global_avg_loss,
             global_max_loss,
             float(grad_norm.item()),
+            total_steps=self.config.training.steps,
             extra_metrics=extra_metrics,
         )

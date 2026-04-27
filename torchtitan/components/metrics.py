@@ -8,7 +8,7 @@ import os
 import time
 from collections import namedtuple
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import torch
@@ -457,6 +457,8 @@ class MetricsProcessor(Configurable):
         global_avg_loss: float,
         global_max_loss: float,
         grad_norm: float,
+        *,
+        total_steps: int,
         extra_metrics: dict[str, Any] | None = None,
     ):
         """
@@ -492,6 +494,7 @@ class MetricsProcessor(Configurable):
             mfu = 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
 
         time_end_to_end = time_delta / self.config.log_freq
+        eta = timedelta(seconds=int(time_end_to_end * (total_steps - step)))
         time_data_loading = sum(self.data_loading_times) / len(self.data_loading_times)
         time_data_loading_pct = 100 * sum(self.data_loading_times) / time_delta
 
@@ -531,7 +534,8 @@ class MetricsProcessor(Configurable):
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
             f"{color.blue}tps: {round(tps):,}  "
             f"{color.cyan}tflops: {tflops:,.2f}  "
-            f"{color.magenta}mfu: {mfu_str}{color.reset}"
+            f"{color.magenta}mfu: {mfu_str}  "
+            f"{color.white}eta: {eta}{color.reset}"
         )
 
         data_items = sorted(
