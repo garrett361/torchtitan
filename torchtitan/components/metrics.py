@@ -534,6 +534,30 @@ class MetricsProcessor(Configurable):
             f"{color.magenta}mfu: {mfu_str}{color.reset}"
         )
 
+        data_items = sorted(
+            (k, v) for k, v in metrics.items() if k.startswith("data/")
+        )
+        if data_items:
+            _data_colors = [
+                color.green,
+                color.blue,
+                color.yellow,
+                color.orange,
+                color.turquoise,
+                color.magenta,
+            ]
+            parts = []
+            for i, (k, v) in enumerate(data_items):
+                label = k.removeprefix("data/")
+                c = _data_colors[i % len(_data_colors)]
+                if (isinstance(v, int) and not isinstance(v, bool)) or (
+                    isinstance(v, float) and v >= 10
+                ):
+                    parts.append(f"{c}{label}: {v:,.0f}")
+                else:
+                    parts.append(f"{c}{label}: {v:.4f}")
+            logger.info(f"{color.cyan}data  " + "  ".join(parts) + color.reset)
+
         self.ntokens_since_last_log = 0
         self.data_loading_times.clear()
         self.time_last_log = time.perf_counter()

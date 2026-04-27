@@ -302,6 +302,11 @@ class ChatDataset(IterableDataset, Stateful):
 
         self._logged_first_sample = False
 
+        # Cumulative data stats — checkpointed so they survive resume.
+        self._n_total_tokens: int = 0    # sample tokens excl. tail-pad; internal only
+        self._n_trained_tokens: int = 0  # non-IGNORE_INDEX labels
+        self._n_examples_packed: int = 0
+
     def _get_data_iter(self):
         if isinstance(self._data, Dataset):
             if self._sample_idx == len(self._data):
@@ -386,6 +391,10 @@ class ChatDataset(IterableDataset, Stateful):
         mask_end = min(max(prompt_len - 1, 0), len(label_ids))
         label_ids[:mask_end] = [IGNORE_INDEX] * mask_end
 
+        self._n_total_tokens += len(input_ids)
+        self._n_trained_tokens += sum(1 for l in label_ids if l != IGNORE_INDEX)
+        self._n_examples_packed += 1
+
         return input_ids, label_ids
 
     def __iter__(self):
@@ -463,12 +472,32 @@ class ChatDataset(IterableDataset, Stateful):
         self._positions_buffer = []
         return {"input": input_tensor, "positions": positions_tensor}, label_tensor
 
+    def get_data_stats(self) -> dict[str, Any]:
+        """Return raw cumulative counts for distributed logging.
+
+        Returns integer counts only — the caller is responsible for reducing
+        them across DP ranks before computing ratios. epochs is None for
+        IterableDatasets (length is unknowable).
+        """
+        epochs = None
+        if isinstance(self._data, Dataset):
+            epochs = self._epoch + self._sample_idx / len(self._data)
+        return {
+            "n_total_tokens": self._n_total_tokens,
+            "n_trained_tokens": self._n_trained_tokens,
+            "n_examples_packed": self._n_examples_packed,
+            "epochs": epochs,
+        }
+
     def state_dict(self):
         _state_dict: dict[str, Any] = {
             "epoch": self._epoch,
             "inputs_buffer": self._inputs_buffer,
             "labels_buffer": self._labels_buffer,
             "positions_buffer": self._positions_buffer,
+            "n_total_tokens": self._n_total_tokens,
+            "n_trained_tokens": self._n_trained_tokens,
+            "n_examples_packed": self._n_examples_packed,
         }
 
         if isinstance(self._data, Dataset):
@@ -483,6 +512,10 @@ class ChatDataset(IterableDataset, Stateful):
         self._inputs_buffer = state_dict["inputs_buffer"]
         self._labels_buffer = state_dict["labels_buffer"]
         self._positions_buffer = state_dict["positions_buffer"]
+        # .get() defaults allow checkpoints saved before this change to load cleanly.
+        self._n_total_tokens = state_dict.get("n_total_tokens", 0)
+        self._n_trained_tokens = state_dict.get("n_trained_tokens", 0)
+        self._n_examples_packed = state_dict.get("n_examples_packed", 0)
 
         if isinstance(self._data, Dataset):
             self._sample_idx = state_dict["sample_idx"]
