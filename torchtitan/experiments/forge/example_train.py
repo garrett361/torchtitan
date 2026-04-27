@@ -54,12 +54,14 @@ class Trainer(ForgeEngine):
         )
 
         # build dataloader
+        cp_rank = self.parallel_dims.get_mesh("cp").get_local_rank() if self.parallel_dims.cp_enabled else 0
         self.dataloader = config.dataloader.build(
             dp_world_size=self.dp_degree,
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
             seq_len=config.training.seq_len,
             local_batch_size=config.training.local_batch_size,
+            cp_rank=cp_rank,
         )
 
         model_args = self.model_config

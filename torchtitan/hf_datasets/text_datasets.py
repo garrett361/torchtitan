@@ -275,6 +275,7 @@ class ChatDataset(IterableDataset, Stateful):
         seq_len: int = 2048,
         dp_rank: int = 0,
         dp_world_size: int = 1,
+        cp_rank: int = 0,
         infinite: bool = False,
     ) -> None:
         if tokenizer.eos_id is None:
@@ -289,6 +290,7 @@ class ChatDataset(IterableDataset, Stateful):
         self._eos_id = tokenizer.eos_id
         self.seq_len = seq_len
         self.infinite = infinite
+        self._cp_rank = cp_rank
         self._sample_processor = sample_processor
 
         self._dataset_id = f"{dataset.info.dataset_name}/{dataset.split}"
@@ -363,10 +365,6 @@ class ChatDataset(IterableDataset, Stateful):
         if full_tokens[-1] != self._eos_id:
             full_tokens.append(self._eos_id)
 
-        if not self._logged_first_sample:
-            logger.info(f"[ChatDataset] First sample full:\n{full_text}")
-            self._logged_first_sample = True
-
         # Drop examples exceeding seq_len rather than truncating.
         if len(full_tokens) - 1 > self.seq_len:
             logger.debug(
@@ -390,6 +388,16 @@ class ChatDataset(IterableDataset, Stateful):
         # predicted at index prompt_len - 1 and must remain unmasked.
         mask_end = min(max(prompt_len - 1, 0), len(label_ids))
         label_ids[:mask_end] = [IGNORE_INDEX] * mask_end
+
+        if not self._logged_first_sample and self._cp_rank == 0:
+            RED, RESET = "\033[31m", "\033[0m"
+            prompt_str = self._tokenizer.decode(full_tokens[:prompt_len], skip_special_tokens=False).encode("unicode_escape").decode("ascii")
+            response_str = self._tokenizer.decode(full_tokens[prompt_len:], skip_special_tokens=False).encode("unicode_escape").decode("ascii")
+            logger.info(
+                f"[ChatDataset] First sample (red = not predicted):\n"
+                f"{RED}{prompt_str}{RESET}{response_str}"
+            )
+            self._logged_first_sample = True
 
         self._n_total_tokens += len(input_ids)
         self._n_trained_tokens += sum(1 for l in label_ids if l != IGNORE_INDEX)
@@ -557,6 +565,7 @@ class ChatDataLoader(ParallelAwareDataloader):
         tokenizer: BaseTokenizer,
         seq_len: int,
         local_batch_size: int,
+        cp_rank: int = 0,
         **kwargs,
     ):
         if not config.dataset_path:
@@ -574,6 +583,7 @@ class ChatDataLoader(ParallelAwareDataloader):
             seq_len=seq_len,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
+            cp_rank=cp_rank,
             infinite=config.infinite,
         )
 

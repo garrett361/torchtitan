@@ -233,12 +233,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
         # build dataloader
+        cp_rank = parallel_dims.get_mesh("cp").get_local_rank() if parallel_dims.cp_enabled else 0
         self.dataloader = config.dataloader.build(
             dp_world_size=batch_degree,
             dp_rank=batch_rank,
             tokenizer=self.tokenizer,
             seq_len=config.training.seq_len,
             local_batch_size=config.training.local_batch_size,
+            cp_rank=cp_rank,
         )
 
         # build model (using meta init)
