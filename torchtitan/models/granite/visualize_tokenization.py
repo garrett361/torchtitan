@@ -5,6 +5,7 @@ Three rows per token: input ID / decoded subword / label ID.
 Middle row is red when label is -100 (masked, no loss).
 """
 
+import argparse
 import json
 import os
 import shutil
@@ -16,6 +17,10 @@ from dotenv import load_dotenv
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.hf_datasets.text_datasets import IGNORE_INDEX
 from torchtitan.models.granite.sft_dataset import GraniteSFTDataLoader, GraniteSFTDataset
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--plain", action="store_true", help="Print escaped token text only; no table or colors.")
+args = parser.parse_args()
 
 load_dotenv()
 hf_assets_path = os.getenv("GRANITE_HF_ASSETS_PATH")
@@ -89,6 +94,31 @@ with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl") as tmp:
 
 input_ids = batch["input"][0].tolist()
 label_ids = labels[0].tolist()
+
+if args.plain:
+    # Each packed sample contributes input_ids = full_tokens[:-1], so the
+    # closing EOS of every sample lives in label_ids (not input_ids) due to
+    # the LM next-token prediction shift. Reconstruct the full token sequence
+    # by inserting each boundary EOS: at position i, label_ids[i] is a
+    # boundary EOS when it's not IGNORE_INDEX and differs from input_ids[i+1].
+    last_content = max(i for i, l in enumerate(label_ids) if l != IGNORE_INDEX)
+    full_toks: list[int] = []
+    for i in range(last_content + 1):
+        inp, lbl = input_ids[i], label_ids[i]
+        full_toks.append(inp)
+        if lbl != IGNORE_INDEX:
+            next_inp = input_ids[i + 1] if i + 1 <= last_content else None
+            if next_inp is None or lbl != next_inp:
+                full_toks.append(lbl)
+    print(
+        "".join(
+            tokenizer.tokenizer.decode([t], skip_special_tokens=False)
+            .encode("unicode_escape")
+            .decode("ascii")
+            for t in full_toks
+        )
+    )
+    raise SystemExit(0)
 
 RED = "\033[31m"
 RESET = "\033[0m"
