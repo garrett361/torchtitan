@@ -54,6 +54,7 @@ __all__ = [
     "create_varlen_metadata_for_document",
     "get_causal_mask_mod",
     "get_document_mask_mod",
+    "get_document_mask_mod_from_positions",
     "get_fixed_block_mask_mod",
     "get_sliding_window_mask_mod",
 ]
@@ -418,6 +419,33 @@ def get_document_mask_mod(batch: torch.Tensor, eos_id: int) -> _mask_mod_signatu
         b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
     ) -> torch.Tensor:
         return sequence_indices[b, q_idx] == sequence_indices[b, kv_idx]
+
+    return document_mask
+
+
+def get_document_mask_mod_from_positions(
+    positions: torch.Tensor,
+) -> _mask_mod_signature:
+    """Document mask derived from per-document positions that reset to 0.
+
+    Detects document boundaries where positions[t] < positions[t-1] (a reset),
+    assigns a document ID via cumulative sum, and masks cross-document attention.
+    Unlike get_document_mask_mod, this does not rely on a specific token ID and
+    works correctly when eos_id appears inside documents (e.g. chat templates
+    that use <|im_end|> as both eos and role-closing tag).
+
+    Args:
+        positions: Per-token position IDs with shape [b, s], resetting to 0
+            at each packed document boundary.
+    """
+    resets = torch.zeros_like(positions, dtype=torch.int32)
+    resets[:, 1:] = (positions[:, 1:] < positions[:, :-1]).int()
+    document_ids = torch.cumsum(resets, dim=1)
+
+    def document_mask(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        return document_ids[b, q_idx] == document_ids[b, kv_idx]
 
     return document_mask
 

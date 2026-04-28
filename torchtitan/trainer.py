@@ -628,6 +628,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     input_batch=inputs,
                     tokenizer=self.tokenizer,
                     extra_inputs=extra_inputs,
+                    positions=positions,
                 )
 
         if self.parallel_dims.cp_enabled:

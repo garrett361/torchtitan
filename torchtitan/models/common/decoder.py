@@ -18,6 +18,7 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
+    get_document_mask_mod_from_positions,
     VarlenAttention,
 )
 from torchtitan.models.common.embedding import Embedding
@@ -142,6 +143,7 @@ class Decoder(BaseModel):
         input_batch: torch.Tensor,
         tokenizer: BaseTokenizer,
         attn_config: BaseAttention.Config,
+        positions: torch.Tensor | None = None,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
 
@@ -150,8 +152,15 @@ class Decoder(BaseModel):
                 B = 1
             case "block_causal":
                 B = input_batch.shape[0]
-                assert tokenizer.eos_id is not None
-                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+                if positions is not None:
+                    mask_mods.append(
+                        get_document_mask_mod_from_positions(positions)
+                    )
+                else:
+                    assert tokenizer.eos_id is not None
+                    mask_mods.append(
+                        get_document_mask_mod(input_batch, tokenizer.eos_id)
+                    )
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {attn_config.mask_type}"
@@ -172,11 +181,14 @@ class Decoder(BaseModel):
         input_batch: torch.Tensor,
         tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
+        positions: torch.Tensor | None = None,
     ) -> AttentionMasksType:
         attn_config = self.config.layers[0].attention
         inner_attn = attn_config.inner_attention
         if isinstance(inner_attn, FlexAttention.Config):
-            return self._get_flex_attention_masks(input_batch, tokenizer, attn_config)
+            return self._get_flex_attention_masks(
+                input_batch, tokenizer, attn_config, positions
+            )
         elif isinstance(inner_attn, VarlenAttention.Config):
             if attn_config.mask_type != "block_causal":
                 raise ValueError(
