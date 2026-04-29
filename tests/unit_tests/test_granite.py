@@ -497,7 +497,7 @@ class TestGraniteMultiTurnMasking(unittest.TestCase):
     """Rigorous boundary tests for multi-turn label masking with the real
     Granite tokenizer and thinking template.
 
-    Requires GRANITE_41_8B_HF_ASSETS_PATH and GRANITE_DATA1_PATH.
+    Requires HF_ASSETS_PATH and DATA_PATH.
     Skips if any variable is absent.
 
     These tests guard against off-by-one errors by independently computing
@@ -519,7 +519,7 @@ class TestGraniteMultiTurnMasking(unittest.TestCase):
         from torchtitan.hf_datasets.text_datasets import IGNORE_INDEX
 
         load_dotenv()
-        ckpt_path = os.getenv("GRANITE_41_8B_HF_ASSETS_PATH")
+        ckpt_path = os.getenv("HF_ASSETS_PATH")
         if ckpt_path is None:
             return
         cls._tokenizer = HuggingFaceTokenizer(tokenizer_path=ckpt_path)
@@ -529,8 +529,8 @@ class TestGraniteMultiTurnMasking(unittest.TestCase):
         from dotenv import load_dotenv
 
         load_dotenv()
-        if os.getenv("GRANITE_41_8B_HF_ASSETS_PATH") is None:
-            self.skipTest("GRANITE_41_8B_HF_ASSETS_PATH not set")
+        if os.getenv("HF_ASSETS_PATH") is None:
+            self.skipTest("HF_ASSETS_PATH not set")
 
     def _tokenize(self, messages):
         """Return (full_tokens, label_ids) via GraniteSFTDataset._tokenize_sample."""
@@ -653,13 +653,13 @@ class TestGraniteMultiTurnMasking(unittest.TestCase):
 
         load_dotenv = __import__("dotenv").load_dotenv
         load_dotenv()
-        data_path = os.getenv("GRANITE_DATA1_PATH")
+        data_path = os.getenv("DATA_PATH")
         if data_path is None:
-            self.skipTest("GRANITE_DATA1_PATH not set")
+            self.skipTest("DATA_PATH not set")
 
         jsonl_files = sorted(glob.glob(os.path.join(data_path, "*.jsonl")))
         if not jsonl_files:
-            self.skipTest("No .jsonl files found in GRANITE_DATA1_PATH")
+            self.skipTest("No .jsonl files found in DATA_PATH")
 
         with open(jsonl_files[0]) as f:
             record = json.loads(f.readline())
