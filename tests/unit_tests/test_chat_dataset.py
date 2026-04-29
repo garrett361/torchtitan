@@ -215,71 +215,94 @@ class TestChatDatasetDropOnOverflow(unittest.TestCase):
 
 
 class TestChatDatasetMessageValidation(unittest.TestCase):
-    """Non-[user, assistant] messages raise ValueError."""
+    """Invalid message formats raise ValueError; valid multi-turn formats pass."""
 
-    def test_wrong_first_role(self):
+    def _make_ds(self, processor):
         tokenizer = _load_tokenizer()
-
-        def bad_processor(sample):
-            return [
-                {"role": "system", "content": "You are helpful."},
-                {"role": "assistant", "content": "OK"},
-            ]
-
         ds = Dataset.from_list([{"question": "hi", "answer": "bye"}])
-        chat_ds = ChatDataset(
+        return ChatDataset(
             dataset=ds,
             tokenizer=tokenizer,
-            sample_processor=bad_processor,
+            sample_processor=processor,
             seq_len=2048,
             infinite=False,
         )
 
-        with self.assertRaises(ValueError, msg="system role should raise"):
-            next(iter(chat_ds))
+    def _assert_raises(self, processor):
+        with self.assertRaises(ValueError):
+            next(iter(self._make_ds(processor)))
 
-    def test_wrong_second_role(self):
-        tokenizer = _load_tokenizer()
-
-        def bad_processor(sample):
-            return [
-                {"role": "user", "content": "hi"},
-                {"role": "user", "content": "hello again"},
-            ]
-
-        ds = Dataset.from_list([{"question": "hi", "answer": "bye"}])
-        chat_ds = ChatDataset(
-            dataset=ds,
-            tokenizer=tokenizer,
-            sample_processor=bad_processor,
-            seq_len=2048,
-            infinite=False,
-        )
-
-        with self.assertRaises(ValueError, msg="two user messages should raise"):
-            next(iter(chat_ds))
-
-    def test_three_messages(self):
-        tokenizer = _load_tokenizer()
-
-        def bad_processor(sample):
-            return [
+    def test_rejects_last_role_not_assistant(self):
+        # Conversation ending with user is invalid regardless of length.
+        self._assert_raises(
+            lambda s: [
                 {"role": "user", "content": "hi"},
                 {"role": "assistant", "content": "hello"},
                 {"role": "user", "content": "bye"},
             ]
-
-        ds = Dataset.from_list([{"question": "hi", "answer": "bye"}])
-        chat_ds = ChatDataset(
-            dataset=ds,
-            tokenizer=tokenizer,
-            sample_processor=bad_processor,
-            seq_len=2048,
-            infinite=False,
         )
 
-        with self.assertRaises(ValueError, msg="3 messages should raise"):
-            next(iter(chat_ds))
+    def test_rejects_no_assistant(self):
+        self._assert_raises(
+            lambda s: [{"role": "user", "content": "hi"}, {"role": "user", "content": "bye"}]
+        )
+
+    def test_rejects_assistant_first(self):
+        self._assert_raises(
+            lambda s: [{"role": "assistant", "content": "hi"}]
+        )
+
+    def test_rejects_unknown_role(self):
+        self._assert_raises(
+            lambda s: [
+                {"role": "user", "content": "hi"},
+                {"role": "robot", "content": "beep"},
+            ]
+        )
+
+    def test_rejects_system_not_first(self):
+        self._assert_raises(
+            lambda s: [
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "be helpful"},
+                {"role": "assistant", "content": "ok"},
+            ]
+        )
+
+    def test_rejects_multiple_system_messages(self):
+        self._assert_raises(
+            lambda s: [
+                {"role": "system", "content": "rule 1"},
+                {"role": "system", "content": "rule 2"},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "ok"},
+            ]
+        )
+
+    def test_accepts_system_user_assistant(self):
+        # Three-turn with leading system must now succeed.
+        ds = self._make_ds(
+            lambda s: [
+                {"role": "system", "content": "be helpful"},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ]
+        )
+        batch, labels = next(iter(ds))
+        self.assertEqual(batch["input"].shape[0], 2048)
+
+    def test_accepts_multi_turn(self):
+        # Five-turn interleaved conversation must succeed.
+        ds = self._make_ds(
+            lambda s: [
+                {"role": "user", "content": "Q1"},
+                {"role": "assistant", "content": "A1"},
+                {"role": "user", "content": "Q2"},
+                {"role": "assistant", "content": "A2"},
+            ]
+        )
+        batch, labels = next(iter(ds))
+        self.assertEqual(batch["input"].shape[0], 2048)
 
 
 class TestChatDatasetCheckpointing(unittest.TestCase):

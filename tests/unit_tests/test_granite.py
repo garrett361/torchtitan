@@ -304,7 +304,7 @@ class TestGraniteRealCheckpoint(unittest.TestCase):
 
 
 class TestGraniteSFTDatasetUnit(unittest.TestCase):
-    """Unit tests for GraniteSFTDataset validation and prompt-messages logic.
+    """Unit tests for GraniteSFTDataset / ChatDataset validation.
 
     No environment variables or real checkpoints required.
     """
@@ -319,31 +319,21 @@ class TestGraniteSFTDatasetUnit(unittest.TestCase):
     def test_validate_accepts_system_user_assistant(self):
         GraniteSFTDataset._validate_messages([self._sys, self._user, self._asst])
 
-    def test_validate_rejects_multi_turn(self):
-        with self.assertRaises(ValueError):
-            GraniteSFTDataset._validate_messages(
-                [self._sys, self._user, self._asst, self._user, self._asst]
-            )
-
-    def test_validate_rejects_wrong_first_role_in_3msg(self):
-        with self.assertRaises(ValueError):
-            GraniteSFTDataset._validate_messages(
-                [self._user, self._user, self._asst]
-            )
+    def test_validate_accepts_multi_turn(self):
+        # General multi-turn is now valid.
+        GraniteSFTDataset._validate_messages(
+            [self._sys, self._user, self._asst, self._user, self._asst]
+        )
 
     def test_validate_rejects_missing_assistant(self):
         with self.assertRaises(ValueError):
             GraniteSFTDataset._validate_messages([self._user, self._user])
 
-    def test_prompt_messages_two_turn(self):
-        msgs = [self._user, self._asst]
-        result = GraniteSFTDataset._prompt_messages(None, msgs)  # type: ignore[arg-type]
-        self.assertEqual(result, [self._user])
-
-    def test_prompt_messages_three_turn(self):
-        msgs = [self._sys, self._user, self._asst]
-        result = GraniteSFTDataset._prompt_messages(None, msgs)  # type: ignore[arg-type]
-        self.assertEqual(result, [self._sys, self._user])
+    def test_validate_rejects_system_not_first(self):
+        with self.assertRaises(ValueError):
+            GraniteSFTDataset._validate_messages(
+                [self._user, self._sys, self._asst]
+            )
 
 
 class TestGraniteSFTDataFormat(unittest.TestCase):
@@ -501,6 +491,297 @@ class TestGraniteSFTData(unittest.TestCase):
     def test_eos_present(self):
         eos_id = self._tokenizer.eos_id
         self.assertIn(eos_id, self._input_ids, "EOS token must appear in input_ids")
+
+
+class TestGraniteMultiTurnMasking(unittest.TestCase):
+    """Rigorous boundary tests for multi-turn label masking with the real
+    Granite tokenizer and thinking template.
+
+    Requires GRANITE_41_8B_HF_ASSETS_PATH and GRANITE_DATA1_PATH.
+    Skips if any variable is absent.
+
+    These tests guard against off-by-one errors by independently computing
+    the expected assistant token range for each turn and asserting:
+      - label at start is a real token (first assistant token is trained)
+      - label at start-1 is IGNORE_INDEX (fence before the turn)
+      - label at end-1 is a real token (last token of the turn is trained)
+      - label at end is IGNORE_INDEX (fence after, for non-final turns)
+    """
+
+    _tokenizer = None
+    _IGNORE_INDEX = None
+
+    @classmethod
+    def setUpClass(cls):
+        from dotenv import load_dotenv
+
+        from torchtitan.components.tokenizer import HuggingFaceTokenizer
+        from torchtitan.hf_datasets.text_datasets import IGNORE_INDEX
+
+        load_dotenv()
+        ckpt_path = os.getenv("GRANITE_41_8B_HF_ASSETS_PATH")
+        if ckpt_path is None:
+            return
+        cls._tokenizer = HuggingFaceTokenizer(tokenizer_path=ckpt_path)
+        cls._IGNORE_INDEX = IGNORE_INDEX
+
+    def setUp(self):
+        from dotenv import load_dotenv
+
+        load_dotenv()
+        if os.getenv("GRANITE_41_8B_HF_ASSETS_PATH") is None:
+            self.skipTest("GRANITE_41_8B_HF_ASSETS_PATH not set")
+
+    def _tokenize(self, messages):
+        """Return (full_tokens, label_ids) via GraniteSFTDataset._tokenize_sample."""
+        from datasets import Dataset
+
+        ds_obj = GraniteSFTDataset(
+            dataset=Dataset.from_list([{"messages": messages}]),
+            tokenizer=self._tokenizer,
+            sample_processor=lambda s: s["messages"],
+            seq_len=8192,
+            infinite=False,
+        )
+        result = ds_obj._tokenize_sample({"messages": messages})
+        self.assertIsNotNone(result, "Sample was dropped (exceeds seq_len?)")
+        _, label_ids = result
+        full_text = self._tokenizer.apply_chat_template(messages).rstrip("\n")
+        full_tokens = self._tokenizer.encode(full_text, add_bos=True, add_eos=False)
+        if full_tokens[-1] != self._tokenizer.eos_id:
+            full_tokens.append(self._tokenizer.eos_id)
+        return full_tokens, label_ids
+
+    def _asst_range(self, messages, turn_idx):
+        """Independently compute the (start, end) label_ids range for
+        the assistant turn at turn_idx using the same formula as _tokenize_sample."""
+        last_asst_idx = max(
+            i for i, m in enumerate(messages) if m["role"] == "assistant"
+        )
+        prefix_text = self._tokenizer.apply_chat_template(
+            messages[:turn_idx], add_generation_prompt=True
+        )
+        prefix_tokens = self._tokenizer.encode(
+            prefix_text, add_bos=True, add_eos=False
+        )
+        start = len(prefix_tokens) - 1
+        if turn_idx == last_asst_idx:
+            full_text = self._tokenizer.apply_chat_template(messages).rstrip("\n")
+            full_tokens = self._tokenizer.encode(full_text, add_bos=True, add_eos=False)
+            if full_tokens[-1] != self._tokenizer.eos_id:
+                full_tokens.append(self._tokenizer.eos_id)
+            end = len(full_tokens) - 1
+        else:
+            suffix_text = self._tokenizer.apply_chat_template(
+                messages[: turn_idx + 1]
+            )
+            # rstrip matches _tokenize_sample: exclude the between-turn \n.
+            suffix_tokens = self._tokenizer.encode(
+                suffix_text.rstrip("\n"), add_bos=True, add_eos=False
+            )
+            end = len(suffix_tokens) - 1
+        return start, end
+
+    def _assert_fence(self, label_ids, start, end, *, is_last):
+        IGN = self._IGNORE_INDEX
+        self.assertGreater(start, 0, "start must be > 0 to have a fence before it")
+        self.assertEqual(
+            label_ids[start - 1], IGN, "label just before assistant start must be masked"
+        )
+        self.assertNotEqual(
+            label_ids[start], IGN, "first assistant token must be trained"
+        )
+        self.assertNotEqual(
+            label_ids[end - 1], IGN, "last assistant token must be trained"
+        )
+        if not is_last:
+            self.assertEqual(
+                label_ids[end], IGN, "label just after intermediate assistant end must be masked"
+            )
+
+    def test_single_turn_system_user_assistant_fences(self):
+        """3-turn [system, user, assistant]: verify fence positions around the single assistant turn."""
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "assistant", "content": "4"},
+        ]
+        full_tokens, label_ids = self._tokenize(messages)
+        start, end = self._asst_range(messages, 2)
+        self._assert_fence(label_ids, start, end, is_last=True)
+        # System and user fully masked.
+        self.assertTrue(
+            all(l == self._IGNORE_INDEX for l in label_ids[:start]),
+            "System and user tokens must all be masked",
+        )
+
+    def test_regression_matches_old_single_boundary_for_three_turn(self):
+        """The new per-turn masking must produce bit-identical labels to the
+        old _prompt_messages approach for a 3-turn [system, user, assistant]
+        sample.  The old approach set mask_end = len(prefix_tokens) - 1 where
+        prefix = apply_chat_template([system, user], add_generation_prompt=True).
+        """
+        messages = [
+            {"role": "system", "content": "You are a math assistant."},
+            {"role": "user", "content": "Compute 7 * 6."},
+            {"role": "assistant", "content": "42"},
+        ]
+        _, label_ids = self._tokenize(messages)
+
+        # Reproduce the old single-boundary logic directly.
+        full_text = self._tokenizer.apply_chat_template(messages).rstrip("\n")
+        full_tokens = self._tokenizer.encode(full_text, add_bos=True, add_eos=False)
+        if full_tokens[-1] != self._tokenizer.eos_id:
+            full_tokens.append(self._tokenizer.eos_id)
+        prompt_text = self._tokenizer.apply_chat_template(
+            messages[:-1], add_generation_prompt=True
+        )
+        prompt_tokens = self._tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
+        prompt_len = len(prompt_tokens)
+        expected = list(full_tokens[1:])
+        mask_end = min(max(prompt_len - 1, 0), len(expected))
+        from torchtitan.hf_datasets.text_datasets import IGNORE_INDEX
+
+        expected[:mask_end] = [IGNORE_INDEX] * mask_end
+
+        self.assertEqual(label_ids, expected, "Multi-turn result must be bit-identical to old single-boundary approach")
+
+    def test_think_token_boundary_unchanged(self):
+        """The <think> boundary invariant must hold under the new masking path:
+        label at <think> position is masked; label one position later is trained."""
+        from datasets import Dataset
+
+        load_dotenv = __import__("dotenv").load_dotenv
+        load_dotenv()
+        data_path = os.getenv("GRANITE_DATA1_PATH")
+        if data_path is None:
+            self.skipTest("GRANITE_DATA1_PATH not set")
+
+        jsonl_files = sorted(glob.glob(os.path.join(data_path, "*.jsonl")))
+        if not jsonl_files:
+            self.skipTest("No .jsonl files found in GRANITE_DATA1_PATH")
+
+        with open(jsonl_files[0]) as f:
+            record = json.loads(f.readline())
+        messages = record["messages"]
+
+        _, label_ids = self._tokenize(messages)
+        full_text = self._tokenizer.apply_chat_template(messages).rstrip("\n")
+        full_tokens = self._tokenizer.encode(full_text, add_bos=True, add_eos=False)
+        if full_tokens[-1] != self._tokenizer.eos_id:
+            full_tokens.append(self._tokenizer.eos_id)
+
+        think_id = self._tokenizer.token_to_id("<think>")
+        self.assertIsNotNone(think_id)
+        think_pos = full_tokens.index(think_id)
+
+        self.assertEqual(
+            label_ids[think_pos],
+            self._IGNORE_INDEX,
+            "label at <think> position must be masked (generation prefix)",
+        )
+        self.assertNotEqual(
+            label_ids[think_pos + 1],
+            self._IGNORE_INDEX,
+            "label one after <think> must be trained (first reasoning token)",
+        )
+
+    def test_multi_turn_with_tool_messages(self):
+        """Construct a synthetic multi-turn conversation with a tool result
+        and verify that only the two assistant spans are trained on."""
+        messages = [
+            {"role": "system", "content": "You are a search assistant."},
+            {"role": "user", "content": "Find info about Python."},
+            {"role": "assistant", "content": "Searching now."},
+            {"role": "tool", "content": "Python is a programming language."},
+            {"role": "assistant", "content": "Python is a high-level language."},
+        ]
+        full_tokens, label_ids = self._tokenize(messages)
+        IGN = self._IGNORE_INDEX
+
+        start1, end1 = self._asst_range(messages, 2)
+        start2, end2 = self._asst_range(messages, 4)
+
+        # Pre-first-assistant: masked.
+        self.assertTrue(all(l == IGN for l in label_ids[:start1]))
+        # First assistant span fences.
+        self._assert_fence(label_ids, start1, end1, is_last=False)
+        # First assistant span is all trained.
+        self.assertTrue(all(l != IGN for l in label_ids[start1:end1]))
+        # Tool turn between the two assistant turns: fully masked.
+        self.assertTrue(
+            all(l == IGN for l in label_ids[end1:start2]),
+            "Tool message tokens must be fully masked",
+        )
+        # Second assistant span fences.
+        self._assert_fence(label_ids, start2, end2, is_last=True)
+        # Second assistant span is all trained.
+        self.assertTrue(all(l != IGN for l in label_ids[start2:end2]))
+
+        # Scaffolding masking verified in test_inter_turn_scaffolding_masked.
+
+    def test_system_and_user_fully_masked_in_multi_turn(self):
+        """In a multi-turn conversation, no system or user token should appear
+        as a trained label."""
+        messages = [
+            {"role": "system", "content": "Be concise."},
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2"},
+        ]
+        full_tokens, label_ids = self._tokenize(messages)
+        IGN = self._IGNORE_INDEX
+
+        start1, end1 = self._asst_range(messages, 2)
+        start2, _ = self._asst_range(messages, 4)
+
+        # System/user before first assistant turn: all masked.
+        self.assertTrue(all(l == IGN for l in label_ids[:start1]))
+        # User turn between assistant turns: all masked.
+        self.assertTrue(all(l == IGN for l in label_ids[end1:start2]))
+
+
+    def test_inter_turn_scaffolding_masked(self):
+        """The inter-turn separator emitted by apply_chat_template after each
+        assistant turn (a trailing \\n for the Granite / ChatML template) must
+        be masked, not trained on.
+
+        Rationale: during inference the model generates up to and including the
+        turn-end delimiter (<|im_end|>) and then stops.  The \\n that follows is
+        injected by the inference framework as structural scaffolding; the model
+        never produces it.  _tokenize_sample uses rstrip("\\n") on the suffix
+        text before measuring the boundary, which is correct for all practical
+        templates (ChatML, Llama, Mistral all use trailing newlines as
+        inter-turn separators).  This test pins that contract: the last trained
+        label for an intermediate assistant turn is <|im_end|>, and the very
+        next label is IGNORE_INDEX.
+        """
+        im_end_id = self._tokenizer.token_to_id("<|im_end|>")
+        self.assertIsNotNone(im_end_id, "<|im_end|> must be a known token")
+
+        messages = [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2"},
+        ]
+        _, label_ids = self._tokenize(messages)
+        start1, end1 = self._asst_range(messages, 1)
+
+        # Last trained label of the intermediate assistant turn must be <|im_end|>.
+        self.assertEqual(
+            label_ids[end1 - 1],
+            im_end_id,
+            f"label_ids[end1-1] should be im_end_id={im_end_id}, "
+            f"got {label_ids[end1-1]}",
+        )
+        # The inter-turn separator immediately after must be masked.
+        self.assertEqual(
+            label_ids[end1],
+            self._IGNORE_INDEX,
+            "Inter-turn separator after <|im_end|> must be IGNORE_INDEX",
+        )
 
 
 if __name__ == "__main__":

@@ -157,9 +157,16 @@ class Decoder(BaseModel):
                         get_document_mask_mod_from_positions(positions)
                     )
                 else:
-                    assert tokenizer.eos_id is not None
-                    mask_mods.append(
-                        get_document_mask_mod(input_batch, tokenizer.eos_id)
+                    # Defensive: callers must supply per-document positions.
+                    # The original EOS-based fallback is left below for reference
+                    # if this needs to be restored for non-SFT dataloaders.
+                    # assert tokenizer.eos_id is not None
+                    # mask_mods.append(
+                    #     get_document_mask_mod(input_batch, tokenizer.eos_id)
+                    # )
+                    raise ValueError(
+                        "block_causal attention requires per-document positions; "
+                        "ensure the dataloader provides a 'positions' tensor."
                     )
             case _:
                 raise ValueError(

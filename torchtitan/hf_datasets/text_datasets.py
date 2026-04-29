@@ -22,6 +22,8 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
+_VALID_MESSAGE_ROLES = frozenset({"system", "user", "assistant", "tool"})
+
 
 def _load_c4_dataset(dataset_path: str, split: str):
     """Load C4 dataset with default configuration."""
@@ -260,11 +262,12 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
 
 
 class ChatDataset(IterableDataset, Stateful):
-    """Dataset for single-turn chat/instruction-tuning.
+    """Dataset for chat/instruction-tuning with multi-turn support.
 
-    Tokenizes [user, assistant] message pairs, masks prompt tokens with
-    IGNORE_INDEX in labels, and uses greedy sequence packing with
-    per-document positions. Implements Stateful for checkpointing.
+    Tokenizes multi-turn message conversations and trains only on assistant
+    turns; all other turns (system, user, tool) are masked as IGNORE_INDEX
+    in labels. Uses greedy sequence packing with per-document positions.
+    Implements Stateful for checkpointing.
     """
 
     def __init__(
@@ -339,47 +342,59 @@ class ChatDataset(IterableDataset, Stateful):
 
     @staticmethod
     def _validate_messages(messages: list[dict[str, str]]) -> None:
-        """Validate that messages are a single-turn [user, assistant] pair."""
-        # TODO: expand this to multi-turn
-        if len(messages) != 2:
-            raise ValueError(
-                f"Expected single-turn [user, assistant], got {len(messages)} messages"
-            )
-        if messages[0]["role"] != "user":
-            raise ValueError(
-                f"First message must be 'user', got '{messages[0]['role']}'"
-            )
-        if messages[1]["role"] != "assistant":
-            raise ValueError(
-                f"Second message must be 'assistant', got '{messages[1]['role']}'"
-            )
+        """Validate message list structure.
 
-    def _prompt_messages(self, messages: list[dict]) -> list[dict]:
-        """Messages used to compute prompt length for label masking.
+        Checks: non-empty; all roles in {system, user, assistant, tool};
+        first message is system or user; last message is assistant; at most
+        one system message and it must be first.
 
-        Subclasses override this when the prompt includes more than just the
-        first message (e.g. a leading system turn).
+        Interleaving order (e.g. strict user/assistant alternation) is NOT
+        enforced — the masking logic trains on all assistant turns regardless
+        of position, so unusual orderings are handled correctly.
         """
-        return messages[:1]
+        if not messages:
+            raise ValueError("messages must not be empty")
+        invalid_roles = {m["role"] for m in messages} - _VALID_MESSAGE_ROLES
+        if invalid_roles:
+            raise ValueError(f"Unknown role(s): {invalid_roles!r}")
+        if messages[0]["role"] not in ("system", "user"):
+            raise ValueError(
+                f"First message must be 'system' or 'user', got '{messages[0]['role']}'"
+            )
+        if messages[-1]["role"] != "assistant":
+            raise ValueError(
+                f"Last message must be 'assistant', got '{messages[-1]['role']}'"
+            )
+        system_positions = [i for i, m in enumerate(messages) if m["role"] == "system"]
+        if len(system_positions) > 1 or (
+            system_positions and system_positions[0] != 0
+        ):
+            raise ValueError("system message must be the first message if present")
 
     def _tokenize_sample(
         self, sample: dict[str, Any]
     ) -> tuple[list[int], list[int]] | None:
-        """Tokenize a single-turn sample and create input/label pairs.
+        """Tokenize a multi-turn sample and create input/label pairs.
 
         Returns (input_ids, label_ids) where input_ids = tokens[:-1] and
-        label_ids = tokens[1:] with prompt tokens masked as IGNORE_INDEX.
-        Returns None if the sample exceeds seq_len (dropped to avoid
-        training on truncated responses).
+        label_ids = tokens[1:] with non-assistant tokens masked as
+        IGNORE_INDEX. Returns None if the sample exceeds seq_len (dropped
+        to avoid training on truncated responses).
 
-        Uses incremental prefix re-tokenization to find the prompt/response
-        token boundary, avoiding BPE merge errors.
+        For each assistant turn, its token range is found by re-tokenizing
+        the prefix (messages before the turn) with add_generation_prompt=True.
+        This avoids BPE-merge artifacts that would arise from trying to split
+        a single tokenization by text offset.
+
+        TODO: replace per-turn prefix re-tokenization with a single
+        apply_chat_template(..., return_assistant_tokens_mask=True) call once
+        the Granite thinking template gains {%% generation %%} markers.
         """
         messages = self._sample_processor(sample)
         self._validate_messages(messages)
 
         full_text = self._tokenizer.apply_chat_template(messages)
-        # Strip extra newline and ensure the sequence ends with EOS without duplicates
+        # Strip extra newline and ensure the sequence ends with EOS without duplicates.
         full_text = full_text.rstrip("\n")
         full_tokens = self._tokenizer.encode(full_text, add_bos=True, add_eos=False)
         if full_tokens[-1] != self._eos_id:
@@ -394,28 +409,79 @@ class ChatDataset(IterableDataset, Stateful):
             return None
 
         input_ids = full_tokens[:-1]
-        label_ids = full_tokens[1:]
+        # Start fully masked; unmask only assistant turns below.
+        label_ids = [IGNORE_INDEX] * len(input_ids)
 
-        # Find prompt/response boundary by re-tokenizing everything up to (but
-        # not including) the final assistant turn with add_generation_prompt=True.
-        prompt_text = self._tokenizer.apply_chat_template(
-            self._prompt_messages(messages), add_generation_prompt=True
+        last_asst_idx = max(
+            i for i, m in enumerate(messages) if m["role"] == "assistant"
         )
-        prompt_tokens = self._tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
-        prompt_len = len(prompt_tokens)
-
-        # Labels are shifted by one token, so the first assistant token is
-        # predicted at index prompt_len - 1 and must remain unmasked.
-        mask_end = min(max(prompt_len - 1, 0), len(label_ids))
-        label_ids[:mask_end] = [IGNORE_INDEX] * mask_end
+        for turn_idx, msg in enumerate(messages):
+            if msg["role"] != "assistant":
+                continue
+            # start: label_ids index of the first assistant-content token.
+            # The prefix tokenization (with generation prompt) ends with the
+            # assistant header; labels are shifted by one, so start = prefix_len - 1.
+            prefix_text = self._tokenizer.apply_chat_template(
+                messages[:turn_idx], add_generation_prompt=True
+            )
+            prefix_tokens = self._tokenizer.encode(
+                prefix_text, add_bos=True, add_eos=False
+            )
+            start = len(prefix_tokens) - 1
+            if turn_idx == last_asst_idx:
+                # Last assistant turn: train through EOS appended above.
+                end = len(label_ids)
+            else:
+                # Intermediate turn: train on exactly the tokens the model
+                # generates during inference — up to and including the
+                # turn-end delimiter (e.g. <|im_end|>) — but NOT the
+                # inter-turn separator the template appends as scaffolding.
+                #
+                # apply_chat_template(messages[:i+1]) emits:
+                #   ...content<|im_end|>\n          (Granite / ChatML)
+                # The trailing \n is injected by the inference framework when
+                # building the next-turn prompt; the model never generates it.
+                # rstrip("\n") removes it so that end lands on <|im_end|>.
+                #
+                # This is safe for all practical templates: ChatML, Llama, and
+                # Mistral all use trailing newlines as inter-turn separators,
+                # so rstrip("\n") handles one or more \n characters correctly.
+                #
+                # If a template used a non-whitespace separator (e.g. <sep>),
+                # rstrip would silently fail.  The principled fix would be to
+                # scan full_tokens for the turn-end token by ID.  HuggingFace
+                # has no standardised eot_token_id property (Granite uses
+                # <|im_end|>, Llama 3 uses <|eot_id|>, etc.), so that path
+                # would require template-specific knowledge.
+                suffix_text = self._tokenizer.apply_chat_template(
+                    messages[: turn_idx + 1]
+                )
+                suffix_tokens = self._tokenizer.encode(
+                    suffix_text.rstrip("\n"), add_bos=True, add_eos=False
+                )
+                end = len(suffix_tokens) - 1
+            label_ids[start:end] = full_tokens[1:][start:end]
 
         if not self._logged_first_sample and self._cp_rank == 0:
             RED, RESET = "\033[31m", "\033[0m"
-            prompt_str = self._tokenizer.decode(full_tokens[:prompt_len], skip_special_tokens=False).encode("unicode_escape").decode("ascii")
-            response_str = self._tokenizer.decode(full_tokens[prompt_len:], skip_special_tokens=False).encode("unicode_escape").decode("ascii")
+            # full_tokens[j] is "trained on" (model predicts it) iff
+            # label_ids[j-1] != IGNORE_INDEX.
+            is_trained = [False] + [
+                label_ids[j - 1] != IGNORE_INDEX for j in range(1, len(full_tokens))
+            ]
+            parts = []
+            k = 0
+            while k < len(full_tokens):
+                end_k = k + 1
+                while end_k < len(full_tokens) and is_trained[end_k] == is_trained[k]:
+                    end_k += 1
+                text = self._tokenizer.decode(
+                    full_tokens[k:end_k], skip_special_tokens=False
+                ).encode("unicode_escape").decode("ascii")
+                parts.append(f"{RED}{text}{RESET}" if not is_trained[k] else text)
+                k = end_k
             logger.info(
-                f"[ChatDataset] First sample (red = not predicted):\n"
-                f"{RED}{prompt_str}{RESET}{response_str}"
+                f"[ChatDataset] First sample (red = not predicted):\n{''.join(parts)}"
             )
             self._logged_first_sample = True
 
@@ -433,6 +499,10 @@ class ChatDataset(IterableDataset, Stateful):
         Document boundaries are marked by EOS tokens between packed examples.
         The model's flex/varlen attention mask uses these EOS positions to
         prevent cross-document attention.
+
+        NOTE: the docstring above is outdated. The attention mask now uses
+        per-document position resets, not EOS tokens, for document boundary
+        detection; EOS in padding slots is fill only.
         """
         while True:
             for sample in self._get_data_iter():
