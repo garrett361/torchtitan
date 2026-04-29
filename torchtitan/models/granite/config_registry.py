@@ -95,17 +95,17 @@ def granite_sft_debugmodel() -> Trainer.Config:
 def granite_4_1_8b_sft() -> Trainer.Config:
     """SFT config for granite-4.1-8b on GLM-5.1 Reasoning with thinking template.
 
-    Requires GRANITE_41_8B_HF_ASSETS_PATH and GRANITE_DATA1_PATH set in the environment
-    or a .env file at the repo root.
+    Requires HF_ASSETS_PATH and DATA_PATH set in the environment or a .env file at the
+    repo root.
     """
     from dotenv import load_dotenv
 
     load_dotenv()
-    ckpt_path = os.getenv("GRANITE_41_8B_HF_ASSETS_PATH")
-    data_path = os.getenv("GRANITE_DATA1_PATH")
+    ckpt_path = os.getenv("HF_ASSETS_PATH")
+    data_path = os.getenv("DATA_PATH")
     for name, val in [
-        ("GRANITE_41_8B_HF_ASSETS_PATH", ckpt_path),
-        ("GRANITE_DATA1_PATH", data_path),
+        ("HF_ASSETS_PATH", ckpt_path),
+        ("DATA_PATH", data_path),
     ]:
         if val is None:
             raise ValueError(f"{name} not set. Add it to .env or export it before running.")
@@ -142,16 +142,16 @@ def granite_4_1_8b_sft() -> Trainer.Config:
 def granite_4_1_8b_base() -> Trainer.Config:
     """Pretraining/SFT config for granite-4.1-8b-base.
 
-    Requires GRANITE_41_8B_HF_ASSETS_PATH set in the environment or a .env file at the
-    repo root pointing to the HF checkpoint directory.
+    Requires HF_ASSETS_PATH set in the environment or a .env file at the repo root
+    pointing to the HF checkpoint directory.
     """
     from dotenv import load_dotenv
 
     load_dotenv()
-    ckpt_path = os.getenv("GRANITE_41_8B_HF_ASSETS_PATH")
+    ckpt_path = os.getenv("HF_ASSETS_PATH")
     if ckpt_path is None:
         raise ValueError(
-            "GRANITE_41_8B_HF_ASSETS_PATH not set. Add it to .env or export it before running."
+            "HF_ASSETS_PATH not set. Add it to .env or export it before running."
         )
 
     return Trainer.Config(

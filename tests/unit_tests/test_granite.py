@@ -234,10 +234,10 @@ class TestGraniteRealCheckpoint(unittest.TestCase):
         from dotenv import load_dotenv
 
         load_dotenv()
-        self.ckpt_path = os.getenv("GRANITE_41_8B_HF_ASSETS_PATH")
+        self.ckpt_path = os.getenv("HF_ASSETS_PATH")
         if self.ckpt_path is None:
             raise EnvironmentError(
-                "GRANITE_41_8B_HF_ASSETS_PATH not set. Add it to .env or export it before "
+                "HF_ASSETS_PATH not set. Add it to .env or export it before "
                 "running real-checkpoint tests."
             )
 
@@ -250,7 +250,7 @@ class TestGraniteRealCheckpoint(unittest.TestCase):
         shards = sorted(glob.glob(f"{self.ckpt_path}/model*.safetensors")) or sorted(
             glob.glob(f"{self.ckpt_path}/*.safetensors")
         )
-        self.assertTrue(shards, "No safetensors found in GRANITE_41_8B_HF_ASSETS_PATH")
+        self.assertTrue(shards, "No safetensors found in HF_ASSETS_PATH")
         hf_sd = {}
         for shard in shards:
             hf_sd.update(load_file(shard, device="cpu"))
@@ -339,7 +339,7 @@ class TestGraniteSFTDatasetUnit(unittest.TestCase):
 class TestGraniteSFTDataFormat(unittest.TestCase):
     """Structural checks on the raw GLM-5.1 Reasoning dataset.
 
-    Requires GRANITE_DATA1_PATH set in the environment or a .env file.
+    Requires DATA_PATH set in the environment or a .env file.
     Skips if the variable is absent.
     """
 
@@ -349,15 +349,15 @@ class TestGraniteSFTDataFormat(unittest.TestCase):
         from dotenv import load_dotenv
 
         load_dotenv()
-        data_path = os.getenv("GRANITE_DATA1_PATH")
+        data_path = os.getenv("DATA_PATH")
         if data_path is None:
-            self.skipTest("GRANITE_DATA1_PATH not set")
+            self.skipTest("DATA_PATH not set")
         self.data_path = data_path
 
     def test_all_examples_single_turn(self):
         jsonl_files = sorted(glob.glob(os.path.join(self.data_path, "*.jsonl")))
         if not jsonl_files:
-            self.skipTest("No .jsonl files found in GRANITE_DATA1_PATH")
+            self.skipTest("No .jsonl files found in DATA_PATH")
         for fpath in jsonl_files:
             fname = os.path.basename(fpath)
             with open(fpath) as f:
@@ -384,7 +384,7 @@ class TestGraniteSFTDataFormat(unittest.TestCase):
 class TestGraniteSFTData(unittest.TestCase):
     """End-to-end tokenization and masking tests for Granite SFT with thinking template.
 
-    Requires GRANITE_41_8B_HF_ASSETS_PATH and GRANITE_DATA1_PATH.
+    Requires HF_ASSETS_PATH and DATA_PATH.
     Skips if any variable is absent.
     """
 
@@ -402,8 +402,8 @@ class TestGraniteSFTData(unittest.TestCase):
         from torchtitan.hf_datasets.text_datasets import IGNORE_INDEX
 
         load_dotenv()
-        ckpt_path = os.getenv("GRANITE_41_8B_HF_ASSETS_PATH")
-        data_path = os.getenv("GRANITE_DATA1_PATH")
+        ckpt_path = os.getenv("HF_ASSETS_PATH")
+        data_path = os.getenv("DATA_PATH")
         if any(v is None for v in (ckpt_path, data_path)):
             return
 
@@ -443,9 +443,9 @@ class TestGraniteSFTData(unittest.TestCase):
         load_dotenv()
         if any(
             os.getenv(v) is None
-            for v in ("GRANITE_41_8B_HF_ASSETS_PATH", "GRANITE_DATA1_PATH")
+            for v in ("HF_ASSETS_PATH", "DATA_PATH")
         ):
-            self.skipTest("GRANITE_41_8B_HF_ASSETS_PATH and GRANITE_DATA1_PATH must both be set")
+            self.skipTest("HF_ASSETS_PATH and DATA_PATH must both be set")
 
     def test_chat_template_renders_system_and_thinking(self):
         rendered = self._tokenizer.apply_chat_template(self._sample_msgs)
