@@ -23,9 +23,9 @@ parser.add_argument("--plain", action="store_true", help="Print escaped token te
 args = parser.parse_args()
 
 load_dotenv()
-hf_assets_path = os.getenv("GRANITE_HF_ASSETS_PATH")
+hf_assets_path = os.getenv("GRANITE_41_8B_HF_ASSETS_PATH")
 if not hf_assets_path:
-    raise EnvironmentError("GRANITE_HF_ASSETS_PATH not set in .env or environment")
+    raise EnvironmentError("GRANITE_41_8B_HF_ASSETS_PATH not set in .env or environment")
 
 SAMPLE_MSGS = [
     [
