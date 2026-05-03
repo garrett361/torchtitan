@@ -1,7 +1,8 @@
-import fcntl
 import json
 import logging
 from abc import ABC, abstractmethod
+
+from filelock import FileLock
 from typing import Any
 
 from torchtitan.components.loss import IGNORE_INDEX
@@ -34,13 +35,9 @@ def _validate_messages(messages: list[dict]) -> None:
 
 def _append_failures(path: str, failures: list[dict]) -> None:
     """Append failure records to a JSONL file, safe for concurrent writers."""
-    with open(path, "a") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            for rec in failures:
-                f.write(json.dumps(rec) + "\n")
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+    with FileLock(path + ".lock"), open(path, "a") as f:
+        for rec in failures:
+            f.write(json.dumps(rec) + "\n")
 
 
 class TokenizationStrategy(ABC):
