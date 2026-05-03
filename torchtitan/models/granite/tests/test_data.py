@@ -37,6 +37,223 @@ class TestGraniteSFTDatasetUnit(unittest.TestCase):
             GraniteSFTDataset._validate_messages([self._user, self._sys, self._asst])
 
 
+class TestChatTemplate(unittest.TestCase):
+    """Verifies chat template rendering behavior for thinking, tool calls, and BPE boundaries.
+
+    Three distinct assistant-turn forms with truncate_history_thinking=True:
+      - Full thinking:   <think>\\n{reasoning}\\n</think>\\n{response}
+      - Truncated:       <think></think>\\n{response}   (\\n survives stripping)
+      - No reasoning:    <think></think>{response}      (no \\n at all)
+
+    Requires HF_ASSETS_PATH. Skips if absent.
+    """
+
+    _tokenizer = None
+
+    # Two reasoning turns + one no-reasoning turn.  With truncate_history_thinking=True,
+    # last_user_idx=5 (third user message), so the assistants at indices 2 and 4 are
+    # historical: idx-2 has rc → truncated form; idx-4 has no rc → no-reasoning form.
+    # The assistant at idx-6 is current → full-thinking form.
+    _MESSAGES = [
+        {"role": "system", "content": "Be helpful."},
+        {"role": "user", "content": "First question."},
+        {
+            "role": "assistant",
+            "content": "First response.",
+            "reasoning_content": "First reasoning.",
+        },
+        {"role": "user", "content": "Second question."},
+        {"role": "assistant", "content": "Second response."},
+        {"role": "user", "content": "Third question."},
+        {
+            "role": "assistant",
+            "content": "Third response.",
+            "reasoning_content": "Third reasoning.",
+        },
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        from dotenv import load_dotenv
+
+        from torchtitan.components.tokenizer import HuggingFaceTokenizer
+
+        load_dotenv()
+        ckpt_path = os.getenv("HF_ASSETS_PATH")
+        if ckpt_path is None:
+            return
+        cls._tokenizer = HuggingFaceTokenizer(tokenizer_path=ckpt_path)
+
+    def setUp(self):
+        from dotenv import load_dotenv
+
+        load_dotenv()
+        if os.getenv("HF_ASSETS_PATH") is None:
+            self.skipTest("HF_ASSETS_PATH not set")
+
+    def _render(self):
+        return self._tokenizer.apply_chat_template(
+            self._MESSAGES, truncate_history_thinking=True
+        )
+
+    def test_full_thinking_form(self):
+        """Last assistant turn: reasoning flanked by newlines, \\n follows </think>."""
+        self.assertIn("<think>\nThird reasoning.\n</think>\nThird response.", self._render())
+
+    def test_truncated_thinking_preserves_trailing_newline(self):
+        """Historical turn with reasoning_content: thinking stripped, trailing \\n survives."""
+        self.assertIn("<think></think>\nFirst response.", self._render())
+
+    def test_no_reasoning_form_has_no_newline(self):
+        """Assistant turn without reasoning_content: <think></think> with no newline."""
+        rendered = self._render()
+        self.assertIn("<think></think>Second response.", rendered)
+        self.assertNotIn("<think></think>\nSecond response.", rendered)
+
+    def test_tool_chain_single_user_preserves_all_thinking(self):
+        """Single initial user message: last_user_idx=0, so no assistant is historical.
+
+        All reasoning_content survives intact — truncation never fires regardless of how
+        many tool round-trips occur between the user message and the final response.
+        """
+        messages = [
+            {"role": "user", "content": "Search for info."},
+            {
+                "role": "assistant",
+                "content": "Calling search.",
+                "reasoning_content": "I should search.",
+            },
+            {"role": "tool", "content": "Search results here."},
+            {
+                "role": "assistant",
+                "content": "Processing results.",
+                "reasoning_content": "Results indicate.",
+            },
+            {"role": "tool", "content": "More results here."},
+            {
+                "role": "assistant",
+                "content": "Final answer.",
+                "reasoning_content": "Putting it together.",
+            },
+        ]
+        rendered = self._tokenizer.apply_chat_template(
+            messages, truncate_history_thinking=True
+        )
+        self.assertIn("<think>\nI should search.\n</think>", rendered)
+        self.assertIn("<think>\nResults indicate.\n</think>", rendered)
+        self.assertIn("<think>\nPutting it together.\n</think>", rendered)
+        self.assertNotIn("<think></think>", rendered)
+
+    def test_tool_chain_followed_by_user_strips_intermediate_thinking(self):
+        """Tool-use block before a follow-up user message: those assistant turns are historical.
+
+        last_user_idx is determined by the last role=user in the original message list.
+        Assistants before that index — including those inside a prior tool-call loop — have
+        their thinking stripped.  Only the final assistant (after the last user) keeps it.
+        """
+        messages = [
+            {"role": "user", "content": "Look something up."},
+            {
+                "role": "assistant",
+                "content": "Calling tool.",
+                "reasoning_content": "Tool reasoning.",
+            },
+            {"role": "tool", "content": "Tool result."},
+            {
+                "role": "assistant",
+                "content": "Here is the result.",
+                "reasoning_content": "Result reasoning.",
+            },
+            {"role": "user", "content": "Follow-up question."},
+            {
+                "role": "assistant",
+                "content": "Follow-up answer.",
+                "reasoning_content": "Follow-up reasoning.",
+            },
+        ]
+        rendered = self._tokenizer.apply_chat_template(
+            messages, truncate_history_thinking=True
+        )
+        # Assistants before the follow-up user turn: thinking stripped.
+        self.assertIn("<think></think>\nCalling tool.", rendered)
+        self.assertIn("<think></think>\nHere is the result.", rendered)
+        # Final assistant: thinking preserved in full.
+        self.assertIn(
+            "<think>\nFollow-up reasoning.\n</think>\nFollow-up answer.", rendered
+        )
+
+    def test_tool_messages_rendered_as_user_turns(self):
+        """Tool messages appear inside <|im_start|>user blocks, not as a distinct role."""
+        messages = [
+            {"role": "user", "content": "Do a lookup."},
+            {"role": "assistant", "content": "Looking up."},
+            {"role": "tool", "content": "Lookup result."},
+            {"role": "assistant", "content": "Done."},
+        ]
+        rendered = self._tokenizer.apply_chat_template(
+            messages, truncate_history_thinking=True
+        )
+        self.assertNotIn("<|im_start|>tool", rendered)
+        self.assertIn("Lookup result.", rendered)
+        # The <|im_start|> immediately before the tool content must open a user turn.
+        pos = rendered.index("Lookup result.")
+        last_start = rendered.rfind("<|im_start|>", 0, pos)
+        self.assertIn("user", rendered[last_start : last_start + 25])
+
+    def test_consecutive_tool_messages_share_one_user_block(self):
+        """Consecutive tool messages are grouped under a single <|im_start|>user block.
+
+        Verified by absence of any <|im_end|> between the two tool result strings.
+        """
+        messages = [
+            {"role": "user", "content": "Do two lookups."},
+            {"role": "assistant", "content": "Calling both."},
+            {"role": "tool", "content": "Result one."},
+            {"role": "tool", "content": "Result two."},
+            {"role": "assistant", "content": "Both done."},
+        ]
+        rendered = self._tokenizer.apply_chat_template(
+            messages, truncate_history_thinking=True
+        )
+        self.assertIn("Result one.", rendered)
+        self.assertIn("Result two.", rendered)
+        pos1 = rendered.index("Result one.")
+        pos2 = rendered.index("Result two.")
+        self.assertNotIn(
+            "<|im_end|>",
+            rendered[pos1:pos2],
+            "Consecutive tool messages must not be separated by a turn boundary",
+        )
+
+    def test_bpe_boundary_response_tokens_unchanged_by_preceding_newline(self):
+        """Response tokens are identical whether they follow </think>\\n or </think> alone.
+
+        The pre-tokenizer splits on newlines as their own word, and <think>/<\\/think> are
+        registered add tokens (always atomic).  So the \\n between </think> and the response
+        is an independent token and does not merge with adjacent response text — the response
+        token sequence is identical in both contexts, enabling token-level splicing of
+        truncated sequences from full tokenizations without re-tokenization.
+        """
+        end_think_id = self._tokenizer.token_to_id("</think>")
+        self.assertIsNotNone(end_think_id, "</think> must be a registered token")
+
+        response_text = "Alpha beta gamma delta epsilon."
+        tokens_with_newline = self._tokenizer.encode(
+            f"</think>\n{response_text}", add_bos=False, add_eos=False
+        )
+        tokens_without_newline = self._tokenizer.encode(
+            f"</think>{response_text}", add_bos=False, add_eos=False
+        )
+        self.assertEqual(tokens_with_newline[0], end_think_id)
+        self.assertEqual(tokens_without_newline[0], end_think_id)
+        # Skip </think> and the \n in the first sequence; response tokens must be equal.
+        self.assertEqual(
+            tokens_with_newline[2:],
+            tokens_without_newline[1:],
+            "Response tokens after </think> must be identical regardless of preceding \\n",
+        )
+
+
 class TestGraniteSFTDataFormat(unittest.TestCase):
     """Structural checks on the raw GLM-5.1 Reasoning dataset.
 
@@ -506,8 +723,7 @@ class TestGraniteSFT7MBalanced(unittest.TestCase):
     either is absent.  Generate the test sample with::
 
         python -m torchtitan.models.granite.scripts.gen_test_data \\
-            --source /path/to/train_v1_7m_balanced/part_00.jsonl \\
-            --output /path/to/train_v1_7m_balanced/test_sample/part_00.jsonl
+            --source /path/to/train_v1_7m_balanced
     """
 
     _tokenizer = None
