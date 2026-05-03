@@ -759,8 +759,6 @@ class TestGraniteSFT7MBalanced(unittest.TestCase):
         with open(jsonl_files[0]) as f:
             for line in f:
                 records.append(json.loads(line))
-                if len(records) >= 40:
-                    break
         cls._records = records
 
         def _n_asst(r):
@@ -889,13 +887,13 @@ class TestGraniteSFT7MBalanced(unittest.TestCase):
 
     def test_dataset_has_expected_heterogeneity(self):
         self.assertGreater(
-            len(self._multi_turn), 0, "No multi-turn records in first 40"
+            len(self._multi_turn), 0, "No multi-turn records in test sample"
         )
-        self.assertGreater(len(self._mixed_rc), 0, "No mixed-rc records in first 40")
+        self.assertGreater(len(self._mixed_rc), 0, "No mixed-rc records in test sample")
         self.assertGreater(
-            len(self._tool_recs), 0, "No tool-message records in first 40"
+            len(self._tool_recs), 0, "No tool-message records in test sample"
         )
-        self.assertGreater(len(self._no_rc), 0, "No all-no-rc records in first 40")
+        self.assertGreater(len(self._no_rc), 0, "No all-no-rc records in test sample")
 
     def test_no_thinking_turn_boundary(self):
         """No-thinking turns: </think> sits at input_ids[start]; first content token trained.
@@ -961,7 +959,7 @@ class TestGraniteSFT7MBalanced(unittest.TestCase):
         ]
         tested_last = 0
         tested_intermediate = 0
-        for r in thinking_recs[:8]:
+        for r in thinking_recs:
             messages = r["messages"]
             result = self._tokenize(messages)
             if result is None:
