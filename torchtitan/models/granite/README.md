@@ -78,7 +78,29 @@ splicing without re-tokenization.
 
 ## Tokenization Strategy
 
-TODO: document chosen pre-tokenization approach and rationale.
+### TruncateLastStrategy
+
+Labels only the final assistant turn. All earlier turns (user, tool, and intermediate
+assistant) are masked (`IGNORE_INDEX`). Uses `truncate_history_thinking=True`, matching
+the vLLM/SGLang inference default.
+
+**Trailing non-assistant turns** (tool-last, user-last) are accepted. In both cases,
+messages after the last assistant turn are dropped before tokenization:
+
+- **User-last** (e.g. injected "max iterations" scaffolding): a correctness requirement.
+  A trailing `user` message shifts `last_user_idx` past the last assistant, causing
+  `truncate_history_thinking` to strip that turn's thinking traces. Dropping the trailing
+  message restores the correct `last_user_idx`.
+
+- **Tool-last** (agentic trajectories cut off after a tool response): efficiency only.
+  Trailing `tool` messages do not affect `last_user_idx` (the template excludes tool role
+  from that scan), so thinking is unaffected. The tokens are dropped purely to avoid
+  wasting packing budget at training time — they are all-`IGNORE_INDEX` and cannot be
+  attended to by any labeled position.
+
+The reasoning in the last assistant turn (the `reasoning_content` / `<think>` block) lives
+in the assistant message itself, not in the following tool response. Dropping the trailing
+tool response does not affect it.
 
 # Inference Notes
 
