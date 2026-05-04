@@ -305,12 +305,15 @@ class ChatDataset(IterableDataset, Stateful):
         # Seed 42 covers epoch 0; `_iter_greedy_packed` reshuffles with seed 42+epoch at
         # each epoch boundary, giving a clean per-epoch sequence: 42, 43, 44, ...
         self._original_data = split_dataset_by_node(
-          dataset.shuffle(seed=42), dp_rank, dp_world_size
+            dataset.shuffle(seed=42), dp_rank, dp_world_size
         )
 
         self._data = self._original_data
         self._tokenizer = tokenizer
         self._eos_id = tokenizer.eos_id
+        # Used to scan full_tokens for the turn-end position of intermediate
+        # assistant turns without re-tokenizing suffixes (see _tokenize_sample).
+        self._im_end_id = tokenizer.token_to_id("<|im_end|>")
         self.seq_len = seq_len
         self.infinite = infinite
         self._cp_rank = cp_rank
@@ -328,7 +331,7 @@ class ChatDataset(IterableDataset, Stateful):
         self._logged_first_sample = False
 
         # Cumulative data stats — checkpointed so they survive resume.
-        self._n_total_tokens: int = 0    # sample tokens excl. tail-pad; internal only
+        self._n_total_tokens: int = 0  # sample tokens excl. tail-pad; internal only
         self._n_trained_tokens: int = 0  # non-IGNORE_INDEX labels
         self._n_examples_packed: int = 0
 
@@ -366,9 +369,7 @@ class ChatDataset(IterableDataset, Stateful):
                 f"Last message must be 'assistant', got '{messages[-1]['role']}'"
             )
         system_positions = [i for i, m in enumerate(messages) if m["role"] == "system"]
-        if len(system_positions) > 1 or (
-            system_positions and system_positions[0] != 0
-        ):
+        if len(system_positions) > 1 or (system_positions and system_positions[0] != 0):
             raise ValueError("system message must be the first message if present")
 
     def _tokenize_sample(
@@ -432,34 +433,33 @@ class ChatDataset(IterableDataset, Stateful):
                 # Last assistant turn: train through EOS appended above.
                 end = len(label_ids)
             else:
-                # Intermediate turn: train on exactly the tokens the model
-                # generates during inference — up to and including the
-                # turn-end delimiter (e.g. <|im_end|>) — but NOT the
-                # inter-turn separator the template appends as scaffolding.
+                # Intermediate turn: train up to and including the turn-end
+                # delimiter (<|im_end|>), but not the inter-turn \n that
+                # follows (that's structural scaffolding, not model output).
                 #
-                # apply_chat_template(messages[:i+1]) emits:
-                #   ...content<|im_end|>\n          (Granite / ChatML)
-                # The trailing \n is injected by the inference framework when
-                # building the next-turn prompt; the model never generates it.
-                # rstrip("\n") removes it so that end lands on <|im_end|>.
+                # We scan full_tokens for <|im_end|> rather than re-tokenizing
+                # a suffix.  The suffix approach is incorrect when
+                # truncate_history_thinking is active: suffix tokenization of
+                # messages[:turn_idx+1] treats turn_idx as the *last* turn and
+                # preserves its thinking, making suffix_tokens longer than the
+                # corresponding span in full_tokens (which has thinking
+                # stripped).  The resulting end overflow causes Python's slice
+                # to silently clip, labeling the inter-turn gap as trained.
                 #
-                # This is safe for all practical templates: ChatML, Llama, and
-                # Mistral all use trailing newlines as inter-turn separators,
-                # so rstrip("\n") handles one or more \n characters correctly.
-                #
-                # If a template used a non-whitespace separator (e.g. <sep>),
-                # rstrip would silently fail.  The principled fix would be to
-                # scan full_tokens for the turn-end token by ID.  HuggingFace
-                # has no standardised eot_token_id property (Granite uses
-                # <|im_end|>, Llama 3 uses <|eot_id|>, etc.), so that path
-                # would require template-specific knowledge.
-                suffix_text = self._tokenizer.apply_chat_template(
-                    messages[: turn_idx + 1]
-                )
-                suffix_tokens = self._tokenizer.encode(
-                    suffix_text.rstrip("\n"), add_bos=True, add_eos=False
-                )
-                end = len(suffix_tokens) - 1
+                # Scanning full_tokens directly always lands on the correct
+                # <|im_end|> position regardless of thinking stripping.  If
+                # the tokenizer does not have <|im_end|> (non-ChatML templates)
+                # we fall back to the suffix approach.
+                if self._im_end_id is not None:
+                    end = full_tokens.index(self._im_end_id, start + 1)
+                else:
+                    suffix_text = self._tokenizer.apply_chat_template(
+                        messages[: turn_idx + 1]
+                    )
+                    suffix_tokens = self._tokenizer.encode(
+                        suffix_text.rstrip("\n"), add_bos=True, add_eos=False
+                    )
+                    end = len(suffix_tokens) - 1
             label_ids[start:end] = full_tokens[1:][start:end]
 
         if not self._logged_first_sample and self._cp_rank == 0:
@@ -475,9 +475,13 @@ class ChatDataset(IterableDataset, Stateful):
                 end_k = k + 1
                 while end_k < len(full_tokens) and is_trained[end_k] == is_trained[k]:
                     end_k += 1
-                text = self._tokenizer.decode(
-                    full_tokens[k:end_k], skip_special_tokens=False
-                ).encode("unicode_escape").decode("ascii")
+                text = (
+                    self._tokenizer.decode(
+                        full_tokens[k:end_k], skip_special_tokens=False
+                    )
+                    .encode("unicode_escape")
+                    .decode("ascii")
+                )
                 parts.append(f"{RED}{text}{RESET}" if not is_trained[k] else text)
                 k = end_k
             logger.info(
