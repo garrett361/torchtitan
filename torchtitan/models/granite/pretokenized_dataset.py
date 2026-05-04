@@ -13,9 +13,10 @@ Class hierarchy:
 
 import json
 from abc import abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import torch
 from datasets import Dataset, concatenate_datasets, load_from_disk
@@ -175,7 +176,8 @@ class TruncateLastDataset(PreTokenizedDataset):
         self._log_first_sample(input_ids, label_ids)
         return input_ids, label_ids
 
-    def __iter__(self):
+    def _prepare_iter(self) -> None:
+        """Common setup for __iter__: worker detection, epoch shuffle, sharding."""
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
             self._worker_id = worker_info.id
@@ -197,6 +199,9 @@ class TruncateLastDataset(PreTokenizedDataset):
                 split_dataset_by_node(self._data, self._worker_id, self._num_workers),
             )
         self._sample_idx = min(self._sample_idx, len(self._data))
+
+    def __iter__(self):
+        self._prepare_iter()
         yield from self._iter_greedy_packed()
 
     def _iter_greedy_packed(self):
@@ -336,6 +341,138 @@ class TruncateLastDataset(PreTokenizedDataset):
             )
 
 
+class TruncateLastBufferDataset(TruncateLastDataset):
+    """Buffer-packing variant of TruncateLastDataset.
+
+    Maintains a lookahead buffer of pre-tokenized examples. For each batch,
+    starts with the oldest buffered example (FIFO) then fills remaining space
+    with the largest example that fits. Reduces padding waste compared to greedy
+    packing, especially at long sequence lengths.
+    """
+
+    def __init__(self, *args, buffer_size: int = 64, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._buffer_size = buffer_size
+        self._buffer: list[tuple[list[int], list[int]]] = []
+        self._data_iter: Iterator | None = None
+        self._data_exhausted: bool = False
+
+    def _refill_buffer(self) -> None:
+        while len(self._buffer) < self._buffer_size and not self._data_exhausted:
+            sample = next(self._data_iter, None)
+            if sample is None:
+                self._data_exhausted = True
+                break
+            result = self._tokenize_sample(sample)
+            self._sample_idx += 1
+            if result is None:
+                continue
+            self._buffer.append(result)
+
+    def __iter__(self):
+        self._prepare_iter()
+        yield from self._iter_buffer_packed()
+
+    def _iter_buffer_packed(self):
+        self._data_iter = self._get_data_iter()
+        self._data_exhausted = False
+
+        while True:
+            self._refill_buffer()
+
+            if not self._buffer:
+                if not self.infinite:
+                    break
+                self._sample_idx = 0
+                self._epoch += 1
+                self._data = cast(
+                    Dataset,
+                    self._original_data.shuffle(
+                        seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
+                    ),
+                )
+                if self._num_workers > 1:
+                    self._data = cast(
+                        Dataset,
+                        split_dataset_by_node(
+                            self._data, self._worker_id, self._num_workers
+                        ),
+                    )
+                self._data_iter = self._get_data_iter()
+                self._data_exhausted = False
+                logger.warning(
+                    "Dataset '%s' is being re-looped (epoch %d)",
+                    self._dataset_id,
+                    self._epoch,
+                )
+                continue
+
+            inputs_buf: list[int] = []
+            labels_buf: list[int] = []
+            positions_buf: list[int] = []
+            batch_n_total = 0
+            batch_n_trained = 0
+            batch_n_examples = 0
+
+            # Step 1: oldest (FIFO guarantee)
+            oldest_ids, oldest_lbls = self._buffer.pop(0)
+            inputs_buf.extend(oldest_ids)
+            labels_buf.extend(oldest_lbls)
+            positions_buf.extend(range(len(oldest_ids)))
+            batch_n_total += len(oldest_ids)
+            batch_n_trained += sum(1 for lbl in oldest_lbls if lbl != IGNORE_INDEX)
+            batch_n_examples += 1
+
+            # Step 2: largest-fit from remaining buffer
+            while True:
+                remaining = self.seq_len - len(inputs_buf)
+                if remaining <= 0:
+                    break
+                best_idx = -1
+                best_len = 0
+                for i, (ids, _) in enumerate(self._buffer):
+                    L = len(ids)
+                    if L <= remaining and L > best_len:
+                        best_idx = i
+                        best_len = L
+                if best_idx == -1:
+                    break
+                picked_ids, picked_lbls = self._buffer.pop(best_idx)
+                inputs_buf.extend(picked_ids)
+                labels_buf.extend(picked_lbls)
+                positions_buf.extend(range(len(picked_ids)))
+                batch_n_total += len(picked_ids)
+                batch_n_trained += sum(
+                    1 for lbl in picked_lbls if lbl != IGNORE_INDEX
+                )
+                batch_n_examples += 1
+
+            pad_len = self.seq_len - len(inputs_buf)
+            if pad_len > 0:
+                inputs_buf.extend([self._eos_id] * pad_len)
+                labels_buf.extend([IGNORE_INDEX] * pad_len)
+                positions_buf.extend(range(pad_len))
+
+            yield self._flush(
+                inputs_buf,
+                labels_buf,
+                positions_buf,
+                batch_n_total,
+                batch_n_trained,
+                batch_n_examples,
+            )
+
+    def state_dict(self) -> dict[str, Any]:
+        d = super().state_dict()
+        d["buffer"] = [(ids, lbls) for ids, lbls in self._buffer]
+        return d
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        buffer = state_dict.pop("buffer", [])
+        super().load_state_dict(state_dict)
+        self._buffer = [(list(ids), list(lbls)) for ids, lbls in buffer]
+
+
 _DATASET_CLASSES: dict[str, type[PreTokenizedDataset]] = {
     "truncate_last": TruncateLastDataset,
 }
@@ -364,6 +501,14 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         """Keep shuffle index in memory instead of writing a cache file to the shard
         directory. Avoids filesystem contention when many ranks start simultaneously."""
 
+        packing: Literal["greedy", "buffer"] = "greedy"
+        """Packing algorithm. 'greedy' packs in order (existing behavior).
+        'buffer' maintains a lookahead buffer and selects largest-fitting examples."""
+
+        buffer_size: int = 64
+        """Number of examples held in the lookahead buffer (per worker).
+        Only used when packing='buffer'."""
+
     def __init__(
         self,
         config: "GranitePreTokenizedDataLoader.Config",
@@ -382,7 +527,7 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
                 f"Unsupported strategy {strategy!r} in {config.manifest_path}. "
                 f"Supported: {sorted(_DATASET_CLASSES)}"
             )
-        dataset = _DATASET_CLASSES[strategy](
+        dataset_kwargs = dict(
             manifest_path=config.manifest_path,
             seq_len=seq_len,
             dp_rank=dp_rank,
@@ -393,6 +538,17 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
             tokenizer=tokenizer,
             _manifest=manifest,
         )
+        if config.packing == "buffer":
+            if strategy != "truncate_last":
+                raise ValueError(
+                    f"Buffer packing only supports 'truncate_last' strategy, "
+                    f"got {strategy!r}"
+                )
+            dataset = TruncateLastBufferDataset(
+                **dataset_kwargs, buffer_size=config.buffer_size
+            )
+        else:
+            dataset = _DATASET_CLASSES[strategy](**dataset_kwargs)
 
         self._consumed_n_total_tokens: int = 0
         self._consumed_n_trained_tokens: int = 0

@@ -9,6 +9,7 @@ from datasets import Dataset
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.models.granite.pretokenized_dataset import (
+    TruncateLastBufferDataset,
     GranitePreTokenizedDataLoader,
     TruncateLastDataset,
 )
@@ -360,6 +361,210 @@ class TestMultiWorkerSharding(unittest.TestCase):
         self.assertEqual(stats_after["n_examples_packed"], stats_before["n_examples_packed"])
 
 
+class TestTruncateLastBufferDataset(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+
+        self._tmpdir = tempfile.mkdtemp()
+        self._tmp = Path(self._tmpdir)
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self._tmpdir)
+
+    def _make_dataset(
+        self, examples, seq_len=16, buffer_size=4, **kwargs
+    ) -> TruncateLastBufferDataset:
+        manifest_path = _make_shard(self._tmp, examples)
+        return TruncateLastBufferDataset(
+            manifest_path,
+            seq_len=seq_len,
+            infinite=False,
+            buffer_size=buffer_size,
+            **kwargs,
+        )
+
+    def test_output_shape(self):
+        """Every yielded batch has tensors of length seq_len."""
+        seq_len = 8
+        examples = [
+            ([1, 2, 3, _EOS_ID], [IGNORE_INDEX, 3, _EOS_ID, IGNORE_INDEX]),
+            ([1, 4, 5, 6, _EOS_ID], [IGNORE_INDEX, 5, 6, _EOS_ID, IGNORE_INDEX]),
+        ]
+        ds = self._make_dataset(examples, seq_len=seq_len)
+        for batch_dict, labels, _stats in ds:
+            self.assertEqual(batch_dict["input"].shape, (seq_len,))
+            self.assertEqual(batch_dict["positions"].shape, (seq_len,))
+            self.assertEqual(labels.shape, (seq_len,))
+
+    def test_fills_gaps(self):
+        """Buffer packing uses less padding than greedy on a bimodal distribution."""
+        seq_len = 16
+        # 10 large (11 tokens) + 10 small (5 tokens).
+        # Optimal: pair each large with a small → 11+5=16, 0 padding per batch.
+        # Greedy: when two large examples are adjacent → 11 + pad 5 (can't fit 11).
+        # Buffer with all 20 in buffer: always finds a 5-token complement.
+        large = [list(range(11)), [IGNORE_INDEX] * 10 + [10]]
+        small = [list(range(100, 105)), [IGNORE_INDEX] * 4 + [104]]
+        examples = [tuple(large) for _ in range(10)] + [tuple(small) for _ in range(10)]
+
+        greedy_dir = self._tmp / "greedy"
+        greedy_dir.mkdir()
+        greedy_ds = TruncateLastDataset(
+            _make_shard(greedy_dir, examples), seq_len=seq_len, infinite=False
+        )
+        greedy_total_tokens = 0
+        greedy_batches = 0
+        for _, _, stats in greedy_ds:
+            greedy_total_tokens += stats["n_total_tokens"]
+            greedy_batches += 1
+        greedy_padding = greedy_batches * seq_len - greedy_total_tokens
+
+        buffer_ds = self._make_dataset(examples, seq_len=seq_len, buffer_size=20)
+        buffer_total_tokens = 0
+        buffer_batches = 0
+        for _, _, stats in buffer_ds:
+            buffer_total_tokens += stats["n_total_tokens"]
+            buffer_batches += 1
+        buffer_padding = buffer_batches * seq_len - buffer_total_tokens
+
+        self.assertLess(buffer_padding, greedy_padding)
+
+    def test_fifo_guarantee(self):
+        """Oldest buffered example is consumed first, not the largest."""
+        seq_len = 16
+        # All same-length examples: largest-fit has no preference, so FIFO
+        # determines order. Verify output order matches (shuffled) dataset order.
+        examples = [
+            ([100 + i, _EOS_ID], [_EOS_ID, IGNORE_INDEX])
+            for i in range(8)
+        ]
+        manifest_path = _make_shard(self._tmp, examples)
+        ds = TruncateLastBufferDataset(
+            manifest_path, seq_len=seq_len, infinite=False, buffer_size=8
+        )
+
+        # Determine expected order from the shuffled dataset
+        expected_first_tokens = [row["input_ids"][0] for row in ds._data]
+
+        # Collect actual first tokens of each packed example from output
+        actual_first_tokens = []
+        for batch_dict, _, _ in ds:
+            inputs = batch_dict["input"].tolist()
+            positions = batch_dict["positions"].tolist()
+            # Each document starts where positions reset to 0
+            for i, pos in enumerate(positions):
+                if pos == 0 and inputs[i] != _EOS_ID:
+                    actual_first_tokens.append(inputs[i])
+
+        self.assertEqual(actual_first_tokens, expected_first_tokens)
+
+    def test_position_resets_at_document_boundary(self):
+        """Positions reset to 0 at each packed document boundary."""
+        seq_len = 8
+        examples = [
+            ([1, 2, _EOS_ID], [IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
+            ([3, 4, _EOS_ID], [IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
+        ]
+        ds = self._make_dataset(examples, seq_len=seq_len, buffer_size=4)
+        batches = list(ds)
+        self.assertEqual(len(batches), 1)
+        positions = batches[0][0]["positions"].tolist()
+        self.assertEqual(positions[:3], [0, 1, 2])
+        self.assertEqual(positions[3:6], [0, 1, 2])
+
+    def test_batch_stats(self):
+        """Per-batch stats have correct token and example counts."""
+        seq_len = 16
+        input_ids = [1, 10, 20, 30, _EOS_ID]
+        label_ids = [IGNORE_INDEX, IGNORE_INDEX, 30, _EOS_ID, IGNORE_INDEX]
+        ds = self._make_dataset([(input_ids, label_ids)], seq_len=seq_len)
+
+        batches = list(ds)
+        self.assertEqual(len(batches), 1)
+        _, _, stats = batches[0]
+        self.assertEqual(stats["n_total_tokens"], len(input_ids))
+        self.assertEqual(
+            stats["n_trained_tokens"],
+            sum(1 for l in label_ids if l != IGNORE_INDEX),
+        )
+        self.assertEqual(stats["n_examples_packed"], 1)
+
+    def test_checkpointing_resumes_correctly(self):
+        """load_state_dict restores buffer and resumes correctly."""
+        seq_len = 8
+        examples = [
+            ([1, 2, 3, _EOS_ID], [IGNORE_INDEX, 3, _EOS_ID, IGNORE_INDEX]),
+            ([1, 4, 5, _EOS_ID], [IGNORE_INDEX, 5, _EOS_ID, IGNORE_INDEX]),
+            ([1, 6, 7, _EOS_ID], [IGNORE_INDEX, 7, _EOS_ID, IGNORE_INDEX]),
+            ([1, 8, 9, _EOS_ID], [IGNORE_INDEX, 9, _EOS_ID, IGNORE_INDEX]),
+        ]
+        manifest_path = _make_shard(self._tmp, examples)
+
+        # Reference: collect all batches in one pass.
+        ds_ref = TruncateLastBufferDataset(
+            manifest_path, seq_len=seq_len, infinite=False, buffer_size=4
+        )
+        all_batches = list(ds_ref)
+        self.assertGreater(len(all_batches), 1)
+
+        # Checkpoint after first batch, restore, verify remaining match.
+        ds_a = TruncateLastBufferDataset(
+            manifest_path, seq_len=seq_len, infinite=False, buffer_size=4
+        )
+        it_a = iter(ds_a)
+        next(it_a)
+        checkpoint = ds_a.state_dict()
+
+        ds_b = TruncateLastBufferDataset(
+            manifest_path, seq_len=seq_len, infinite=False, buffer_size=4
+        )
+        ds_b.load_state_dict(checkpoint)
+
+        remaining_a = list(it_a)
+        remaining_b = list(ds_b)
+
+        self.assertEqual(len(remaining_a), len(remaining_b))
+        for (ba, la, _sa), (bb, lb, _sb) in zip(remaining_a, remaining_b):
+            self.assertTrue(torch.equal(ba["input"], bb["input"]))
+            self.assertTrue(torch.equal(la, lb))
+
+    def test_infinite_reloops(self):
+        """Dataset re-loops correctly in infinite mode."""
+        seq_len = 8
+        examples = [
+            ([1, 2, 3, _EOS_ID], [IGNORE_INDEX, 3, _EOS_ID, IGNORE_INDEX]),
+            ([1, 4, 5, _EOS_ID], [IGNORE_INDEX, 5, _EOS_ID, IGNORE_INDEX]),
+        ]
+        manifest_path = _make_shard(self._tmp, examples)
+        ds = TruncateLastBufferDataset(
+            manifest_path, seq_len=seq_len, infinite=True, buffer_size=4
+        )
+
+        it = iter(ds)
+        batches = [next(it) for _ in range(5)]
+        self.assertEqual(len(batches), 5)
+        # All batches should have correct shape
+        for batch_dict, labels, _stats in batches:
+            self.assertEqual(batch_dict["input"].shape, (seq_len,))
+
+    def test_seq_len_drop(self):
+        """Examples longer than seq_len are dropped, not buffered."""
+        seq_len = 4
+        long_example = (
+            [1, 2, 3, 4, _EOS_ID],
+            [IGNORE_INDEX, 3, 4, _EOS_ID, IGNORE_INDEX],
+        )
+        short_example = ([1, 2, _EOS_ID], [IGNORE_INDEX, _EOS_ID, IGNORE_INDEX])
+        ds = self._make_dataset(
+            [long_example, short_example], seq_len=seq_len, buffer_size=4
+        )
+
+        batches = list(ds)
+        self.assertEqual(len(batches), 1)
+
+
 class TestGranitePreTokenizedDataLoaderDispatch(unittest.TestCase):
     def setUp(self):
         import tempfile
@@ -392,6 +597,29 @@ class TestGranitePreTokenizedDataLoaderDispatch(unittest.TestCase):
             local_batch_size=1,
         )
         self.assertIsInstance(loader.dataset, TruncateLastDataset)
+
+    def test_dispatch_buffer_packing(self):
+        """DataLoader with packing='buffer' instantiates TruncateLastBufferDataset."""
+        examples = [([1, 2, _EOS_ID], [IGNORE_INDEX, _EOS_ID, IGNORE_INDEX])]
+        manifest_path = _make_shard(self._tmp, examples, strategy="truncate_last")
+
+        from torchtitan.components.tokenizer import HuggingFaceTokenizer
+
+        tokenizer = HuggingFaceTokenizer(tokenizer_path="tests/assets/tokenizer")
+        loader = GranitePreTokenizedDataLoader(
+            GranitePreTokenizedDataLoader.Config(
+                manifest_path=str(manifest_path),
+                infinite=False,
+                packing="buffer",
+                buffer_size=32,
+            ),
+            dp_world_size=1,
+            dp_rank=0,
+            tokenizer=tokenizer,
+            seq_len=16,
+            local_batch_size=1,
+        )
+        self.assertIsInstance(loader.dataset, TruncateLastBufferDataset)
 
     def test_dispatch_unknown_strategy_raises(self):
         """DataLoader raises ValueError for an unregistered strategy."""
