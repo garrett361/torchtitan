@@ -17,7 +17,7 @@ Usage (multi-node, each node runs this with different --rank):
     # Node 1:
     python -m ... --rank 1 --world-size 4
 
-Resumable and idempotent.  Rank 0 writes manifest.json once all shards are present.
+Resumable and idempotent.  The last rank to finish writes manifest.json once all shards are present.
 """
 
 import argparse
@@ -29,7 +29,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from datasets import load_dataset, load_from_disk
+from datasets import load_dataset
+from filelock import FileLock
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.models.granite.tokenization_strategies import (
@@ -173,24 +174,6 @@ def _write_manifest(
     total_tokens = sum(s["total_tokens"] for s in all_stats)
     total_trained = sum(s["total_trained_tokens"] for s in all_stats)
 
-    all_lengths: list[int] = []
-    for entry in sorted(shards_dir.iterdir()):
-        if not entry.is_dir():
-            continue
-        shard_ds = load_from_disk(str(entry))
-        all_lengths.extend(shard_ds["n_tokens"])
-    all_lengths.sort()
-
-    length_stats: dict[str, Any] = {}
-    if all_lengths:
-        n = len(all_lengths)
-        length_stats = {
-            "mean": round(sum(all_lengths) / n, 1),
-            "median": all_lengths[n // 2],
-            "p95": all_lengths[int(0.95 * n)],
-            "max": all_lengths[-1],
-        }
-
     chat_template_sha256 = None
     jinja_path = Path(tokenizer_path) / "chat_template.jinja"
     if jinja_path.exists():
@@ -219,18 +202,22 @@ def _write_manifest(
             "examples_dropped": total_dropped,
             "total_tokens": total_tokens,
             "total_trained_tokens": total_trained,
-            "tokens_per_example": length_stats,
+            "tokens_per_example": round(total_tokens / total_examples, 1),
+            "trained_tokens_per_example": round(total_trained / total_examples, 1),
+            "tranined_to_total_tokens_ratio": total_trained / total_tokens,
         },
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "input_dir": str(input_files[0].parent) if input_files else "",
-        "input_files_sha256": {
-            f.name: _sha256_file(str(f)) for f in sorted(input_files)
-        },
+        "input_files": [str(f) for f in sorted(input_files)],
     }
 
     manifest_path = output_dir / "manifest.json"
-    with open(manifest_path, "w") as f:
-        json.dump(manifest, f, indent=2)
+    with FileLock(str(manifest_path) + ".lock"):
+        if manifest_path.exists():
+            logger.info("Manifest already written by another rank, skipping")
+            return
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2)
     logger.info("Wrote manifest to %s", manifest_path)
 
 
@@ -297,7 +284,21 @@ def main() -> None:
         failures_path=str(output_dir / "failures.jsonl"),
     )
 
-    if args.rank == 0:
+    run_config_path = output_dir / _RUN_CONFIG_FILENAME
+    if run_config_path.exists():
+        run_config = _load_run_config(output_dir)
+        if run_config["strategy"] != args.strategy:
+            raise ValueError(
+                f"Resume mismatch: existing shards used strategy {run_config['strategy']!r} "
+                f"but current invocation specifies {args.strategy!r}."
+            )
+        if run_config["chat_template_kwargs"] != strategy.chat_template_kwargs:
+            raise ValueError(
+                f"Resume mismatch: existing shards used chat_template_kwargs "
+                f"{run_config['chat_template_kwargs']} but current invocation has "
+                f"{strategy.chat_template_kwargs}."
+            )
+    elif args.rank == 0:
         _save_run_config(
             input_dir,
             output_dir,
@@ -334,23 +335,22 @@ def main() -> None:
             rank=args.rank,
         )
 
-    if args.rank == 0:
-        run_config = _load_run_config(output_dir)
-        completed = _completed_stems(shards_dir)
-        if len(completed) == len(input_files):
-            _write_manifest(
-                output_dir,
-                input_files,
-                run_config["strategy"],
-                args.tokenizer_path,
-                run_config["chat_template_kwargs"],
-            )
-        else:
-            logger.info(
-                "Rank 0: %d/%d shards complete, skipping manifest (re-run when all workers finish)",
-                len(completed),
-                len(input_files),
-            )
+    completed = _completed_stems(shards_dir)
+    if len(completed) == len(input_files):
+        _write_manifest(
+            output_dir,
+            input_files,
+            args.strategy,
+            args.tokenizer_path,
+            strategy.chat_template_kwargs,
+        )
+    else:
+        logger.info(
+            "rank %d: %d/%d shards complete, manifest will be written by the last rank to finish",
+            args.rank,
+            len(completed),
+            len(input_files),
+        )
 
 
 if __name__ == "__main__":
