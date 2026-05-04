@@ -843,6 +843,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # across DP ranks (batch mesh) to avoid multiplying by CP_DEGREE.
             if parallel_dims.dp_enabled:
                 batch_mesh = parallel_dims.get_mesh("batch")
+                dp_degree = batch_mesh.size()
                 n_total = int(
                     dist_utils.dist_sum(
                         torch.tensor(
@@ -878,6 +879,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     else None
                 )
             else:
+                dp_degree = 1
                 epochs_logged = raw["epochs"]
             s = max(self.step, 1)
             extra_metrics.update(
@@ -890,6 +892,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "data/avg_toks_per_example": n_total / max(n_examples, 1),
                     "data/avg_train_toks_per_example": n_trained / max(n_examples, 1),
                     "data/avg_train_token_fraction": n_trained / max(n_total, 1),
+                    "data/avg_padding_fraction": 1
+                    - n_total
+                    / (
+                        self.config.training.seq_len
+                        * self.config.training.local_batch_size
+                        * dp_degree
+                        * self.gradient_accumulation_steps
+                        * s
+                    ),
                 }
             )
             self._cached_epochs = epochs_logged
