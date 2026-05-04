@@ -829,67 +829,69 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
         }
-        dataset = getattr(self.dataloader, "dataset", None)
-        if dataset is not None:
-            ds_stats_fn = getattr(dataset, "get_data_stats", None)
-            if ds_stats_fn is not None:
-                raw = ds_stats_fn()
-                n_total = raw["n_total_tokens"]
-                n_trained = raw["n_trained_tokens"]
-                n_examples = raw["n_examples_packed"]
-                # CP ranks all load the same pre-sharding batch, so only sum
-                # across DP ranks (batch mesh) to avoid multiplying by CP_DEGREE.
-                if parallel_dims.dp_enabled:
-                    batch_mesh = parallel_dims.get_mesh("batch")
-                    n_total = int(
-                        dist_utils.dist_sum(
-                            torch.tensor(
-                                n_total, dtype=torch.int64, device=self.device
-                            ),
-                            batch_mesh,
-                        )
+        stats_fn = getattr(self.dataloader, "get_data_stats", None)
+        if stats_fn is None:
+            dataset = getattr(self.dataloader, "dataset", None)
+            if dataset is not None:
+                stats_fn = getattr(dataset, "get_data_stats", None)
+        if stats_fn is not None:
+            raw = stats_fn()
+            n_total = raw["n_total_tokens"]
+            n_trained = raw["n_trained_tokens"]
+            n_examples = raw["n_examples_packed"]
+            # CP ranks all load the same pre-sharding batch, so only sum
+            # across DP ranks (batch mesh) to avoid multiplying by CP_DEGREE.
+            if parallel_dims.dp_enabled:
+                batch_mesh = parallel_dims.get_mesh("batch")
+                n_total = int(
+                    dist_utils.dist_sum(
+                        torch.tensor(
+                            n_total, dtype=torch.int64, device=self.device
+                        ),
+                        batch_mesh,
                     )
-                    n_trained = int(
-                        dist_utils.dist_sum(
-                            torch.tensor(
-                                n_trained, dtype=torch.int64, device=self.device
-                            ),
-                            batch_mesh,
-                        )
-                    )
-                    n_examples = int(
-                        dist_utils.dist_sum(
-                            torch.tensor(
-                                n_examples, dtype=torch.int64, device=self.device
-                            ),
-                            batch_mesh,
-                        )
-                    )
-                    epochs_logged = (
-                        dist_utils.dist_min(
-                            torch.tensor(
-                                raw["epochs"], dtype=torch.float64, device=self.device
-                            ),
-                            batch_mesh,
-                        )
-                        if raw["epochs"] is not None
-                        else None
-                    )
-                else:
-                    epochs_logged = raw["epochs"]
-                s = max(self.step, 1)
-                extra_metrics.update(
-                    {
-                        "data/total_train_toks": n_trained,
-                        "data/total_examples": n_examples,
-                        "data/avg_total_toks_per_step": n_total / s,
-                        "data/avg_train_toks_per_step": n_trained / s,
-                        "data/avg_examples_per_step": n_examples / s,
-                    }
                 )
-                self._cached_epochs = epochs_logged
-                if epochs_logged is not None:
-                    extra_metrics["data/epochs"] = epochs_logged
+                n_trained = int(
+                    dist_utils.dist_sum(
+                        torch.tensor(
+                            n_trained, dtype=torch.int64, device=self.device
+                        ),
+                        batch_mesh,
+                    )
+                )
+                n_examples = int(
+                    dist_utils.dist_sum(
+                        torch.tensor(
+                            n_examples, dtype=torch.int64, device=self.device
+                        ),
+                        batch_mesh,
+                    )
+                )
+                epochs_logged = (
+                    dist_utils.dist_min(
+                        torch.tensor(
+                            raw["epochs"], dtype=torch.float64, device=self.device
+                        ),
+                        batch_mesh,
+                    )
+                    if raw["epochs"] is not None
+                    else None
+                )
+            else:
+                epochs_logged = raw["epochs"]
+            s = max(self.step, 1)
+            extra_metrics.update(
+                {
+                    "data/total_train_toks": n_trained,
+                    "data/total_examples": n_examples,
+                    "data/avg_total_toks_per_step": n_total / s,
+                    "data/avg_train_toks_per_step": n_trained / s,
+                    "data/avg_examples_per_step": n_examples / s,
+                }
+            )
+            self._cached_epochs = epochs_logged
+            if epochs_logged is not None:
+                extra_metrics["data/epochs"] = epochs_logged
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
@@ -910,13 +912,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.checkpointer.load(step=config.checkpoint.load_step)
 
         if config.training.max_epochs is not None:
-            dataset = getattr(self.dataloader, "dataset", None)
-            if dataset is None or not hasattr(dataset, "get_data_stats"):
+            epoch_stats_fn = getattr(self.dataloader, "get_data_stats", None)
+            if epoch_stats_fn is None:
+                dataset = getattr(self.dataloader, "dataset", None)
+                if dataset is not None:
+                    epoch_stats_fn = getattr(dataset, "get_data_stats", None)
+            if epoch_stats_fn is None:
                 raise ValueError(
-                    "training.max_epochs requires a dataloader with a dataset "
+                    "training.max_epochs requires a dataloader (or dataset) "
                     "that implements get_data_stats()."
                 )
-            if dataset.get_data_stats()["epochs"] is None:
+            if epoch_stats_fn()["epochs"] is None:
                 raise ValueError(
                     "training.max_epochs requires a dataset that tracks epoch boundaries. "
                     "Use a dataset whose get_data_stats() returns a non-None 'epochs' value "

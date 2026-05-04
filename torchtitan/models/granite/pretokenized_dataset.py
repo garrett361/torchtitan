@@ -12,7 +12,6 @@ Class hierarchy:
 """
 
 import json
-import multiprocessing as mp
 from abc import abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -103,16 +102,6 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         self._worker_id: int = 0
         self._num_workers: int = 1
 
-        self._n_total_tokens: int = 0
-        self._n_trained_tokens: int = 0
-        self._n_examples_packed: int = 0
-        # Shared memory counters readable from the main process while workers
-        # iterate. Requires fork start method (Linux default); not picklable
-        # with spawn.
-        self._shared_n_total_tokens = mp.Value("q", 0)
-        self._shared_n_trained_tokens = mp.Value("q", 0)
-        self._shared_n_examples_packed = mp.Value("q", 0)
-
     def _get_data_iter(self):
         if self._sample_idx == len(self._data):
             return iter([])
@@ -151,13 +140,10 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         )
         self._logged_first_sample = True
 
-    def get_data_stats(self) -> dict[str, Any]:
-        return {
-            "n_total_tokens": self._shared_n_total_tokens.value,
-            "n_trained_tokens": self._shared_n_trained_tokens.value,
-            "n_examples_packed": self._shared_n_examples_packed.value,
-            "epochs": self._shared_n_examples_packed.value / max(len(self._original_data), 1),
-        }
+    @property
+    def num_examples(self) -> int:
+        """Total examples in this rank's shard (before packing)."""
+        return len(self._original_data)
 
     @abstractmethod
     def __iter__(self): ...
@@ -187,18 +173,6 @@ class TruncateLastDataset(PreTokenizedDataset):
             return None
 
         self._log_first_sample(input_ids, label_ids)
-
-        n_trained = sum(1 for lbl in label_ids if lbl != IGNORE_INDEX)
-        self._n_total_tokens += len(input_ids)
-        self._n_trained_tokens += n_trained
-        self._n_examples_packed += 1
-        with self._shared_n_total_tokens.get_lock():
-            self._shared_n_total_tokens.value += len(input_ids)
-        with self._shared_n_trained_tokens.get_lock():
-            self._shared_n_trained_tokens.value += n_trained
-        with self._shared_n_examples_packed.get_lock():
-            self._shared_n_examples_packed.value += 1
-
         return input_ids, label_ids
 
     def __iter__(self):
@@ -209,7 +183,12 @@ class TruncateLastDataset(PreTokenizedDataset):
         # Recompute from _original_data to handle repeated __iter__ calls
         # (persistent_workers=True recreates the iterator on the same instance)
         if self._epoch > 0:
-            self._data = cast(Dataset, self._original_data.shuffle(seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory))
+            self._data = cast(
+                Dataset,
+                self._original_data.shuffle(
+                    seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
+                ),
+            )
         else:
             self._data = self._original_data
         if self._num_workers > 1:
@@ -224,6 +203,9 @@ class TruncateLastDataset(PreTokenizedDataset):
         inputs_buffer: list[int] = []
         labels_buffer: list[int] = []
         positions_buffer: list[int] = []
+        batch_n_total: int = 0
+        batch_n_trained: int = 0
+        batch_n_examples: int = 0
 
         while True:
             for sample in self._get_data_iter():
@@ -240,11 +222,21 @@ class TruncateLastDataset(PreTokenizedDataset):
                     inputs_buffer.extend([self._eos_id] * pad_len)
                     labels_buffer.extend([IGNORE_INDEX] * pad_len)
                     positions_buffer.extend(range(pad_len))
-                    yield self._flush(inputs_buffer, labels_buffer, positions_buffer)
-                    # Reassignment happens after the yield resumes; the emitted
-                    # buffer contents don't need checkpointing because _sample_idx
-                    # already points past them.
+                    yield self._flush(
+                        inputs_buffer,
+                        labels_buffer,
+                        positions_buffer,
+                        batch_n_total,
+                        batch_n_trained,
+                        batch_n_examples,
+                    )
                     inputs_buffer, labels_buffer, positions_buffer = [], [], []
+                    batch_n_total = batch_n_trained = batch_n_examples = 0
+
+                n_trained = sum(1 for lbl in label_ids if lbl != IGNORE_INDEX)
+                batch_n_total += len(input_ids)
+                batch_n_trained += n_trained
+                batch_n_examples += 1
 
                 inputs_buffer.extend(input_ids)
                 labels_buffer.extend(label_ids)
@@ -252,8 +244,16 @@ class TruncateLastDataset(PreTokenizedDataset):
                 self._sample_idx += 1
 
                 if len(inputs_buffer) == self.seq_len:
-                    yield self._flush(inputs_buffer, labels_buffer, positions_buffer)
+                    yield self._flush(
+                        inputs_buffer,
+                        labels_buffer,
+                        positions_buffer,
+                        batch_n_total,
+                        batch_n_trained,
+                        batch_n_examples,
+                    )
                     inputs_buffer, labels_buffer, positions_buffer = [], [], []
+                    batch_n_total = batch_n_trained = batch_n_examples = 0
 
             if len(inputs_buffer) > 0:
                 pad_len = self.seq_len - len(inputs_buffer)
@@ -261,19 +261,34 @@ class TruncateLastDataset(PreTokenizedDataset):
                     inputs_buffer.extend([self._eos_id] * pad_len)
                     labels_buffer.extend([IGNORE_INDEX] * pad_len)
                     positions_buffer.extend(range(pad_len))
-                yield self._flush(inputs_buffer, labels_buffer, positions_buffer)
+                yield self._flush(
+                    inputs_buffer,
+                    labels_buffer,
+                    positions_buffer,
+                    batch_n_total,
+                    batch_n_trained,
+                    batch_n_examples,
+                )
                 inputs_buffer, labels_buffer, positions_buffer = [], [], []
+                batch_n_total = batch_n_trained = batch_n_examples = 0
 
             if not self.infinite:
                 logger.warning("Dataset '%s' has run out of data", self._dataset_id)
                 break
             self._sample_idx = 0
             self._epoch += 1
-            self._data = cast(Dataset, self._original_data.shuffle(seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory))
+            self._data = cast(
+                Dataset,
+                self._original_data.shuffle(
+                    seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
+                ),
+            )
             if self._num_workers > 1:
                 self._data = cast(
                     Dataset,
-                    split_dataset_by_node(self._data, self._worker_id, self._num_workers),
+                    split_dataset_by_node(
+                        self._data, self._worker_id, self._num_workers
+                    ),
                 )
             logger.warning(
                 "Dataset '%s' is being re-looped (epoch %d)",
@@ -282,47 +297,43 @@ class TruncateLastDataset(PreTokenizedDataset):
             )
 
     def _flush(
-        self, inputs: list[int], labels: list[int], positions: list[int]
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+        self,
+        inputs: list[int],
+        labels: list[int],
+        positions: list[int],
+        n_total_tokens: int,
+        n_trained_tokens: int,
+        n_examples_packed: int,
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, dict[str, int]]:
         return (
             {
                 "input": torch.tensor(inputs, dtype=torch.long),
                 "positions": torch.tensor(positions, dtype=torch.long),
             },
             torch.tensor(labels, dtype=torch.long),
+            {
+                "n_total_tokens": n_total_tokens,
+                "n_trained_tokens": n_trained_tokens,
+                "n_examples_packed": n_examples_packed,
+            },
         )
 
     def state_dict(self) -> dict[str, Any]:
-        # Buffers are locals in _iter_greedy_packed, not instance state. At each
-        # yield the caller resumes from _sample_idx, which already points past the
-        # emitted buffer, so only epoch + sample_idx are needed to reconstruct the
-        # correct resume position.
         return {
             "epoch": self._epoch,
             "sample_idx": self._sample_idx,
-            "n_total_tokens": self._n_total_tokens,
-            "n_trained_tokens": self._n_trained_tokens,
-            "n_examples_packed": self._n_examples_packed,
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self._epoch = state_dict["epoch"]
         self._sample_idx = state_dict["sample_idx"]
-        old_total = self._n_total_tokens
-        old_trained = self._n_trained_tokens
-        old_packed = self._n_examples_packed
-        self._n_total_tokens = state_dict.get("n_total_tokens", 0)
-        self._n_trained_tokens = state_dict.get("n_trained_tokens", 0)
-        self._n_examples_packed = state_dict.get("n_examples_packed", 0)
-        # Subtract old contribution, add new — idempotent across repeated calls
-        with self._shared_n_total_tokens.get_lock():
-            self._shared_n_total_tokens.value += self._n_total_tokens - old_total
-        with self._shared_n_trained_tokens.get_lock():
-            self._shared_n_trained_tokens.value += self._n_trained_tokens - old_trained
-        with self._shared_n_examples_packed.get_lock():
-            self._shared_n_examples_packed.value += self._n_examples_packed - old_packed
         if self._epoch > 0:
-            self._data = cast(Dataset, self._original_data.shuffle(seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory))
+            self._data = cast(
+                Dataset,
+                self._original_data.shuffle(
+                    seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
+                ),
+            )
 
 
 _DATASET_CLASSES: dict[str, type[PreTokenizedDataset]] = {
@@ -335,6 +346,10 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
 
     Reads manifest["strategy"] to dispatch to the correct dataset class.
     Supports all strategies registered in _DATASET_CLASSES.
+
+    Data stats (token counts, example counts) are accumulated in the main
+    process as batches are consumed via __iter__, so they reflect only
+    consumed batches — not prefetched ones.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -378,6 +393,11 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
             tokenizer=tokenizer,
             _manifest=manifest,
         )
+
+        self._consumed_n_total_tokens: int = 0
+        self._consumed_n_trained_tokens: int = 0
+        self._consumed_n_examples_packed: int = 0
+
         super().__init__(
             dataset,
             dp_rank=dp_rank,
@@ -388,3 +408,36 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
             pin_memory=config.pin_memory,
             prefetch_factor=config.prefetch_factor,
         )
+
+    def __iter__(self):
+        for input_dict, labels, stats in super().__iter__():
+            self._consumed_n_total_tokens += stats["n_total_tokens"].sum().item()
+            self._consumed_n_trained_tokens += stats["n_trained_tokens"].sum().item()
+            self._consumed_n_examples_packed += stats["n_examples_packed"].sum().item()
+            yield input_dict, labels
+
+    def get_data_stats(self) -> dict[str, Any]:
+        n_dataset = max(self.dataset.num_examples, 1)
+        return {
+            "n_total_tokens": self._consumed_n_total_tokens,
+            "n_trained_tokens": self._consumed_n_trained_tokens,
+            "n_examples_packed": self._consumed_n_examples_packed,
+            "epochs": self._consumed_n_examples_packed / n_dataset,
+        }
+
+    def state_dict(self) -> dict[str, Any]:
+        sd = super().state_dict()
+        sd["_consumed_stats"] = {
+            "n_total_tokens": self._consumed_n_total_tokens,
+            "n_trained_tokens": self._consumed_n_trained_tokens,
+            "n_examples_packed": self._consumed_n_examples_packed,
+        }
+        return sd
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        consumed = state_dict.pop("_consumed_stats", None)
+        if consumed is not None:
+            self._consumed_n_total_tokens = consumed["n_total_tokens"]
+            self._consumed_n_trained_tokens = consumed["n_trained_tokens"]
+            self._consumed_n_examples_packed = consumed["n_examples_packed"]
+        super().load_state_dict(state_dict)

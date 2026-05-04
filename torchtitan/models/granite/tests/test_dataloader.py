@@ -85,7 +85,7 @@ class TestTruncateLastDatasetPacking(unittest.TestCase):
             ([1, 4, 5, 6, _EOS_ID], [IGNORE_INDEX, 5, 6, _EOS_ID, IGNORE_INDEX]),
         ]
         ds = self._make_dataset(examples, seq_len=seq_len)
-        for batch_dict, labels in ds:
+        for batch_dict, labels, _stats in ds:
             self.assertEqual(batch_dict["input"].shape, (seq_len,))
             self.assertEqual(batch_dict["positions"].shape, (seq_len,))
             self.assertEqual(labels.shape, (seq_len,))
@@ -100,7 +100,7 @@ class TestTruncateLastDatasetPacking(unittest.TestCase):
 
         batches = list(ds)
         self.assertEqual(len(batches), 1)
-        _, labels = batches[0]
+        _, labels, _ = batches[0]
 
         # First len(input_ids) positions must match pre-tokenized labels exactly.
         for i, expected in enumerate(label_ids):
@@ -116,7 +116,7 @@ class TestTruncateLastDatasetPacking(unittest.TestCase):
         batches = list(ds)
         # long_example (5 tokens) dropped; short_example (3 tokens) packed and padded.
         self.assertEqual(len(batches), 1)
-        _, labels = batches[0]
+        _, labels, _ = batches[0]
         # Padding positions should be IGNORE_INDEX.
         self.assertEqual(labels[-1].item(), IGNORE_INDEX)
 
@@ -142,20 +142,22 @@ class TestTruncateLastDatasetPacking(unittest.TestCase):
 
         batches = list(ds)
         self.assertEqual(len(batches), 1)
-        inputs, labels = batches[0][0]["input"].tolist(), batches[0][1].tolist()
+        inputs = batches[0][0]["input"].tolist()
+        labels = batches[0][1].tolist()
         # Positions 3..7 are padding.
         self.assertTrue(all(t == _EOS_ID for t in inputs[3:]))
         self.assertTrue(all(lbl == IGNORE_INDEX for lbl in labels[3:]))
 
-    def test_stats(self):
-        """get_data_stats returns correct token and example counts."""
+    def test_batch_stats(self):
+        """Per-batch stats in yielded tuples have correct token and example counts."""
         seq_len = 16
         input_ids = [1, 10, 20, 30, _EOS_ID]
         label_ids = [IGNORE_INDEX, IGNORE_INDEX, 30, _EOS_ID, IGNORE_INDEX]
         ds = self._make_dataset([(input_ids, label_ids)], seq_len=seq_len)
-        list(ds)  # consume
 
-        stats = ds.get_data_stats()
+        batches = list(ds)
+        self.assertEqual(len(batches), 1)
+        _, _, stats = batches[0]
         self.assertEqual(stats["n_total_tokens"], len(input_ids))
         self.assertEqual(stats["n_trained_tokens"], sum(1 for l in label_ids if l != IGNORE_INDEX))
         self.assertEqual(stats["n_examples_packed"], 1)
@@ -176,7 +178,7 @@ class TestTruncateLastDatasetPacking(unittest.TestCase):
                 manifest_path, seq_len=seq_len, dp_rank=rank, dp_world_size=2, infinite=False
             )
             tokens = set()
-            for batch_dict, _ in ds:
+            for batch_dict, _, _stats in ds:
                 for t in batch_dict["input"].tolist():
                     if 100 <= t < 200:
                         tokens.add(t)
@@ -217,7 +219,7 @@ class TestTruncateLastDatasetPacking(unittest.TestCase):
         remaining_b = list(ds_b)
 
         self.assertEqual(len(remaining_a), len(remaining_b))
-        for (ba, la), (bb, lb) in zip(remaining_a, remaining_b):
+        for (ba, la, _sa), (bb, lb, _sb) in zip(remaining_a, remaining_b):
             self.assertTrue(torch.equal(ba["input"], bb["input"]))
             self.assertTrue(torch.equal(la, lb))
 
@@ -269,8 +271,8 @@ class TestMultiWorkerSharding(unittest.TestCase):
 
         self.assertEqual(all_tokens, {100 + i for i in range(n)})
 
-    def test_shared_stats_nonzero(self):
-        """Shared stats are visible to the main process after multi-worker iteration."""
+    def test_multi_worker_stats_accurate(self):
+        """With num_workers=2, get_data_stats matches single-worker baseline exactly."""
         seq_len = 16
         examples = [
             ([1, 10, 20, _EOS_ID], [IGNORE_INDEX, IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
@@ -283,27 +285,79 @@ class TestMultiWorkerSharding(unittest.TestCase):
         from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
         tokenizer = HuggingFaceTokenizer(tokenizer_path="tests/assets/tokenizer")
-        loader = GranitePreTokenizedDataLoader(
-            GranitePreTokenizedDataLoader.Config(
-                manifest_path=str(manifest_path),
-                infinite=False,
-                num_workers=2,
-                persistent_workers=False,
-            ),
-            dp_world_size=1,
-            dp_rank=0,
-            tokenizer=tokenizer,
-            seq_len=seq_len,
-            local_batch_size=1,
-        )
 
-        for _ in loader:
+        def make_loader(num_workers):
+            return GranitePreTokenizedDataLoader(
+                GranitePreTokenizedDataLoader.Config(
+                    manifest_path=str(manifest_path),
+                    infinite=False,
+                    num_workers=num_workers,
+                    persistent_workers=False,
+                ),
+                dp_world_size=1,
+                dp_rank=0,
+                tokenizer=tokenizer,
+                seq_len=seq_len,
+                local_batch_size=1,
+            )
+
+        loader_0 = make_loader(0)
+        for _ in loader_0:
             pass
+        baseline = loader_0.get_data_stats()
 
-        stats = loader.dataset.get_data_stats()
-        self.assertGreater(stats["n_total_tokens"], 0)
-        self.assertGreater(stats["n_trained_tokens"], 0)
-        self.assertGreater(stats["n_examples_packed"], 0)
+        loader_2 = make_loader(2)
+        for _ in loader_2:
+            pass
+        multi = loader_2.get_data_stats()
+
+        self.assertEqual(multi["n_total_tokens"], baseline["n_total_tokens"])
+        self.assertEqual(multi["n_trained_tokens"], baseline["n_trained_tokens"])
+        self.assertEqual(multi["n_examples_packed"], baseline["n_examples_packed"])
+        self.assertAlmostEqual(multi["epochs"], baseline["epochs"])
+
+    def test_consumed_stats_state_dict_roundtrip(self):
+        """Consumed stats survive state_dict → load_state_dict roundtrip."""
+        seq_len = 16
+        examples = [
+            ([1, 10, 20, _EOS_ID], [IGNORE_INDEX, IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
+            ([1, 30, 40, _EOS_ID], [IGNORE_INDEX, IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
+            ([1, 50, 60, _EOS_ID], [IGNORE_INDEX, IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
+            ([1, 70, 80, _EOS_ID], [IGNORE_INDEX, IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
+        ]
+        manifest_path = _make_shard(self._tmp, examples)
+
+        from torchtitan.components.tokenizer import HuggingFaceTokenizer
+
+        tokenizer = HuggingFaceTokenizer(tokenizer_path="tests/assets/tokenizer")
+
+        def make_loader():
+            return GranitePreTokenizedDataLoader(
+                GranitePreTokenizedDataLoader.Config(
+                    manifest_path=str(manifest_path),
+                    infinite=False,
+                    num_workers=0,
+                ),
+                dp_world_size=1,
+                dp_rank=0,
+                tokenizer=tokenizer,
+                seq_len=seq_len,
+                local_batch_size=1,
+            )
+
+        loader = make_loader()
+        it = iter(loader)
+        next(it)  # consume one batch
+        stats_before = loader.get_data_stats()
+        sd = loader.state_dict()
+
+        loader2 = make_loader()
+        loader2.load_state_dict(sd)
+        stats_after = loader2.get_data_stats()
+
+        self.assertEqual(stats_after["n_total_tokens"], stats_before["n_total_tokens"])
+        self.assertEqual(stats_after["n_trained_tokens"], stats_before["n_trained_tokens"])
+        self.assertEqual(stats_after["n_examples_packed"], stats_before["n_examples_packed"])
 
 
 class TestGranitePreTokenizedDataLoaderDispatch(unittest.TestCase):
