@@ -78,6 +78,10 @@ splicing without re-tokenization.
 
 ## Tokenization Strategy
 
+Strategy is chosen at pre-tokenization time and recorded in the output manifest
+(`manifest["strategy"]`). The dataloader dispatches to the matching dataset class
+at runtime.
+
 ### TruncateLastStrategy
 
 Labels only the final assistant turn. All earlier turns (user, tool, and intermediate
@@ -101,6 +105,47 @@ messages after the last assistant turn are dropped before tokenization:
 The reasoning in the last assistant turn (the `reasoning_content` / `<think>` block) lives
 in the assistant message itself, not in the following tool response. Dropping the trailing
 tool response does not affect it.
+
+## Pre-Tokenized Data Pipeline
+
+Two-phase workflow: offline pre-tokenization produces Arrow shards, online dataloader
+packs and serves them.
+
+### Offline: `pretokenize_sft.py`
+
+```bash
+# Single node
+python -m torchtitan.models.granite.scripts.pretokenize_sft \
+    --input-dir /path/to/jsonl/ \
+    --output-dir /path/to/output/ \
+    --tokenizer-path /path/to/tokenizer/ \
+    --strategy truncate_last
+
+# Multi-node (each node processes a disjoint subset of shards)
+python -m ... --rank 0 --world-size 4
+```
+
+Resumable and idempotent. Each JSONL file becomes one Arrow shard under
+`output_dir/shards/`. The last rank to finish writes `manifest.json`.
+
+### Online: `GranitePreTokenizedDataLoader`
+
+Reads `manifest.json` and packs examples into fixed-length sequences.
+
+| Config field | Default | Description |
+|---|---|---|
+| `manifest_path` | (required) | Path to `manifest.json` |
+| `packing` | `"buffer"` | `"buffer"` (~99.9% efficiency at 128k) or `"greedy"` (~86%) |
+| `buffer_size` | `64` | Lookahead buffer per worker (buffer packing only) |
+| `infinite` | `True` | Loop dataset indefinitely |
+| `shuffle_in_memory` | `True` | Avoid filesystem contention on shuffle |
+
+Buffer packing maintains a sorted lookahead buffer and fills each sequence with the
+largest-fitting example (FIFO anchor + best-fit remainder). Greedy packing appends
+examples sequentially until the sequence is full.
+
+Supports multi-worker DataLoader (`num_workers > 0`) — each worker gets a disjoint
+slice of the DP-sharded data via `worker_info`.
 
 # Inference Notes
 
