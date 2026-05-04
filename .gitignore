@@ -22,6 +22,7 @@ torchtitan/experiments/flux/assets/*
 
 # temp files
 *.log
+cache-*.arrow
 error.json
 _remote_module_non_scriptable.py
 
