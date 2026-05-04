@@ -26,7 +26,7 @@ class TestTruncateLastE2E(unittest.TestCase):
 
     def _first_batch(self):
         ds = TruncateLastDataset(_MANIFEST, seq_len=_SEQ_LEN, infinite=False)
-        batch_dict, labels = next(iter(ds))
+        batch_dict, labels, _stats = next(iter(ds))
         tokens = batch_dict["input"].unsqueeze(0).cuda()
         positions = batch_dict["positions"].unsqueeze(0).cuda()
         labels = labels.unsqueeze(0).cuda()
