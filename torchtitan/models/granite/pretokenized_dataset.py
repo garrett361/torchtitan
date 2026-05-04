@@ -501,9 +501,10 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         """Keep shuffle index in memory instead of writing a cache file to the shard
         directory. Avoids filesystem contention when many ranks start simultaneously."""
 
-        packing: Literal["greedy", "buffer"] = "greedy"
-        """Packing algorithm. 'greedy' packs in order (existing behavior).
-        'buffer' maintains a lookahead buffer and selects largest-fitting examples."""
+        packing: Literal["greedy", "buffer"] = "buffer"
+        """Packing algorithm. 'buffer' maintains a lookahead buffer and selects
+        largest-fitting examples (~99.9% efficiency at 128k seq_len). 'greedy'
+        packs in sequential order (simpler but ~86% efficiency at 128k)."""
 
         buffer_size: int = 64
         """Number of examples held in the lookahead buffer (per worker).
