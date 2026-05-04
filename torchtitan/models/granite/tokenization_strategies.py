@@ -24,10 +24,8 @@ def _validate_messages(messages: list[dict]) -> None:
         raise ValueError(
             f"First message must be 'system' or 'user', got '{messages[0]['role']}'"
         )
-    if messages[-1]["role"] != "assistant":
-        raise ValueError(
-            f"Last message must be 'assistant', got '{messages[-1]['role']}'"
-        )
+    if not any(m["role"] == "assistant" for m in messages):
+        raise ValueError("Messages must contain at least one assistant turn")
     system_positions = [i for i, m in enumerate(messages) if m["role"] == "system"]
     if len(system_positions) > 1 or (system_positions and system_positions[0] != 0):
         raise ValueError("system message must be the first message if present")
@@ -56,9 +54,26 @@ class TokenizationStrategy(ABC):
         return self._tokenizer
 
     @abstractmethod
-    def __call__(self, batch: dict[str, list]) -> dict[str, list]:
-        """Tokenize a batch of samples. Malformed samples are dropped."""
+    def _tokenize_one(self, messages: list[dict]) -> dict[str, list[int] | int]:
+        """Tokenize one sample. Raises on malformed input or tokenization error."""
         ...
+
+    def __call__(self, batch: dict[str, list]) -> dict[str, list]:
+        """Tokenize a batch of samples. Malformed samples are dropped and logged."""
+        results: dict[str, list] = {k: [] for k in self.column_schema}
+        failures: list[dict] = []
+        for messages in batch["messages"]:
+            try:
+                result = self._tokenize_one(messages)
+                for key in results:
+                    results[key].append(result[key])
+            except Exception as e:
+                logger.warning("Dropping sample: %s", e)
+                if self._failures_path:
+                    failures.append({"messages": messages, "error": str(e)})
+        if failures:
+            _append_failures(self._failures_path, failures)
+        return results
 
     @property
     @abstractmethod
@@ -73,12 +88,28 @@ class TokenizationStrategy(ABC):
         ...
 
 
-class NaiveStrategy(TokenizationStrategy):
-    """Pre-tokenizes multi-turn SFT data with per-turn assistant label masking.
+class TruncateLastStrategy(TokenizationStrategy):
+    """Pre-tokenizes multi-turn SFT data, labeling only the final assistant turn.
 
-    Produces (input_ids, labels) pairs where non-assistant tokens are masked with
-    IGNORE_INDEX. Uses truncate_history_thinking=True: thinking traces from all but
-    the last assistant turn are stripped, matching the vLLM/SGLang inference default.
+    Produces (input_ids, labels) pairs where only the last assistant turn is unmasked.
+    Uses truncate_history_thinking=True: thinking traces from all but the last assistant
+    turn are stripped, matching the vLLM/SGLang inference default.
+
+    Intermediate assistant turns are not trained on because they were collected under a
+    different context than the one seen at training time. Turn K was generated when T_{K-1}
+    was the "last" assistant (thinking preserved), but in the full training sequence T_{K-1}
+    has its thinking stripped. Only the final turn is generated under a context identical
+    to what the model sees during training.
+
+    Conversations that do not end with an assistant turn (e.g. agentic trajectories cut
+    off after a tool result, or after a system-injected follow-up message) are accepted.
+    Messages after the last assistant turn are dropped before tokenization. Two reasons:
+    (1) they are environment outputs (tool responses) or injected scaffolding, not model
+    outputs — no training signal is lost; (2) for user-last conversations specifically,
+    retaining the trailing user message shifts the Granite template's last_user_idx past
+    the last assistant turn, incorrectly stripping that turn's thinking traces. The last
+    assistant turn itself — including any tool-call decisions and reasoning — is fully
+    preserved and trained on.
 
     No seq_len filtering is applied here; that is deferred to training-time packing.
     """
@@ -89,92 +120,29 @@ class NaiveStrategy(TokenizationStrategy):
     def chat_template_kwargs(self) -> dict[str, Any]:
         return self._CHAT_TEMPLATE_KWARGS
 
-    def _tokenize_one(
-        self, messages: list[dict], *, failures: list | None = None
-    ) -> dict[str, list[int] | int] | None:
-        """Tokenize one sample. Returns None to drop (malformed or tokenization error).
-
-        failures: if provided, failed samples are appended as {"messages": ..., "error": ...}.
-        """
-        try:
-            _validate_messages(messages)
-        except (ValueError, KeyError) as e:
-            logger.warning("Dropping malformed sample: %s", e)
-            if failures is not None:
-                failures.append({"messages": messages, "error": f"validation: {e}"})
-            return None
-
-        try:
-            full_text = self.tokenizer.apply_chat_template(
-                messages, **self.chat_template_kwargs
-            )
-            full_text = full_text.rstrip("\n")
-            full_tokens = self.tokenizer.encode(full_text, add_bos=True, add_eos=False)
-            if full_tokens[-1] != self.tokenizer.eos_id:
-                full_tokens.append(self.tokenizer.eos_id)
-
-            input_ids = full_tokens[:-1]
-            label_ids = [IGNORE_INDEX] * len(input_ids)
-
-            last_asst_idx = max(
-                i for i, m in enumerate(messages) if m["role"] == "assistant"
-            )
-            im_end_id = self.tokenizer.token_to_id("<|im_end|>")
-            for turn_idx, msg in enumerate(messages):
-                if msg["role"] != "assistant":
-                    continue
-                prefix_text = self.tokenizer.apply_chat_template(
-                    messages[:turn_idx],
-                    add_generation_prompt=True,
-                    **self.chat_template_kwargs,
-                )
-                prefix_tokens = self.tokenizer.encode(
-                    prefix_text, add_bos=True, add_eos=False
-                )
-                start = len(prefix_tokens) - 1
-                if turn_idx == last_asst_idx:
-                    end = len(label_ids)
-                elif im_end_id is not None:
-                    # Scan full_tokens for <|im_end|> rather than re-tokenizing the suffix.
-                    # Re-tokenizing breaks with truncate_history_thinking=True: calling
-                    # apply_chat_template(messages[:turn_idx+1]) treats turn_idx as the last
-                    # turn and preserves its thinking, producing a longer span than appears
-                    # in full_tokens where that turn's thinking was stripped.
-                    end = full_tokens.index(im_end_id, start + 1)
-                else:
-                    suffix_text = self.tokenizer.apply_chat_template(
-                        messages[: turn_idx + 1], **self.chat_template_kwargs
-                    )
-                    suffix_tokens = self.tokenizer.encode(
-                        suffix_text.rstrip("\n"), add_bos=True, add_eos=False
-                    )
-                    end = len(suffix_tokens) - 1
-                label_ids[start:end] = full_tokens[1:][start:end]
-
-            return {
-                "input_ids": input_ids,
-                "labels": label_ids,
-                "n_tokens": len(input_ids),
-            }
-        except Exception as e:
-            logger.warning("Dropping erroring sample: %s", e)
-            if failures is not None:
-                failures.append({"messages": messages, "error": f"tokenization: {e}"})
-            return None
-
-    def __call__(self, batch: dict[str, list]) -> dict[str, list]:
-        results: dict[str, list] = {"input_ids": [], "labels": [], "n_tokens": []}
-        failures: list[dict] = []
-        for messages in batch["messages"]:
-            result = self._tokenize_one(
-                messages, failures=failures if self._failures_path else None
-            )
-            if result is not None:
-                for key in results:
-                    results[key].append(result[key])
-        if failures and self._failures_path:
-            _append_failures(self._failures_path, failures)
-        return results
+    def _tokenize_one(self, messages: list[dict]) -> dict[str, list[int] | int]:
+        _validate_messages(messages)
+        last_asst_idx = max(
+            i for i, m in enumerate(messages) if m["role"] == "assistant"
+        )
+        effective = messages[: last_asst_idx + 1]
+        full_text = self.tokenizer.apply_chat_template(
+            effective, **self.chat_template_kwargs
+        ).rstrip("\n")
+        full_tokens = self.tokenizer.encode(full_text, add_bos=True, add_eos=False)
+        if full_tokens[-1] != self.tokenizer.eos_id:
+            full_tokens.append(self.tokenizer.eos_id)
+        input_ids = full_tokens[:-1]
+        label_ids = [IGNORE_INDEX] * len(input_ids)
+        prefix_text = self.tokenizer.apply_chat_template(
+            effective[:-1],
+            add_generation_prompt=True,
+            **self.chat_template_kwargs,
+        )
+        prefix_tokens = self.tokenizer.encode(prefix_text, add_bos=True, add_eos=False)
+        start = len(prefix_tokens) - 1
+        label_ids[start:] = full_tokens[start + 1:]
+        return {"input_ids": input_ids, "labels": label_ids, "n_tokens": len(input_ids)}
 
     @property
     def column_schema(self) -> dict:

@@ -1,4 +1,4 @@
-"""Tests for NaiveStrategy tokenization and label masking.
+"""Tests for TruncateLastStrategy tokenization and label masking.
 
 Uses the shared test tokenizer at tests/assets/tokenizer/ (which has a minimal
 chat template: bos + role\ncontent + eos per turn). All tests run without GPUs
@@ -14,24 +14,21 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.models.granite.tokenization_strategies import (
-    NaiveStrategy,
+    TruncateLastStrategy,
     _validate_messages,
 )
+
+load_dotenv()
 
 _REPO_ROOT = Path(__file__).parents[4]
 _TEST_TOKENIZER_PATH = str(_REPO_ROOT / "tests" / "assets" / "tokenizer")
 _HF_ASSETS_PATH = os.environ.get("HF_ASSETS_PATH")
-
-
-def _make_tokenizer(path: str) -> HuggingFaceTokenizer:
-    return HuggingFaceTokenizer(tokenizer_path=path)
-
-
-def _make_strategy(tokenizer_path: str) -> NaiveStrategy:
-    return NaiveStrategy(tokenizer_path)
+_DATA_PATH_7M_BALANCED = os.environ.get("DATA_PATH_7M_BALANCED")
 
 
 class TestValidateMessages(unittest.TestCase):
@@ -63,9 +60,27 @@ class TestValidateMessages(unittest.TestCase):
         with self.assertRaises(ValueError):
             _validate_messages([])
 
-    def test_rejects_last_not_assistant(self):
+    def test_rejects_no_assistant(self):
         with self.assertRaises(ValueError):
             _validate_messages([{"role": "user", "content": "hi"}])
+
+    def test_accepts_tool_as_last(self):
+        _validate_messages(
+            [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a"},
+                {"role": "tool", "content": "result"},
+            ]
+        )
+
+    def test_accepts_user_as_last(self):
+        _validate_messages(
+            [
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "q2"},
+            ]
+        )
 
     def test_rejects_unknown_role(self):
         with self.assertRaises(ValueError):
@@ -98,10 +113,11 @@ class TestValidateMessages(unittest.TestCase):
             )
 
 
-class TestNaiveStrategyBasic(unittest.TestCase):
+class TestTruncateLastStrategyBasic(unittest.TestCase):
+    """Output structure, shift invariant, and last-turn-only masking using the test tokenizer."""
     def setUp(self):
-        self.tokenizer = _make_tokenizer(_TEST_TOKENIZER_PATH)
-        self.strategy = _make_strategy(_TEST_TOKENIZER_PATH)
+        self.tokenizer = HuggingFaceTokenizer(tokenizer_path=_TEST_TOKENIZER_PATH)
+        self.strategy = TruncateLastStrategy(_TEST_TOKENIZER_PATH)
 
     def _tokenize(self, messages):
         return self.strategy._tokenize_one(messages)
@@ -112,7 +128,6 @@ class TestNaiveStrategyBasic(unittest.TestCase):
             {"role": "assistant", "content": "world"},
         ]
         result = self._tokenize(msgs)
-        self.assertIsNotNone(result)
         self.assertIn("input_ids", result)
         self.assertIn("labels", result)
         self.assertIn("n_tokens", result)
@@ -171,10 +186,10 @@ class TestNaiveStrategyBasic(unittest.TestCase):
             if lbl != IGNORE_INDEX:
                 self.assertEqual(lbl, full_tokens[i + 1])
 
-    def test_malformed_returns_none(self):
+    def test_malformed_raises(self):
         msgs = [{"role": "user", "content": "hi"}]
-        result = self._tokenize(msgs)
-        self.assertIsNone(result)
+        with self.assertRaises(ValueError):
+            self._tokenize(msgs)
 
     def test_malformed_drops_from_batch(self):
         good = [
@@ -187,30 +202,22 @@ class TestNaiveStrategyBasic(unittest.TestCase):
         self.assertEqual(len(output["input_ids"]), 2)
         self.assertEqual(len(output["labels"]), 2)
 
-    def test_multi_turn_each_assistant_unmasked(self):
+    def test_multi_turn_only_last_assistant_unmasked(self):
+        """Only the last assistant turn must be unmasked; earlier turns must be masked."""
         msgs = [
             {"role": "user", "content": "q1"},
-            {"role": "assistant", "content": "a1"},
+            {"role": "assistant", "content": "unique_first_reply"},
             {"role": "user", "content": "q2"},
-            {"role": "assistant", "content": "a2"},
+            {"role": "assistant", "content": "unique_last_reply"},
         ]
         result = self._tokenize(msgs)
-        self.assertIsNotNone(result)
+        unmasked_ids = [lbl for lbl in result["labels"] if lbl != IGNORE_INDEX]
+        unmasked_text = self.tokenizer.decode(unmasked_ids)
+        self.assertIn("unique_last_reply", unmasked_text)
+        self.assertNotIn("unique_first_reply", unmasked_text)
 
-        full_text = self.tokenizer.apply_chat_template(msgs, **self.strategy.chat_template_kwargs)
-        full_tokens = self.tokenizer.encode(
-            full_text.rstrip("\n"), add_bos=True, add_eos=False
-        )
-        if full_tokens[-1] != self.tokenizer.eos_id:
-            full_tokens.append(self.tokenizer.eos_id)
-
-        unmasked = [(i, lbl) for i, lbl in enumerate(result["labels"]) if lbl != IGNORE_INDEX]
-        self.assertGreater(len(unmasked), 0)
-        for i, lbl in unmasked:
-            self.assertEqual(lbl, full_tokens[i + 1])
-
-    def test_multi_turn_masked_boundary(self):
-        """Tokens between assistant turns (user turns) must all be masked."""
+    def test_multi_turn_unmasked_is_contiguous_suffix(self):
+        """Unmasked labels must form a single contiguous block at the end."""
         msgs = [
             {"role": "user", "content": "q1"},
             {"role": "assistant", "content": "a1"},
@@ -219,22 +226,43 @@ class TestNaiveStrategyBasic(unittest.TestCase):
         ]
         result = self._tokenize(msgs)
 
-        # Find the region between the two assistant turns (after first unmasked block).
         labels = result["labels"]
-        in_masked_gap = False
-        saw_first_unmasked = False
-        saw_second_unmasked = False
-        for lbl in labels:
-            if lbl != IGNORE_INDEX and not saw_first_unmasked:
-                saw_first_unmasked = True
-            elif lbl == IGNORE_INDEX and saw_first_unmasked and not in_masked_gap:
-                in_masked_gap = True
-            elif lbl != IGNORE_INDEX and in_masked_gap:
-                saw_second_unmasked = True
-                in_masked_gap = False
-        self.assertTrue(
-            saw_second_unmasked, "Expected a masked gap between two assistant turns"
+        self.assertGreater(
+            sum(1 for lbl in labels if lbl != IGNORE_INDEX),
+            0,
+            "Expected at least one unmasked label",
         )
+        # Once unmasked tokens start, no masked token may follow.
+        seen_unmasked = False
+        for lbl in labels:
+            if lbl != IGNORE_INDEX:
+                seen_unmasked = True
+            elif seen_unmasked:
+                self.fail("Masked label found after unmasked label — not a contiguous suffix")
+
+    def test_tool_last_trailing_tokens_excluded(self):
+        """Trailing tool message must not appear in input_ids."""
+        msgs = [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "unique_asst_reply"},
+            {"role": "tool", "content": "unique_tool_result"},
+        ]
+        result = self._tokenize(msgs)
+        decoded = self.tokenizer.decode(result["input_ids"])
+        self.assertIn("unique_asst_reply", decoded)
+        self.assertNotIn("unique_tool_result", decoded)
+
+    def test_user_last_trailing_tokens_excluded(self):
+        """Trailing user message must not appear in input_ids."""
+        msgs = [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "unique_asst_reply"},
+            {"role": "user", "content": "unique_followup"},
+        ]
+        result = self._tokenize(msgs)
+        decoded = self.tokenizer.decode(result["input_ids"])
+        self.assertIn("unique_asst_reply", decoded)
+        self.assertNotIn("unique_followup", decoded)
 
     def test_batched_call_returns_parallel_lists(self):
         msgs = [
@@ -250,12 +278,12 @@ class TestNaiveStrategyBasic(unittest.TestCase):
             self.assertEqual(output["n_tokens"][i], len(output["input_ids"][i]))
 
 
-class TestNaiveStrategyOrchestrator(unittest.TestCase):
+class TestTruncateLastStrategyOrchestrator(unittest.TestCase):
     """Integration test: run the full pre-tokenization pipeline on a tiny JSONL."""
 
     def setUp(self):
-        self.tokenizer = _make_tokenizer(_TEST_TOKENIZER_PATH)
-        self.strategy = _make_strategy(_TEST_TOKENIZER_PATH)
+        self.tokenizer = HuggingFaceTokenizer(tokenizer_path=_TEST_TOKENIZER_PATH)
+        self.strategy = TruncateLastStrategy(_TEST_TOKENIZER_PATH)
 
     def test_jsonl_to_shard(self):
         from datasets import load_dataset, load_from_disk
@@ -301,15 +329,56 @@ class TestNaiveStrategyOrchestrator(unittest.TestCase):
                 self.assertEqual(row["labels"][-1], self.tokenizer.eos_id)
 
 
+class TestTruncateLastStrategyFailureRecording(unittest.TestCase):
+    """Tests that failures are flushed to failures_path after each batch."""
+
+    def test_validation_error_written_to_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "failures.jsonl")
+            strategy = TruncateLastStrategy(_TEST_TOKENIZER_PATH, failures_path=path)
+            bad = [{"role": "user", "content": "no assistant"}]
+            good = [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "world"},
+            ]
+            result = strategy({"messages": [bad, good]})
+
+            self.assertEqual(len(result["input_ids"]), 1)
+
+            with open(path) as f:
+                records = [json.loads(line) for line in f]
+            self.assertEqual(len(records), 1)
+            rec = records[0]
+            self.assertIn("messages", rec)
+            self.assertIsInstance(rec["error"], str)
+            self.assertEqual(rec["messages"], bad)
+
+    def test_all_batch_failures_written(self):
+        """Every bad example in a batch ends up in the file after __call__ returns."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "failures.jsonl")
+            strategy = TruncateLastStrategy(_TEST_TOKENIZER_PATH, failures_path=path)
+            bad1 = [{"role": "user", "content": "no assistant"}]
+            bad2 = [{"role": "assistant", "content": "starts wrong"}]
+            result = strategy({"messages": [bad1, bad2]})
+
+            self.assertEqual(len(result["input_ids"]), 0)
+
+            with open(path) as f:
+                records = [json.loads(line) for line in f]
+            self.assertEqual(len(records), 2)
+            self.assertTrue(all(isinstance(r["error"], str) for r in records))
+
+
 @unittest.skipUnless(
     _HF_ASSETS_PATH, "HF_ASSETS_PATH not set — skipping Granite tokenizer tests"
 )
-class TestNaiveStrategyGranite(unittest.TestCase):
+class TestTruncateLastStrategyGranite(unittest.TestCase):
     """Tests using the real Granite tokenizer with truncate_history_thinking."""
 
     def setUp(self):
-        self.tokenizer = _make_tokenizer(_HF_ASSETS_PATH)
-        self.strategy = _make_strategy(_HF_ASSETS_PATH)
+        self.tokenizer = HuggingFaceTokenizer(tokenizer_path=_HF_ASSETS_PATH)
+        self.strategy = TruncateLastStrategy(_HF_ASSETS_PATH)
 
     def test_truncate_history_thinking_masks_old_thinking(self):
         """Thinking tokens in earlier turns should be absent from the tokenized sequence."""
@@ -328,7 +397,6 @@ class TestNaiveStrategyGranite(unittest.TestCase):
             },
         ]
         result = self.strategy._tokenize_one(msgs)
-        self.assertIsNotNone(result)
 
         decoded = self.tokenizer.decode(result["input_ids"], skip_special_tokens=False)
         # With truncate=True, "let me think" from turn 1 should be absent
@@ -347,9 +415,7 @@ class TestNaiveStrategyGranite(unittest.TestCase):
             },
         ]
         result = self.strategy._tokenize_one(msgs)
-        self.assertIsNotNone(result)
 
-        # All unmasked labels should decode to include thinking content
         unmasked_ids = [lbl for lbl in result["labels"] if lbl != IGNORE_INDEX]
         unmasked_text = self.tokenizer.decode(unmasked_ids, skip_special_tokens=False)
         self.assertIn("deep thoughts", unmasked_text)
@@ -361,9 +427,7 @@ class TestNaiveStrategyGranite(unittest.TestCase):
             {"role": "assistant", "content": "response"},
         ]
         result = self.strategy._tokenize_one(msgs)
-        self.assertIsNotNone(result)
 
-        # Tokens decoded from masked positions should not contain the response
         masked_ids = [
             result["input_ids"][i]
             for i, lbl in enumerate(result["labels"])
@@ -371,6 +435,153 @@ class TestNaiveStrategyGranite(unittest.TestCase):
         ]
         masked_text = self.tokenizer.decode(masked_ids, skip_special_tokens=False)
         self.assertIn("unique_user_marker_xyz", masked_text)
+
+    def test_multi_turn_tool_with_reasoning_content_not_dropped(self):
+        """Tool-use conversation with reasoning_content in intermediate turns must not be dropped."""
+        msgs = [
+            {"role": "user", "content": "ping"},
+            {
+                "role": "assistant",
+                "reasoning_content": "I will call a tool.",
+                "content": "first_reply",
+            },
+            {"role": "tool", "content": "tool_result"},
+            {
+                "role": "assistant",
+                "reasoning_content": "The tool returned a result.",
+                "content": "second_reply",
+            },
+        ]
+        result = self.strategy._tokenize_one(msgs)
+        self.assertEqual(result["n_tokens"], len(result["input_ids"]))
+        self.assertEqual(len(result["labels"]), len(result["input_ids"]))
+
+    def test_multi_turn_tool_only_last_assistant_unmasked(self):
+        """In a tool-use conversation only the last assistant turn must be unmasked."""
+        msgs = [
+            {"role": "user", "content": "ping"},
+            {
+                "role": "assistant",
+                "reasoning_content": "thinking1",
+                "content": "unique_first_reply",
+            },
+            {"role": "tool", "content": "ok"},
+            {
+                "role": "assistant",
+                "reasoning_content": "thinking2",
+                "content": "unique_second_reply",
+            },
+        ]
+        result = self.strategy._tokenize_one(msgs)
+
+        unmasked_ids = [lbl for lbl in result["labels"] if lbl != IGNORE_INDEX]
+        unmasked_text = self.tokenizer.decode(unmasked_ids, skip_special_tokens=False)
+        self.assertIn("unique_second_reply", unmasked_text)
+        self.assertNotIn("unique_first_reply", unmasked_text)
+
+    def test_tool_last_reasoning_preserved(self):
+        """Reasoning in the last assistant tool-call turn must survive after trailing tool is dropped."""
+        msgs = [
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "reasoning_content": "unique_tool_call_reasoning",
+                "content": "calling tool",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": {}},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "unique_tool_result"},
+        ]
+        result = self.strategy._tokenize_one(msgs)
+        decoded = self.tokenizer.decode(result["input_ids"], skip_special_tokens=False)
+        self.assertIn("unique_tool_call_reasoning", decoded)
+        self.assertNotIn("unique_tool_result", decoded)
+
+    def test_user_last_reasoning_preserved_by_slicing(self):
+        """Trailing user shifts last_user_idx, stripping last assistant thinking without the slice.
+
+        Demonstrates why effective = messages[:last_asst_idx + 1] is required.
+        """
+        msgs = [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "reasoning_content": "thinking_a1", "content": "reply1"},
+            {"role": "user", "content": "q2"},
+            {
+                "role": "assistant",
+                "reasoning_content": "unique_last_reasoning",
+                "content": "reply2",
+            },
+            {"role": "user", "content": "unique_injected_user"},
+        ]
+        # Without slicing, the trailing user shifts last_user_idx past asst2, stripping
+        # its thinking. This demonstrates the bug the slice is fixing.
+        unsliced = self.tokenizer.apply_chat_template(msgs, truncate_history_thinking=True)
+        self.assertNotIn("unique_last_reasoning", unsliced)
+
+        # _tokenize_one slices to effective = msgs[:last_asst_idx + 1], restoring thinking.
+        result = self.strategy._tokenize_one(msgs)
+        decoded = self.tokenizer.decode(result["input_ids"], skip_special_tokens=False)
+        self.assertIn("unique_last_reasoning", decoded)
+        self.assertNotIn("unique_injected_user", decoded)
+
+
+@unittest.skipUnless(
+    _DATA_PATH_7M_BALANCED and _HF_ASSETS_PATH,
+    "DATA_PATH_7M_BALANCED or HF_ASSETS_PATH not set — skipping real data tests",
+)
+class TestTruncateLastStrategyRealData(unittest.TestCase):
+    """Smoke test on real data. Requires DATA_PATH_7M_BALANCED (dir of .jsonl) + HF_ASSETS_PATH."""
+
+    _NUM_SAMPLES = 1000
+    _MAX_DROP_RATE = 0.01
+
+    def setUp(self):
+        self.tokenizer = HuggingFaceTokenizer(tokenizer_path=_HF_ASSETS_PATH)
+        self.strategy = TruncateLastStrategy(_HF_ASSETS_PATH)
+
+    def _load_samples(self) -> list[list[dict]]:
+        import glob
+
+        jsonl_files = sorted(glob.glob(os.path.join(_DATA_PATH_7M_BALANCED, "*.jsonl")))
+        if not jsonl_files:
+            self.skipTest(f"No .jsonl files found in {_DATA_PATH_7M_BALANCED}")
+        samples = []
+        with open(jsonl_files[0]) as f:
+            for i, line in enumerate(f):
+                if i >= self._NUM_SAMPLES:
+                    break
+                samples.append(json.loads(line)["messages"])
+        return samples
+
+    def test_format_and_drop_rate(self):
+        samples = self._load_samples()
+        valid = []
+        for msgs in samples:
+            try:
+                valid.append(self.strategy._tokenize_one(msgs))
+            except Exception:
+                pass
+
+        drop_rate = 1 - len(valid) / len(samples)
+        self.assertLess(
+            drop_rate,
+            self._MAX_DROP_RATE,
+            f"Drop rate {drop_rate:.1%} exceeds {self._MAX_DROP_RATE:.1%}",
+        )
+
+        eos_id = self.tokenizer.eos_id
+        for r in valid:
+            self.assertEqual(r["n_tokens"], len(r["input_ids"]))
+            self.assertEqual(len(r["labels"]), len(r["input_ids"]))
+            self.assertEqual(r["labels"][-1], eos_id)
+            masked = sum(1 for lbl in r["labels"] if lbl == IGNORE_INDEX)
+            self.assertGreater(masked, 0)
+            self.assertGreater(len(r["labels"]) - masked, 0)
 
 
 if __name__ == "__main__":
