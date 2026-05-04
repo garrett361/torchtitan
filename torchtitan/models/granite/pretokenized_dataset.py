@@ -12,6 +12,7 @@ Class hierarchy:
 """
 
 import json
+import multiprocessing as mp
 from abc import abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,7 +54,7 @@ class PreTokenizedDataset(IterableDataset, Stateful):
     Subclass contract:
     - Implement __iter__ (typically delegates to a _iter_* packing method).
     - At end-of-epoch when re-looping, re-shuffle _data via
-        self._data = cast(Dataset, self._original_data.shuffle(seed=42 + self._epoch))
+        self._data = cast(Dataset, self._original_data.shuffle(seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory))
       to maintain per-epoch diversity. Seed 42 covers epoch 0 (applied in __init__);
       subsequent epochs use seed 42+epoch for a deterministic sequence.
     """
@@ -66,6 +67,7 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         dp_world_size: int = 1,
         cp_rank: int = 0,
         infinite: bool = False,
+        shuffle_in_memory: bool = True,
         tokenizer: BaseTokenizer | None = None,
         _manifest: dict[str, Any] | None = None,
     ) -> None:
@@ -76,8 +78,14 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         full_dataset = _load_shards(manifest, shards_dir)
         # Shuffle before sharding so every DP rank gets a representative length
         # distribution. split_dataset_by_node on a Dataset always returns a Dataset.
+        self._shuffle_in_memory = shuffle_in_memory
         self._original_data: Dataset = cast(
-            Dataset, split_dataset_by_node(full_dataset.shuffle(seed=42), dp_rank, dp_world_size)
+            Dataset,
+            split_dataset_by_node(
+                full_dataset.shuffle(seed=42, keep_in_memory=shuffle_in_memory),
+                dp_rank,
+                dp_world_size,
+            ),
         )
         self._data: Dataset = self._original_data
 
@@ -92,9 +100,18 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         self._epoch: int = 0
         self._logged_first_sample = False
 
+        self._worker_id: int = 0
+        self._num_workers: int = 1
+
         self._n_total_tokens: int = 0
         self._n_trained_tokens: int = 0
         self._n_examples_packed: int = 0
+        # Shared memory counters readable from the main process while workers
+        # iterate. Requires fork start method (Linux default); not picklable
+        # with spawn.
+        self._shared_n_total_tokens = mp.Value("q", 0)
+        self._shared_n_trained_tokens = mp.Value("q", 0)
+        self._shared_n_examples_packed = mp.Value("q", 0)
 
     def _get_data_iter(self):
         if self._sample_idx == len(self._data):
@@ -105,6 +122,9 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         """Log the first sample with trained tokens highlighted. No-op if already logged
         or tokenizer is unavailable."""
         if self._logged_first_sample or self._cp_rank != 0 or self._tokenizer is None:
+            return
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None and worker_info.id != 0:
             return
         RED, RESET = "\033[31m", "\033[0m"
         # input_ids[j] is predicted at step j-1; it's "trained on" iff label_ids[j-1] != IGNORE_INDEX.
@@ -133,10 +153,10 @@ class PreTokenizedDataset(IterableDataset, Stateful):
 
     def get_data_stats(self) -> dict[str, Any]:
         return {
-            "n_total_tokens": self._n_total_tokens,
-            "n_trained_tokens": self._n_trained_tokens,
-            "n_examples_packed": self._n_examples_packed,
-            "epochs": self._epoch + self._sample_idx / max(len(self._data), 1),
+            "n_total_tokens": self._shared_n_total_tokens.value,
+            "n_trained_tokens": self._shared_n_trained_tokens.value,
+            "n_examples_packed": self._shared_n_examples_packed.value,
+            "epochs": self._shared_n_examples_packed.value / max(len(self._original_data), 1),
         }
 
     @abstractmethod
@@ -168,13 +188,36 @@ class TruncateLastDataset(PreTokenizedDataset):
 
         self._log_first_sample(input_ids, label_ids)
 
+        n_trained = sum(1 for lbl in label_ids if lbl != IGNORE_INDEX)
         self._n_total_tokens += len(input_ids)
-        self._n_trained_tokens += sum(1 for lbl in label_ids if lbl != IGNORE_INDEX)
+        self._n_trained_tokens += n_trained
         self._n_examples_packed += 1
+        with self._shared_n_total_tokens.get_lock():
+            self._shared_n_total_tokens.value += len(input_ids)
+        with self._shared_n_trained_tokens.get_lock():
+            self._shared_n_trained_tokens.value += n_trained
+        with self._shared_n_examples_packed.get_lock():
+            self._shared_n_examples_packed.value += 1
 
         return input_ids, label_ids
 
     def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            self._worker_id = worker_info.id
+            self._num_workers = worker_info.num_workers
+        # Recompute from _original_data to handle repeated __iter__ calls
+        # (persistent_workers=True recreates the iterator on the same instance)
+        if self._epoch > 0:
+            self._data = cast(Dataset, self._original_data.shuffle(seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory))
+        else:
+            self._data = self._original_data
+        if self._num_workers > 1:
+            self._data = cast(
+                Dataset,
+                split_dataset_by_node(self._data, self._worker_id, self._num_workers),
+            )
+        self._sample_idx = min(self._sample_idx, len(self._data))
         yield from self._iter_greedy_packed()
 
     def _iter_greedy_packed(self):
@@ -226,7 +269,12 @@ class TruncateLastDataset(PreTokenizedDataset):
                 break
             self._sample_idx = 0
             self._epoch += 1
-            self._data = cast(Dataset, self._original_data.shuffle(seed=42 + self._epoch))
+            self._data = cast(Dataset, self._original_data.shuffle(seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory))
+            if self._num_workers > 1:
+                self._data = cast(
+                    Dataset,
+                    split_dataset_by_node(self._data, self._worker_id, self._num_workers),
+                )
             logger.warning(
                 "Dataset '%s' is being re-looped (epoch %d)",
                 self._dataset_id,
@@ -260,11 +308,21 @@ class TruncateLastDataset(PreTokenizedDataset):
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self._epoch = state_dict["epoch"]
         self._sample_idx = state_dict["sample_idx"]
+        old_total = self._n_total_tokens
+        old_trained = self._n_trained_tokens
+        old_packed = self._n_examples_packed
         self._n_total_tokens = state_dict.get("n_total_tokens", 0)
         self._n_trained_tokens = state_dict.get("n_trained_tokens", 0)
         self._n_examples_packed = state_dict.get("n_examples_packed", 0)
+        # Subtract old contribution, add new — idempotent across repeated calls
+        with self._shared_n_total_tokens.get_lock():
+            self._shared_n_total_tokens.value += self._n_total_tokens - old_total
+        with self._shared_n_trained_tokens.get_lock():
+            self._shared_n_trained_tokens.value += self._n_trained_tokens - old_trained
+        with self._shared_n_examples_packed.get_lock():
+            self._shared_n_examples_packed.value += self._n_examples_packed - old_packed
         if self._epoch > 0:
-            self._data = cast(Dataset, self._original_data.shuffle(seed=42 + self._epoch))
+            self._data = cast(Dataset, self._original_data.shuffle(seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory))
 
 
 _DATASET_CLASSES: dict[str, type[PreTokenizedDataset]] = {
@@ -287,6 +345,10 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         infinite: bool = True
         """Loop the dataset indefinitely."""
 
+        shuffle_in_memory: bool = True
+        """Keep shuffle index in memory instead of writing a cache file to the shard
+        directory. Avoids filesystem contention when many ranks start simultaneously."""
+
     def __init__(
         self,
         config: "GranitePreTokenizedDataLoader.Config",
@@ -298,13 +360,6 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         local_batch_size: int,
         cp_rank: int = 0,
     ) -> None:
-        if config.num_workers > 0:
-            raise ValueError(
-                "num_workers > 0 is not supported for GranitePreTokenizedDataLoader. "
-                "Worker processes iterate independent copies of the dataset, causing "
-                "data duplication and broken stats. Pre-tokenized data has negligible "
-                "CPU overhead; set num_workers=0."
-            )
         manifest = _load_manifest(Path(config.manifest_path))
         strategy = manifest.get("strategy")
         if strategy not in _DATASET_CLASSES:
@@ -319,6 +374,7 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
             dp_world_size=dp_world_size,
             cp_rank=cp_rank,
             infinite=config.infinite,
+            shuffle_in_memory=config.shuffle_in_memory,
             tokenizer=tokenizer,
             _manifest=manifest,
         )

@@ -222,6 +222,90 @@ class TestTruncateLastDatasetPacking(unittest.TestCase):
             self.assertTrue(torch.equal(la, lb))
 
 
+class TestMultiWorkerSharding(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+
+        self._tmpdir = tempfile.mkdtemp()
+        self._tmp = Path(self._tmpdir)
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self._tmpdir)
+
+    def test_workers_see_disjoint_data(self):
+        """With num_workers=2, no data duplication occurs."""
+        seq_len = 32
+        n = 20
+        examples = [
+            ([100 + i, _EOS_ID], [_EOS_ID, IGNORE_INDEX])
+            for i in range(n)
+        ]
+        manifest_path = _make_shard(self._tmp, examples)
+
+        from torchtitan.components.tokenizer import HuggingFaceTokenizer
+
+        tokenizer = HuggingFaceTokenizer(tokenizer_path="tests/assets/tokenizer")
+        loader = GranitePreTokenizedDataLoader(
+            GranitePreTokenizedDataLoader.Config(
+                manifest_path=str(manifest_path),
+                infinite=False,
+                num_workers=2,
+                persistent_workers=False,
+            ),
+            dp_world_size=1,
+            dp_rank=0,
+            tokenizer=tokenizer,
+            seq_len=seq_len,
+            local_batch_size=1,
+        )
+
+        all_tokens = set()
+        for batch_dict, _ in loader:
+            for t in batch_dict["input"].flatten().tolist():
+                if 100 <= t < 200:
+                    all_tokens.add(t)
+
+        self.assertEqual(all_tokens, {100 + i for i in range(n)})
+
+    def test_shared_stats_nonzero(self):
+        """Shared stats are visible to the main process after multi-worker iteration."""
+        seq_len = 16
+        examples = [
+            ([1, 10, 20, _EOS_ID], [IGNORE_INDEX, IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
+            ([1, 30, 40, _EOS_ID], [IGNORE_INDEX, IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
+            ([1, 50, 60, _EOS_ID], [IGNORE_INDEX, IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
+            ([1, 70, 80, _EOS_ID], [IGNORE_INDEX, IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
+        ]
+        manifest_path = _make_shard(self._tmp, examples)
+
+        from torchtitan.components.tokenizer import HuggingFaceTokenizer
+
+        tokenizer = HuggingFaceTokenizer(tokenizer_path="tests/assets/tokenizer")
+        loader = GranitePreTokenizedDataLoader(
+            GranitePreTokenizedDataLoader.Config(
+                manifest_path=str(manifest_path),
+                infinite=False,
+                num_workers=2,
+                persistent_workers=False,
+            ),
+            dp_world_size=1,
+            dp_rank=0,
+            tokenizer=tokenizer,
+            seq_len=seq_len,
+            local_batch_size=1,
+        )
+
+        for _ in loader:
+            pass
+
+        stats = loader.dataset.get_data_stats()
+        self.assertGreater(stats["n_total_tokens"], 0)
+        self.assertGreater(stats["n_trained_tokens"], 0)
+        self.assertGreater(stats["n_examples_packed"], 0)
+
+
 class TestGranitePreTokenizedDataLoaderDispatch(unittest.TestCase):
     def setUp(self):
         import tempfile
