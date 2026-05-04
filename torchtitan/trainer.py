@@ -186,6 +186,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     # additional training states
     step: int
     ntokens_seen: int
+    _cached_epochs: float | None
 
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
@@ -233,7 +234,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
         # build dataloader
-        cp_rank = parallel_dims.get_mesh("cp").get_local_rank() if parallel_dims.cp_enabled else 0
+        cp_rank = (
+            parallel_dims.get_mesh("cp").get_local_rank()
+            if parallel_dims.cp_enabled
+            else 0
+        )
         self.dataloader = config.dataloader.build(
             dp_world_size=batch_degree,
             dp_rank=batch_rank,
@@ -447,6 +452,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # These attributes must be initialized before checkpoint loading.
         self.step = 0
         self.ntokens_seen = 0
+        self._cached_epochs = None
         self._rank_local_valid_tokens_per_step = 0
 
         self.checkpointer = config.checkpoint.build(
@@ -644,9 +650,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # Accumulate after CP sharding so counts reflect the actual unique
         # tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
-        self._rank_local_valid_tokens_per_step += int(
-            (labels != IGNORE_INDEX).sum()
-        )
+        self._rank_local_valid_tokens_per_step += int((labels != IGNORE_INDEX).sum())
 
         return inputs, labels, extra_inputs, extra_kwargs
 
@@ -839,22 +843,40 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     batch_mesh = parallel_dims.get_mesh("batch")
                     n_total = int(
                         dist_utils.dist_sum(
-                            torch.tensor(n_total, dtype=torch.int64, device=self.device),
+                            torch.tensor(
+                                n_total, dtype=torch.int64, device=self.device
+                            ),
                             batch_mesh,
                         )
                     )
                     n_trained = int(
                         dist_utils.dist_sum(
-                            torch.tensor(n_trained, dtype=torch.int64, device=self.device),
+                            torch.tensor(
+                                n_trained, dtype=torch.int64, device=self.device
+                            ),
                             batch_mesh,
                         )
                     )
                     n_examples = int(
                         dist_utils.dist_sum(
-                            torch.tensor(n_examples, dtype=torch.int64, device=self.device),
+                            torch.tensor(
+                                n_examples, dtype=torch.int64, device=self.device
+                            ),
                             batch_mesh,
                         )
                     )
+                    epochs_logged = (
+                        dist_utils.dist_min(
+                            torch.tensor(
+                                raw["epochs"], dtype=torch.float64, device=self.device
+                            ),
+                            batch_mesh,
+                        )
+                        if raw["epochs"] is not None
+                        else None
+                    )
+                else:
+                    epochs_logged = raw["epochs"]
                 s = max(self.step, 1)
                 extra_metrics.update(
                     {
@@ -865,15 +887,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         "data/avg_examples_per_step": n_examples / s,
                     }
                 )
-                if raw["epochs"] is not None:
-                    extra_metrics["data/epochs"] = raw["epochs"]
+                self._cached_epochs = epochs_logged
+                if epochs_logged is not None:
+                    extra_metrics["data/epochs"] = epochs_logged
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
             global_max_loss,
             float(grad_norm.item()),
             total_steps=self.config.training.steps,
-            steps_to_next_ckpt=self.checkpointer.interval - self.step % self.checkpointer.interval if self.checkpointer.enable else None,
+            steps_to_next_ckpt=self.checkpointer.interval
+            - self.step % self.checkpointer.interval
+            if self.checkpointer.enable
+            else None,
             extra_metrics=extra_metrics,
         )
 
@@ -882,6 +908,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         config = self.config
 
         self.checkpointer.load(step=config.checkpoint.load_step)
+
+        if config.training.max_epochs is not None:
+            dataset = getattr(self.dataloader, "dataset", None)
+            if dataset is None or not hasattr(dataset, "get_data_stats"):
+                raise ValueError(
+                    "training.max_epochs requires a dataloader with a dataset "
+                    "that implements get_data_stats()."
+                )
+            if dataset.get_data_stats()["epochs"] is None:
+                raise ValueError(
+                    "training.max_epochs requires a dataset that tracks epoch boundaries. "
+                    "Use a dataset whose get_data_stats() returns a non-None 'epochs' value "
+                    "(e.g. ChatDataset over a map-style HuggingFace Dataset, or "
+                    "TruncateLastDataset)."
+                )
+
         logger.info(f"Training starts at step {self.step + 1}")
 
         with config.profiler.build(
@@ -898,9 +940,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     logger.warning("Ran out of data; last step was canceled.")
                     break
 
+                epoch_done = self._epoch_limit_reached()
                 self.checkpointer.save(
-                    self.step, last_step=(self.step == config.training.steps)
+                    self.step,
+                    last_step=(self.step == config.training.steps) or epoch_done,
                 )
+                if epoch_done:
+                    logger.info(
+                        f"Stopping: reached max_epochs={config.training.max_epochs} "
+                        f"at step {self.step}."
+                    )
+                    break
 
                 # Run validation if validator is available
                 if self.config.validator.enable and self.validator.should_validate(
@@ -927,6 +977,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
     def should_continue_training(self) -> bool:
         return self.step < self.config.training.steps
+
+    def _epoch_limit_reached(self) -> bool:
+        max_epochs = self.config.training.max_epochs
+        if max_epochs is None or self._cached_epochs is None:
+            return False
+        return self._cached_epochs >= max_epochs
 
     def state_dict(self) -> dict[str, Any]:
         return {"step": self.step, "ntokens_seen": self.ntokens_seen}

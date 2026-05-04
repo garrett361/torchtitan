@@ -42,6 +42,23 @@ class TrainingConfig:
     steps: int = 10000
     """How many train steps to run"""
 
+    max_epochs: float | None = None
+    """
+    Stop training after this many epochs of the dataset, checkpointing at that step.
+
+    Requires a dataset whose ``get_data_stats()["epochs"]`` is non-None. This includes
+    ``ChatDataset`` over a map-style HuggingFace ``Dataset`` and ``TruncateLastDataset``
+    (pre-tokenized Arrow shards). Pure IterableDatasets are not supported.
+    ``training.steps`` must still be set as an upper-bound ceiling; it controls the LR
+    schedule and is used if epoch termination never fires.
+
+    Limitations:
+      - The LR scheduler is built from ``training.steps``, not ``max_epochs``. Early exit
+        due to epoch termination means the LR may not have completed its full decay.
+      - Termination is detected at logging cadence (``metrics.log_freq`` steps), so
+        training may overshoot ``max_epochs`` by up to ``log_freq - 1`` steps.
+    """
+
     enable_cpu_offload: bool = False
     """
     Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP

@@ -58,6 +58,16 @@ def _dist_reduce(
     return float(funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item())
 
 
+def dist_min(
+    x: torch.Tensor,
+    mesh: DeviceMesh | None = None,
+    extra_pg: dist.ProcessGroup | None = None,
+) -> float:
+    return _dist_reduce(
+        x, reduceOp=c10d.ReduceOp.MIN.name, mesh=mesh, extra_pg=extra_pg
+    )
+
+
 # TODO: rename this to maybe_dist_max
 def dist_max(
     x: torch.Tensor,
