@@ -887,6 +887,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "data/avg_total_toks_per_step": n_total / s,
                     "data/avg_train_toks_per_step": n_trained / s,
                     "data/avg_examples_per_step": n_examples / s,
+                    "data/avg_toks_per_example": n_total / max(n_examples, 1),
+                    "data/avg_train_toks_per_example": n_trained / max(n_examples, 1),
+                    "data/avg_train_token_fraction": n_trained / max(n_total, 1),
                 }
             )
             self._cached_epochs = epochs_logged
