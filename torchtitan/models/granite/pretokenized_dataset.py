@@ -298,6 +298,13 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         local_batch_size: int,
         cp_rank: int = 0,
     ) -> None:
+        if config.num_workers > 0:
+            raise ValueError(
+                "num_workers > 0 is not supported for GranitePreTokenizedDataLoader. "
+                "Worker processes iterate independent copies of the dataset, causing "
+                "data duplication and broken stats. Pre-tokenized data has negligible "
+                "CPU overhead; set num_workers=0."
+            )
         manifest = _load_manifest(Path(config.manifest_path))
         strategy = manifest.get("strategy")
         if strategy not in _DATASET_CLASSES:
