@@ -125,13 +125,15 @@ def _process_file(
     ds.save_to_disk(str(final_path))
     elapsed = time.monotonic() - t0
 
+    import numpy as np
+    import pyarrow.compute as pc
+
     n_examples = len(ds)
-    n_tokens_col = ds["n_tokens"]
-    total_tokens = int(sum(n_tokens_col))
-    sum_tokens_squared = int(sum(x * x for x in n_tokens_col))
-    total_trained = int(
-        sum(sum(1 for lbl in labels if lbl != -100) for labels in ds["labels"])
-    )
+    n_tokens_arr = np.array(ds["n_tokens"], dtype=np.int64)
+    total_tokens = int(n_tokens_arr.sum())
+    sum_tokens_squared = int((n_tokens_arr**2).sum())
+    labels_flat = ds.data.column("labels").combine_chunks().flatten()
+    total_trained = int(pc.sum(pc.not_equal(labels_flat, -100)).as_py())
 
     stats: dict[str, Any] = {
         "input_file": input_file.name,
@@ -190,9 +192,13 @@ def _compute_length_stats(shards_dir: Path, completed_shards: list[str]) -> dict
             length_stats[f"squared_tokens_per_example_{k}kmax"] = round(
                 float((filtered**2).mean()), 1
             )
+            length_stats[f"tokens_per_example_{k}kmax"] = round(
+                float(filtered.mean()), 1
+            )
             length_stats[f"n_examples_{k}kmax"] = int(len(filtered))
         else:
             length_stats[f"squared_tokens_per_example_{k}kmax"] = None
+            length_stats[f"tokens_per_example_{k}kmax"] = None
             length_stats[f"n_examples_{k}kmax"] = 0
 
     return length_stats
