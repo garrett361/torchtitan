@@ -126,7 +126,9 @@ def _process_file(
     elapsed = time.monotonic() - t0
 
     n_examples = len(ds)
-    total_tokens = int(sum(ds["n_tokens"]))
+    n_tokens_col = ds["n_tokens"]
+    total_tokens = int(sum(n_tokens_col))
+    sum_tokens_squared = int(sum(x * x for x in n_tokens_col))
     total_trained = int(
         sum(sum(1 for lbl in labels if lbl != -100) for labels in ds["labels"])
     )
@@ -137,6 +139,7 @@ def _process_file(
         "n_examples": n_examples,
         "n_dropped": n_lines - n_examples,
         "total_tokens": total_tokens,
+        "sum_tokens_squared": sum_tokens_squared,
         "total_trained_tokens": total_trained,
         "elapsed_seconds": round(elapsed, 2),
         "examples_per_second": round(n_examples / max(elapsed, 1e-6), 1),
@@ -152,6 +155,47 @@ def _process_file(
         total_tokens,
         stats["examples_per_second"],
     )
+
+
+_SEQ_LEN_CUTOFFS = [16384, 32768, 65536, 131072, 262144, 524288]
+
+
+def _compute_length_stats(shards_dir: Path, completed_shards: list[str]) -> dict[str, Any]:
+    """Load n_tokens from all shards and compute distribution stats."""
+    import numpy as np
+    from datasets import load_from_disk
+
+    all_lengths: list[int] = []
+    for shard_name in completed_shards:
+        ds = load_from_disk(str(shards_dir / shard_name))
+        all_lengths.extend(ds["n_tokens"])
+
+    arr = np.array(all_lengths, dtype=np.int64)
+    squared_tokens_per_example = float((arr**2).mean())
+
+    length_stats: dict[str, Any] = {
+        "squared_tokens_per_example": round(squared_tokens_per_example, 1),
+        "min": int(arr.min()),
+        "max": int(arr.max()),
+        "mean": round(float(arr.mean()), 1),
+        "median": int(np.median(arr)),
+        "std": round(float(arr.std()), 1),
+        "p95": int(np.percentile(arr, 95)),
+    }
+
+    for cutoff in _SEQ_LEN_CUTOFFS:
+        filtered = arr[arr <= cutoff]
+        k = cutoff // 1024
+        if len(filtered) > 0:
+            length_stats[f"squared_tokens_per_example_{k}kmax"] = round(
+                float((filtered**2).mean()), 1
+            )
+            length_stats[f"n_examples_{k}kmax"] = int(len(filtered))
+        else:
+            length_stats[f"squared_tokens_per_example_{k}kmax"] = None
+            length_stats[f"n_examples_{k}kmax"] = 0
+
+    return length_stats
 
 
 def _write_manifest(
@@ -174,6 +218,15 @@ def _write_manifest(
     total_tokens = sum(s["total_tokens"] for s in all_stats)
     total_trained = sum(s["total_trained_tokens"] for s in all_stats)
 
+    completed_shards = sorted(
+        d.name
+        for d in shards_dir.iterdir()
+        if d.is_dir() and not d.name.endswith("_stats")
+    )
+
+    logger.info("Computing length distribution stats from %d shards...", len(completed_shards))
+    length_stats = _compute_length_stats(shards_dir, completed_shards)
+
     chat_template_sha256 = None
     jinja_path = Path(tokenizer_path) / "chat_template.jinja"
     if jinja_path.exists():
@@ -190,11 +243,7 @@ def _write_manifest(
         },
         "chat_template_kwargs": chat_template_kwargs,
         "shards": {
-            "completed": sorted(
-                d.name
-                for d in shards_dir.iterdir()
-                if d.is_dir() and not d.name.endswith("_stats")
-            ),
+            "completed": completed_shards,
             "total_expected": len(input_files),
         },
         "stats": {
@@ -204,7 +253,8 @@ def _write_manifest(
             "total_trained_tokens": total_trained,
             "tokens_per_example": round(total_tokens / total_examples, 1),
             "trained_tokens_per_example": round(total_trained / total_examples, 1),
-            "tranined_to_total_tokens_ratio": total_trained / total_tokens,
+            "trained_to_total_tokens_ratio": total_trained / total_tokens,
+            "length_stats": length_stats,
         },
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "input_dir": str(input_files[0].parent) if input_files else "",
