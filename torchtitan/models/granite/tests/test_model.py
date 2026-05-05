@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import torch
 
+from torchtitan.models.common.rope import RoPE, apply_rotary_emb_complex
 from torchtitan.models.granite import granite_configs
 from torchtitan.models.granite.model import GraniteModel, GraniteTransformerBlock
 from torchtitan.models.granite.state_dict_adapter import GraniteStateDictAdapter
@@ -295,6 +296,139 @@ class TestGraniteRealCheckpoint(unittest.TestCase):
             tt_logits = tt_model(tokens).cpu()
 
         torch.testing.assert_close(tt_logits, hf_logits, atol=1e-4, rtol=0.0)
+
+
+class TestGraniteRoPEBuffer(unittest.TestCase):
+    """Verify RoPE buffer integrity (complex64 dtype, shape, device safety)."""
+
+    def setUp(self):
+        self.config = granite_configs["debugmodel"]()
+        self.model = GraniteModel(self.config)
+        self.model.init_states()
+
+    def test_freqs_cis_is_complex64(self):
+        self.assertTrue(self.model.freqs_cis.is_complex())
+        self.assertEqual(self.model.freqs_cis.dtype, torch.complex64)
+
+    def test_freqs_cis_survives_device_move(self):
+        original = self.model.freqs_cis.clone()
+        self.model.to(device="cpu")
+        self.assertTrue(self.model.freqs_cis.is_complex())
+        self.assertEqual(self.model.freqs_cis.dtype, torch.complex64)
+        torch.testing.assert_close(self.model.freqs_cis, original)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_freqs_cis_survives_cuda_move(self):
+        original = self.model.freqs_cis.clone()
+        self.model.to(device="cuda")
+        self.assertTrue(self.model.freqs_cis.is_complex())
+        self.assertEqual(self.model.freqs_cis.dtype, torch.complex64)
+        torch.testing.assert_close(self.model.freqs_cis.cpu(), original)
+
+    def test_freqs_cis_max_seq_len_coverage(self):
+        self.assertEqual(
+            self.model.freqs_cis.shape[0], self.config.rope.max_seq_len
+        )
+
+    def test_rope_complex_matches_manual_rotation(self):
+        """Verify complex-backend RoPE matches manual complex rotation at high positions."""
+        config = self.config
+        head_dim = config.rope.dim
+        theta = config.rope.theta
+        max_seq_len = config.rope.max_seq_len
+
+        positions_to_test = [0, 1, 1000, 50_000, max_seq_len - 1]
+
+        freqs_cis = self.model.freqs_cis
+
+        torch.manual_seed(42)
+        n_heads = 4
+        x = torch.randn(1, len(positions_to_test), n_heads, head_dim)
+
+        # Apply complex-backend RoPE using the actual function
+        freqs_for_positions = freqs_cis[positions_to_test]
+        xq_complex, _ = apply_rotary_emb_complex(
+            x, x, freqs_for_positions, positions=None
+        )
+
+        # Manually compute the same rotation: pair adjacent elements as complex,
+        # multiply by cis(pos * freq), then view as real.
+        inv_freq = 1.0 / (
+            theta
+            ** (torch.arange(0, head_dim, 2)[: head_dim // 2].float() / head_dim)
+        )
+        pos_tensor = torch.tensor(positions_to_test, dtype=torch.float32)
+        angles = torch.outer(pos_tensor, inv_freq)  # (S, head_dim//2)
+        cos = angles.cos().unsqueeze(0).unsqueeze(2)  # (1, S, 1, head_dim//2)
+        sin = angles.sin().unsqueeze(0).unsqueeze(2)
+
+        # Complex backend pairs (x[2i], x[2i+1]) as real/imag
+        x_pairs = x.float().reshape(1, len(positions_to_test), n_heads, head_dim // 2, 2)
+        x_real = x_pairs[..., 0]  # (1, S, n_heads, head_dim//2)
+        x_imag = x_pairs[..., 1]
+
+        out_real = x_real * cos - x_imag * sin
+        out_imag = x_real * sin + x_imag * cos
+        xq_manual = torch.stack([out_real, out_imag], dim=-1).flatten(-2)
+
+        torch.testing.assert_close(xq_complex, xq_manual, atol=1e-5, rtol=1e-5)
+
+
+class TestGraniteRoPEAgreement(unittest.TestCase):
+    """Long-sequence logit agreement between torchtitan and HF (requires checkpoint)."""
+
+    def setUp(self):
+        from dotenv import load_dotenv
+
+        load_dotenv()
+        self.ckpt_path = os.getenv("HF_ASSETS_PATH")
+        if self.ckpt_path is None:
+            raise EnvironmentError(
+                "HF_ASSETS_PATH not set. Add it to .env or export it before "
+                "running RoPE agreement tests."
+            )
+
+    def _load_models(self, device: str, seq_len: int):
+        from transformers import AutoModelForCausalLM
+
+        tokens = torch.randint(1, 1000, (1, seq_len), dtype=torch.long).to(device)
+
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            self.ckpt_path, torch_dtype=torch.float32
+        )
+        hf_sd = hf_model.state_dict()
+        hf_model.to(device=device).eval()
+        with torch.no_grad():
+            hf_logits = hf_model(tokens).logits.cpu()
+        del hf_model
+        if device == "cuda":
+            torch.cuda.empty_cache()
+
+        config = granite_configs["8B"]()
+        adapter = GraniteStateDictAdapter(config, hf_assets_path=self.ckpt_path)
+        tt_sd = adapter.from_hf(hf_sd)
+
+        tt_model = GraniteModel(config)
+        tt_model.init_states()
+        tt_model.load_state_dict(tt_sd, strict=True)
+        tt_model.to(device=device).eval()
+        with torch.no_grad():
+            tt_logits = tt_model(tokens).cpu()
+
+        return tt_logits, hf_logits
+
+    def test_long_sequence_logits_match_hf(self):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        seq_len = 4096
+        tt_logits, hf_logits = self._load_models(device, seq_len)
+        # Slightly looser than the 8-token test (1e-4) to account for float32
+        # accumulation over 4096 positions through 40 layers.
+        torch.testing.assert_close(tt_logits, hf_logits, atol=2e-4, rtol=0.0)
+        # Specifically check late positions where RoPE rotations are largest —
+        # a rope bug would show up here first.
+        torch.testing.assert_close(
+            tt_logits[:, -256:, :], hf_logits[:, -256:, :], atol=2e-4, rtol=0.0
+        )
 
 
 if __name__ == "__main__":
