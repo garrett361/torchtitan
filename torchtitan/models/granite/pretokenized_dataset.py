@@ -407,60 +407,61 @@ class TruncateLastBufferDataset(TruncateLastDataset):
                 )
                 continue
 
-            inputs_buf: list[int] = []
-            labels_buf: list[int] = []
-            positions_buf: list[int] = []
-            batch_n_total = 0
-            batch_n_trained = 0
-            batch_n_examples = 0
+            yield self._pack_one_batch()
 
-            # Step 1: oldest (FIFO guarantee)
-            oldest_ids, oldest_lbls = self._buffer.pop(0)
-            inputs_buf.extend(oldest_ids)
-            labels_buf.extend(oldest_lbls)
-            positions_buf.extend(range(len(oldest_ids)))
-            batch_n_total += len(oldest_ids)
-            batch_n_trained += sum(1 for lbl in oldest_lbls if lbl != IGNORE_INDEX)
+    def _start_batch(
+        self,
+    ) -> tuple[list[int], list[int], list[int], int, int, int]:
+        """Pop oldest from buffer (FIFO), return initial batch state."""
+        oldest_ids, oldest_lbls = self._buffer.pop(0)
+        inputs_buf = list(oldest_ids)
+        labels_buf = list(oldest_lbls)
+        positions_buf = list(range(len(oldest_ids)))
+        batch_n_total = len(oldest_ids)
+        batch_n_trained = sum(1 for lbl in oldest_lbls if lbl != IGNORE_INDEX)
+        batch_n_examples = 1
+        return inputs_buf, labels_buf, positions_buf, batch_n_total, batch_n_trained, batch_n_examples
+
+    def _pack_one_batch(self):
+        inputs_buf, labels_buf, positions_buf, batch_n_total, batch_n_trained, batch_n_examples = self._start_batch()
+
+        while True:
+            remaining = self.seq_len - len(inputs_buf)
+            if remaining <= 0:
+                break
+            best_idx = -1
+            best_len = 0
+            for i, (ids, _) in enumerate(self._buffer):
+                L = len(ids)
+                if L <= remaining and L > best_len:
+                    best_idx = i
+                    best_len = L
+            if best_idx == -1:
+                break
+            picked_ids, picked_lbls = self._buffer.pop(best_idx)
+            inputs_buf.extend(picked_ids)
+            labels_buf.extend(picked_lbls)
+            positions_buf.extend(range(len(picked_ids)))
+            batch_n_total += len(picked_ids)
+            batch_n_trained += sum(
+                1 for lbl in picked_lbls if lbl != IGNORE_INDEX
+            )
             batch_n_examples += 1
 
-            # Step 2: largest-fit from remaining buffer
-            while True:
-                remaining = self.seq_len - len(inputs_buf)
-                if remaining <= 0:
-                    break
-                best_idx = -1
-                best_len = 0
-                for i, (ids, _) in enumerate(self._buffer):
-                    L = len(ids)
-                    if L <= remaining and L > best_len:
-                        best_idx = i
-                        best_len = L
-                if best_idx == -1:
-                    break
-                picked_ids, picked_lbls = self._buffer.pop(best_idx)
-                inputs_buf.extend(picked_ids)
-                labels_buf.extend(picked_lbls)
-                positions_buf.extend(range(len(picked_ids)))
-                batch_n_total += len(picked_ids)
-                batch_n_trained += sum(
-                    1 for lbl in picked_lbls if lbl != IGNORE_INDEX
-                )
-                batch_n_examples += 1
+        pad_len = self.seq_len - len(inputs_buf)
+        if pad_len > 0:
+            inputs_buf.extend([self._eos_id] * pad_len)
+            labels_buf.extend([IGNORE_INDEX] * pad_len)
+            positions_buf.extend(range(pad_len))
 
-            pad_len = self.seq_len - len(inputs_buf)
-            if pad_len > 0:
-                inputs_buf.extend([self._eos_id] * pad_len)
-                labels_buf.extend([IGNORE_INDEX] * pad_len)
-                positions_buf.extend(range(pad_len))
-
-            yield self._flush(
-                inputs_buf,
-                labels_buf,
-                positions_buf,
-                batch_n_total,
-                batch_n_trained,
-                batch_n_examples,
-            )
+        return self._flush(
+            inputs_buf,
+            labels_buf,
+            positions_buf,
+            batch_n_total,
+            batch_n_trained,
+            batch_n_examples,
+        )
 
     def state_dict(self) -> dict[str, Any]:
         d = super().state_dict()
@@ -471,6 +472,59 @@ class TruncateLastBufferDataset(TruncateLastDataset):
         buffer = state_dict.pop("buffer", [])
         super().load_state_dict(state_dict)
         self._buffer = [(list(ids), list(lbls)) for ids, lbls in buffer]
+
+
+class TruncateLastCostBalancedDataset(TruncateLastBufferDataset):
+    """Cost-balanced packing: targets uniform attention cost per sequence.
+
+    Selects buffer examples to minimize |sum(l_i²) - T| where T is the
+    expected attention cost derived from manifest length stats.
+    """
+
+    def __init__(self, *args, target_cost: float, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._target_cost = target_cost
+
+    def _pack_one_batch(self):
+        inputs_buf, labels_buf, positions_buf, batch_n_total, batch_n_trained, batch_n_examples = self._start_batch()
+        current_cost = len(inputs_buf) ** 2
+
+        while True:
+            remaining = self.seq_len - len(inputs_buf)
+            if remaining <= 0:
+                break
+            best_idx, best_gap = -1, float("inf")
+            for i, (ids, _) in enumerate(self._buffer):
+                L = len(ids)
+                if L > remaining:
+                    continue
+                gap = abs(current_cost + L * L - self._target_cost)
+                if gap < best_gap:
+                    best_gap = gap
+                    best_idx = i
+            if best_idx == -1:
+                break
+            picked_ids, picked_lbls = self._buffer.pop(best_idx)
+            current_cost += len(picked_ids) ** 2
+            inputs_buf.extend(picked_ids)
+            labels_buf.extend(picked_lbls)
+            positions_buf.extend(range(len(picked_ids)))
+            batch_n_total += len(picked_ids)
+            batch_n_trained += sum(1 for lbl in picked_lbls if lbl != IGNORE_INDEX)
+            batch_n_examples += 1
+
+        pad_len = self.seq_len - len(inputs_buf)
+        if pad_len > 0:
+            inputs_buf.extend([self._eos_id] * pad_len)
+            labels_buf.extend([IGNORE_INDEX] * pad_len)
+            positions_buf.extend(range(pad_len))
+
+        result = self._flush(
+            inputs_buf, labels_buf, positions_buf,
+            batch_n_total, batch_n_trained, batch_n_examples,
+        )
+        result[2]["batch_attention_cost"] = current_cost
+        return result
 
 
 _DATASET_CLASSES: dict[str, type[PreTokenizedDataset]] = {
@@ -501,10 +555,11 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         """Keep shuffle index in memory instead of writing a cache file to the shard
         directory. Avoids filesystem contention when many ranks start simultaneously."""
 
-        packing: Literal["greedy", "buffer"] = "buffer"
+        packing: Literal["greedy", "buffer", "cost_balanced"] = "buffer"
         """Packing algorithm. 'buffer' maintains a lookahead buffer and selects
         largest-fitting examples (~99.9% efficiency at 128k seq_len). 'greedy'
-        packs in sequential order (simpler but ~86% efficiency at 128k)."""
+        packs in sequential order (simpler but ~86% efficiency at 128k).
+        'cost_balanced' targets uniform attention cost per sequence."""
 
         buffer_size: int = 64
         """Number of examples held in the lookahead buffer (per worker).
@@ -547,6 +602,40 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
                 )
             dataset = TruncateLastBufferDataset(
                 **dataset_kwargs, buffer_size=config.buffer_size
+            )
+        elif config.packing == "cost_balanced":
+            if strategy != "truncate_last":
+                raise ValueError(
+                    f"Cost-balanced packing only supports 'truncate_last' strategy, "
+                    f"got {strategy!r}"
+                )
+            length_stats = manifest.get("stats", {}).get("length_stats")
+            if not length_stats:
+                raise ValueError(
+                    f"cost_balanced packing requires 'length_stats' in manifest. "
+                    f"Run patch_manifest_stats.py on {config.manifest_path}"
+                )
+            _CUTOFFS = [16384, 32768, 65536, 131072, 262144, 524288]
+            valid_cutoffs = [
+                c for c in _CUTOFFS
+                if c <= seq_len and f"tokens_per_example_{c // 1024}kmax" in length_stats
+            ]
+            if not valid_cutoffs:
+                raise ValueError(
+                    f"No valid cutoff ≤ seq_len={seq_len} with tokens_per_example stats "
+                    f"in manifest {config.manifest_path}"
+                )
+            cutoff = max(valid_cutoffs)
+            k = cutoff // 1024
+            sq_tokens = length_stats[f"squared_tokens_per_example_{k}kmax"]
+            mean_tokens = length_stats[f"tokens_per_example_{k}kmax"]
+            target_cost = seq_len * sq_tokens / mean_tokens
+            logger.info(
+                "Cost-balanced packing: target_cost=%.2e (T/seq²=%.3f, cutoff=%dk)",
+                target_cost, target_cost / seq_len**2, k,
+            )
+            dataset = TruncateLastCostBalancedDataset(
+                **dataset_kwargs, buffer_size=config.buffer_size, target_cost=target_cost
             )
         else:
             dataset = _DATASET_CLASSES[strategy](**dataset_kwargs)
