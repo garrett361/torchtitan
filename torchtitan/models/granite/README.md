@@ -1,5 +1,43 @@
 # Granite SFT
 
+## Float8 Training
+
+Float8 quantized training is supported via `torchao` (>= 0.18.0, built from source for
+GB200). Config registry entries:
+
+- `granite_debugmodel_float8` — tensorwise with FSDP all-gather (single-GPU unit tests)
+- `granite_debugmodel_float8_rowwise` — rowwise (multi-GPU integration tests)
+- `granite_4_1_8b_sft_pretokenized_float8_filteroutput` — tensorwise + all-gather, output filtered
+- `granite_4_1_8b_sft_pretokenized_float8_rowwise` — rowwise recipe
+
+### Known issue: tensorwise + FSDP float8 all-gather + weight tying
+
+Tensorwise with `enable_fsdp_float8_all_gather=True` (without filtering `output`)
+crashes during FSDP lazy init:
+
+```
+RuntimeError: Attempted to access the data pointer on an invalid python storage.
+  File "torch/distributed/fsdp/_fully_shard/_fsdp_param.py", line 950, in reset_sharded_param
+```
+
+Root cause: FSDP2's float8 all-gather path calls `reset_sharded_param()` which accesses
+the storage data pointer of the parameter. Granite's weight tying
+(`tok_embeddings.weight = output.weight`) results in the same underlying storage being
+referenced by two FSDP param groups. When one group processes it, the other's reference
+becomes invalid.
+
+**Why only `output` needs filtering**: `tok_embeddings` is `nn.Embedding`, not `nn.Linear`.
+`Float8LinearConverter` (via torchao's `swap_linear_with_float8_linear`) only converts
+`nn.Linear` modules, so the embedding is never a conversion target. Filtering `output`
+prevents it from becoming `Float8Linear`, keeping both sides of the weight tie as plain
+parameters that FSDP2 handles correctly.
+
+**Workaround**: Use the rowwise recipe (`granite_4_1_8b_sft_pretokenized_float8_rowwise`)
+which does not use float8 all-gather and works correctly. Alternatively, filter the output
+layer from float8 conversion (`filter_fqns=["output"]`) to avoid the double-registration.
+
+Observed: torch 2.13.0.dev20260422+cu130, torchao 0.18.0+git6367fd63, 4xGB200.
+
 ## Chat Template Behavior
 
 Template: `chat_template.jinja` (ChatML-style with thinking support).

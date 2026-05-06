@@ -11,8 +11,10 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.quantization.float8 import Float8LinearConverter
 from torchtitan.config import ActivationCheckpointConfig, TrainingConfig
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -257,3 +259,49 @@ def granite_4_1_8b_base() -> Trainer.Config:
             mode="selective",
         ),
     )
+
+
+def granite_debugmodel_float8() -> Trainer.Config:
+    config = granite_debugmodel()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            Float8LinearConverter.Config(
+                enable_fsdp_float8_all_gather=True,
+                precompute_float8_dynamic_scale_for_fsdp=True,
+            ),
+        ],
+    )
+    return config
+
+
+def granite_debugmodel_float8_rowwise() -> Trainer.Config:
+    config = granite_debugmodel()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[Float8LinearConverter.Config(recipe_name="rowwise")],
+    )
+    return config
+
+
+
+def granite_4_1_8b_sft_pretokenized_float8_filteroutput() -> Trainer.Config:
+    config = granite_4_1_8b_sft_pretokenized()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            Float8LinearConverter.Config(
+                enable_fsdp_float8_all_gather=True,
+                precompute_float8_dynamic_scale_for_fsdp=True,
+                filter_fqns=["output"],
+            ),
+        ],
+    )
+    return config
+
+
+def granite_4_1_8b_sft_pretokenized_float8_rowwise() -> Trainer.Config:
+    config = granite_4_1_8b_sft_pretokenized()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            Float8LinearConverter.Config(recipe_name="rowwise"),
+        ],
+    )
+    return config

@@ -15,12 +15,14 @@ from tests.integration_tests import OverrideDefinitions
 from tests.integration_tests.features import build_features_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
 from tests.integration_tests.models import build_model_tests_list
+from torchtitan.models.granite.tests.integration import build_granite_tests_list
 
 
 _TEST_SUITES_FUNCTION = {
     "features": build_features_test_list,
     "models": build_model_tests_list,
     "h100": build_h100_tests_list,
+    "granite": build_granite_tests_list,
 }
 
 
@@ -164,7 +166,7 @@ def main():
     parser.add_argument(
         "--test_suite",
         default="features",
-        choices=["features", "models", "h100"],
+        choices=["features", "models", "h100", "granite"],
         help="Which test suite to run. If not specified, torchtitan composability tests will be run",
     )
     parser.add_argument(
