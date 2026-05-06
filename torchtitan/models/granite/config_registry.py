@@ -175,8 +175,9 @@ def granite_4_1_8b_sft_pretokenized() -> Trainer.Config:
     """SFT config for granite-4.1-8b using pre-tokenized Arrow shards.
 
     Requires HF_ASSETS_PATH and PRETOK_DATA_PATH set in the environment or a
-    .env file at the repo root. PRETOK_DATA_PATH must point to the directory
-    containing manifest.json (output of pretokenize_sft.py).
+    .env file at the repo root. PRETOK_DATA_PATH may be a single directory
+    containing manifest.json, or a comma-separated list of such directories
+    to merge into a single training pool.
     """
     from dotenv import load_dotenv
 
@@ -189,6 +190,9 @@ def granite_4_1_8b_sft_pretokenized() -> Trainer.Config:
     ]:
         if val is None:
             raise ValueError(f"{name} not set. Add it to .env or export it before running.")
+
+    paths = [p.strip() for p in pretok_data_path.split(",") if p.strip()]
+    manifest_path_str = ",".join(str(Path(p) / "manifest.json") for p in paths)
 
     return Trainer.Config(
         hf_assets_path=ckpt_path,
@@ -206,7 +210,7 @@ def granite_4_1_8b_sft_pretokenized() -> Trainer.Config:
             steps=1000,
         ),
         dataloader=GranitePreTokenizedDataLoader.Config(
-            manifest_path=str(Path(pretok_data_path) / "manifest.json"),
+            manifest_path=manifest_path_str,
         ),
         metrics=MetricsProcessor.Config(log_freq=10),
         checkpoint=CheckpointManager.Config(interval=500),

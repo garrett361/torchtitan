@@ -44,6 +44,109 @@ def _load_shards(manifest: dict[str, Any], shards_dir: Path) -> Dataset:
     )
 
 
+_SEQ_LEN_CUTOFFS_K = [16, 32, 64, 128, 256, 512]
+
+
+def _load_and_merge_manifests(
+    manifest_paths: list[Path],
+) -> tuple[dict[str, Any], Dataset]:
+    """Load multiple manifests, validate compatibility, and merge into one Dataset.
+
+    Returns a synthetic merged manifest (with combined stats) and the
+    concatenated Dataset ready for shuffle + DP sharding.
+    """
+    manifests = [_load_manifest(p) for p in manifest_paths]
+
+    ref = manifests[0]
+    for i, m in enumerate(manifests[1:], 1):
+        if m["strategy"] != ref["strategy"]:
+            raise ValueError(
+                f"Strategy mismatch: {manifest_paths[0]} has {ref['strategy']!r}, "
+                f"{manifest_paths[i]} has {m['strategy']!r}"
+            )
+        if m["tokenizer"]["eos_token_id"] != ref["tokenizer"]["eos_token_id"]:
+            raise ValueError(
+                f"eos_token_id mismatch between {manifest_paths[0]} and "
+                f"{manifest_paths[i]}"
+            )
+        if m["tokenizer"]["vocab_size"] != ref["tokenizer"]["vocab_size"]:
+            raise ValueError(
+                f"vocab_size mismatch between {manifest_paths[0]} and "
+                f"{manifest_paths[i]}"
+            )
+        ref_kwargs = ref.get("chat_template_kwargs", {})
+        m_kwargs = m.get("chat_template_kwargs", {})
+        if ref_kwargs != m_kwargs:
+            logger.warning(
+                "chat_template_kwargs differ between %s (%s) and %s (%s)",
+                manifest_paths[0],
+                ref_kwargs,
+                manifest_paths[i],
+                m_kwargs,
+            )
+
+    all_datasets = []
+    for path, manifest in zip(manifest_paths, manifests):
+        shards_dir = path.parent / "shards"
+        all_datasets.append(_load_shards(manifest, shards_dir))
+    combined = concatenate_datasets(all_datasets)
+
+    total_examples = sum(m["stats"]["total_examples"] for m in manifests)
+    total_tokens = sum(m["stats"]["total_tokens"] for m in manifests)
+    total_trained_tokens = sum(
+        m["stats"].get("total_trained_tokens", 0) for m in manifests
+    )
+
+    # Merge length_stats via weighted averages (exact for means)
+    all_length_stats = [m["stats"].get("length_stats") for m in manifests]
+    merged_length_stats: dict[str, Any] | None = None
+    if all(ls is not None for ls in all_length_stats):
+        merged_length_stats = {}
+        for k in _SEQ_LEN_CUTOFFS_K:
+            sq_key = f"squared_tokens_per_example_{k}kmax"
+            mean_key = f"tokens_per_example_{k}kmax"
+            n_key = f"n_examples_{k}kmax"
+
+            total_n = sum(ls.get(n_key, 0) for ls in all_length_stats)
+            if total_n > 0:
+                merged_length_stats[sq_key] = round(
+                    sum(ls.get(n_key, 0) * ls.get(sq_key, 0) for ls in all_length_stats)
+                    / total_n,
+                    1,
+                )
+                merged_length_stats[mean_key] = round(
+                    sum(ls.get(n_key, 0) * ls.get(mean_key, 0) for ls in all_length_stats)
+                    / total_n,
+                    1,
+                )
+                merged_length_stats[n_key] = total_n
+            else:
+                merged_length_stats[sq_key] = None
+                merged_length_stats[mean_key] = None
+                merged_length_stats[n_key] = 0
+
+    merged_manifest: dict[str, Any] = {
+        "version": ref["version"],
+        "strategy": ref["strategy"],
+        "tokenizer": ref["tokenizer"],
+        "stats": {
+            "total_examples": total_examples,
+            "total_tokens": total_tokens,
+            "total_trained_tokens": total_trained_tokens,
+            "length_stats": merged_length_stats,
+        },
+    }
+
+    logger.info(
+        "Merged %d datasets: %s total examples, %s total tokens",
+        len(manifests),
+        f"{total_examples:,}",
+        f"{total_tokens:,}",
+    )
+
+    return merged_manifest, combined
+
+
 class PreTokenizedDataset(IterableDataset, Stateful):
     """Abstract base for pre-tokenized SFT datasets.
 
@@ -70,12 +173,18 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         shuffle_in_memory: bool = True,
         tokenizer: BaseTokenizer | None = None,
         _manifest: dict[str, Any] | None = None,
+        _full_dataset: Dataset | None = None,
+        _dataset_id: str | None = None,
     ) -> None:
         manifest_path = Path(manifest_path)
         manifest = _manifest if _manifest is not None else _load_manifest(manifest_path)
-        shards_dir = manifest_path.parent / "shards"
 
-        full_dataset = _load_shards(manifest, shards_dir)
+        if _full_dataset is not None:
+            full_dataset = _full_dataset
+        else:
+            shards_dir = manifest_path.parent / "shards"
+            full_dataset = _load_shards(manifest, shards_dir)
+
         # Shuffle before sharding so every DP rank gets a representative length
         # distribution. split_dataset_by_node on a Dataset always returns a Dataset.
         self._shuffle_in_memory = shuffle_in_memory
@@ -92,7 +201,7 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         self._eos_id: int = manifest["tokenizer"]["eos_token_id"]
         self._tokenizer = tokenizer
         self._cp_rank = cp_rank
-        self._dataset_id = f"pretok:{manifest_path}"
+        self._dataset_id = _dataset_id or f"pretok:{manifest_path}"
         self.seq_len = seq_len
         self.infinite = infinite
 
@@ -546,7 +655,9 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
     @dataclass(kw_only=True, slots=True)
     class Config(ParallelAwareDataloader.Config):
         manifest_path: str
-        """Path to manifest.json produced by pretokenize_sft.py."""
+        """Path to manifest.json produced by pretokenize_sft.py, or a
+        comma-separated list of dataset directories (each containing
+        manifest.json) to merge into a single training pool."""
 
         infinite: bool = True
         """Loop the dataset indefinitely."""
@@ -576,7 +687,25 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         local_batch_size: int,
         cp_rank: int = 0,
     ) -> None:
-        manifest = _load_manifest(Path(config.manifest_path))
+        # Parse comma-separated paths
+        raw_paths = [p.strip() for p in config.manifest_path.split(",") if p.strip()]
+        manifest_paths: list[Path] = []
+        for p in raw_paths:
+            path = Path(p)
+            if path.suffix != ".json":
+                path = path / "manifest.json"
+            manifest_paths.append(path)
+
+        if len(manifest_paths) > 1:
+            manifest, full_dataset = _load_and_merge_manifests(manifest_paths)
+            dataset_id = (
+                f"pretok:merged[{','.join(p.parent.parent.name for p in manifest_paths)}]"
+            )
+        else:
+            manifest = _load_manifest(manifest_paths[0])
+            full_dataset = None
+            dataset_id = None
+
         strategy = manifest.get("strategy")
         if strategy not in _DATASET_CLASSES:
             raise ValueError(
@@ -584,7 +713,7 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
                 f"Supported: {sorted(_DATASET_CLASSES)}"
             )
         dataset_kwargs = dict(
-            manifest_path=config.manifest_path,
+            manifest_path=str(manifest_paths[0]),
             seq_len=seq_len,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
@@ -593,6 +722,8 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
             shuffle_in_memory=config.shuffle_in_memory,
             tokenizer=tokenizer,
             _manifest=manifest,
+            _full_dataset=full_dataset,
+            _dataset_id=dataset_id,
         )
         if config.packing == "buffer":
             if strategy != "truncate_last":
@@ -612,8 +743,8 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
             length_stats = manifest.get("stats", {}).get("length_stats")
             if not length_stats:
                 raise ValueError(
-                    f"cost_balanced packing requires 'length_stats' in manifest. "
-                    f"Run patch_manifest_stats.py on {config.manifest_path}"
+                    f"cost_balanced packing requires 'length_stats' in manifest(s). "
+                    f"Re-run pretokenize_sft.py to generate stats."
                 )
             _CUTOFFS = [16384, 32768, 65536, 131072, 262144, 524288]
             valid_cutoffs = [

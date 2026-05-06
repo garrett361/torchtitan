@@ -1,4 +1,4 @@
-"""Tests for cost-balanced packing in pretokenized_dataset.py."""
+"""Tests for pretokenized_dataset.py: cost-balanced packing and multi-dataset merge."""
 
 import json
 import os
@@ -10,9 +10,12 @@ from torchtitan.models.granite.pretokenized_dataset import (
     GranitePreTokenizedDataLoader,
     TruncateLastBufferDataset,
     TruncateLastCostBalancedDataset,
+    _load_and_merge_manifests,
+    _load_manifest,
 )
 
 MANIFEST_PATH = Path("tests/assets/pretok_truncate_last/manifest.json")
+MANIFEST_PATH_B = Path("tests/assets/pretok_truncate_last_b/manifest.json")
 
 
 def _make_manifest_with_length_stats(seq_len: int = 16) -> dict:
@@ -349,6 +352,121 @@ class TestCostBalancedE2E(unittest.TestCase):
             buffer_std,
             f"Cost-balanced std={cost_std:.0f} should be < buffer std={buffer_std:.0f}",
         )
+
+
+class TestMultiDatasetMerge(unittest.TestCase):
+    """Tests for comma-separated multi-dataset loading and manifest merging."""
+
+    def test_merge_combines_examples(self):
+        """Merging two datasets produces combined example count."""
+        manifest, dataset = _load_and_merge_manifests([MANIFEST_PATH, MANIFEST_PATH_B])
+        self.assertEqual(manifest["stats"]["total_examples"], 12)
+        self.assertEqual(manifest["stats"]["total_tokens"], 68)
+        self.assertEqual(len(dataset), 12)
+
+    def test_merge_validates_strategy_mismatch(self):
+        """Mismatched strategies raise ValueError."""
+        import tempfile
+
+        m = _load_manifest(MANIFEST_PATH)
+        m["strategy"] = "some_other_strategy"
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as f:
+            json.dump(m, f)
+            bad_path = Path(f.name)
+        try:
+            with self.assertRaises(ValueError, msg="Strategy mismatch"):
+                _load_and_merge_manifests([MANIFEST_PATH, bad_path])
+        finally:
+            bad_path.unlink()
+
+    def test_merge_validates_eos_mismatch(self):
+        """Mismatched eos_token_id raises ValueError."""
+        import tempfile
+
+        m = _load_manifest(MANIFEST_PATH)
+        m["tokenizer"]["eos_token_id"] = 9999
+        # Need a shards dir alongside the manifest
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_file = Path(tmpdir) / "manifest.json"
+            with open(manifest_file, "w") as f:
+                json.dump(m, f)
+            with self.assertRaises(ValueError, msg="eos_token_id mismatch"):
+                _load_and_merge_manifests([MANIFEST_PATH, manifest_file])
+
+    def test_merge_length_stats_weighted_average(self):
+        """Merged length_stats use correct weighted averages."""
+        manifest, _ = _load_and_merge_manifests([MANIFEST_PATH, MANIFEST_PATH_B])
+        ls = manifest["stats"]["length_stats"]
+
+        # Dataset A: n=4, sq=20.0, mean=4.0
+        # Dataset B: n=6, sq=40.0, mean=6.0
+        # Merged: sq = (4*20 + 6*40) / (4+6) = 320/10 = 32.0
+        # Merged: mean = (4*4 + 6*6) / (4+6) = 52/10 = 5.2
+        self.assertAlmostEqual(ls["squared_tokens_per_example_16kmax"], 32.0, places=1)
+        self.assertAlmostEqual(ls["tokens_per_example_16kmax"], 5.2, places=1)
+        self.assertEqual(ls["n_examples_16kmax"], 10)
+
+    def test_merge_preserves_tokenizer_info(self):
+        """Merged manifest retains tokenizer from first dataset."""
+        manifest, _ = _load_and_merge_manifests([MANIFEST_PATH, MANIFEST_PATH_B])
+        self.assertEqual(manifest["tokenizer"]["eos_token_id"], 2003)
+        self.assertEqual(manifest["tokenizer"]["vocab_size"], 2009)
+        self.assertEqual(manifest["strategy"], "truncate_last")
+
+    def test_single_path_no_merge(self):
+        """Single path in comma-separated string behaves like non-merged."""
+        config = GranitePreTokenizedDataLoader.Config(
+            manifest_path=str(MANIFEST_PATH),
+        )
+        loader = GranitePreTokenizedDataLoader(
+            config,
+            dp_world_size=1,
+            dp_rank=0,
+            tokenizer=None,
+            seq_len=16,
+            local_batch_size=1,
+        )
+        self.assertEqual(loader.dataset.num_examples, 6)
+
+    def test_multi_path_iteration(self):
+        """Multi-dataset comma-separated path produces correct iteration."""
+        config = GranitePreTokenizedDataLoader.Config(
+            manifest_path=f"{MANIFEST_PATH},{MANIFEST_PATH_B}",
+            infinite=False,
+            packing="greedy",
+        )
+        loader = GranitePreTokenizedDataLoader(
+            config,
+            dp_world_size=1,
+            dp_rank=0,
+            tokenizer=None,
+            seq_len=16,
+            local_batch_size=1,
+        )
+        self.assertEqual(loader.dataset.num_examples, 12)
+        batches = list(loader)
+        self.assertGreater(len(batches), 0)
+
+    def test_multi_path_directory_format(self):
+        """Paths without .json suffix get /manifest.json appended."""
+        dir_a = str(MANIFEST_PATH.parent)
+        dir_b = str(MANIFEST_PATH_B.parent)
+        config = GranitePreTokenizedDataLoader.Config(
+            manifest_path=f"{dir_a},{dir_b}",
+            infinite=False,
+            packing="greedy",
+        )
+        loader = GranitePreTokenizedDataLoader(
+            config,
+            dp_world_size=1,
+            dp_rank=0,
+            tokenizer=None,
+            seq_len=16,
+            local_batch_size=1,
+        )
+        self.assertEqual(loader.dataset.num_examples, 12)
 
 
 if __name__ == "__main__":
