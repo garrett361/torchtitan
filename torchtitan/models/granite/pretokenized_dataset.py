@@ -16,7 +16,7 @@ from abc import abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, NamedTuple, cast
 
 import torch
 from datasets import Dataset, concatenate_datasets, load_from_disk
@@ -636,8 +636,280 @@ class TruncateLastCostBalancedDataset(TruncateLastBufferDataset):
         return result
 
 
+class _BackboneSuffixItem(NamedTuple):
+    input_ids: list[int]
+    labels: list[int]
+    positions: list[int]
+    suffix_starts: list[int]
+    insertion_limits: list[int]
+
+
+class BackboneSuffixDataset(PreTokenizedDataset):
+    """Buffer-packing for backbone+suffix pre-tokenized data.
+
+    Reads (input_ids, labels, positions, suffix_starts, insertion_limits, n_tokens)
+    and expands the compressed suffix_starts/insertion_limits into per-token
+    [seq_len] tensors (conv_ids, suffix_ids, insertion_limits) for flex attention.
+    """
+
+    def __init__(self, *args, buffer_size: int = 64, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._buffer_size = buffer_size
+        self._buffer: list[_BackboneSuffixItem] = []
+        self._data_iter: Iterator | None = None
+        self._data_exhausted: bool = False
+
+    def _tokenize_sample(self, sample: dict) -> _BackboneSuffixItem | None:
+        n_tokens = sample["n_tokens"]
+        if n_tokens > self.seq_len:
+            logger.debug(
+                "Dropping backbone_suffix sample %d: %d tokens > seq_len %d",
+                self._sample_idx,
+                n_tokens,
+                self.seq_len,
+            )
+            return None
+        input_ids = list(sample["input_ids"])
+        labels = list(sample["labels"])
+        positions = list(sample["positions"])
+        suffix_starts = list(sample["suffix_starts"])
+        insertion_limits = list(sample["insertion_limits"])
+        self._log_first_sample(input_ids, labels)
+        return _BackboneSuffixItem(input_ids, labels, positions, suffix_starts, insertion_limits)
+
+    def _refill_buffer(self) -> None:
+        while len(self._buffer) < self._buffer_size and not self._data_exhausted:
+            sample = next(self._data_iter, None)
+            if sample is None:
+                self._data_exhausted = True
+                break
+            result = self._tokenize_sample(sample)
+            self._sample_idx += 1
+            if result is None:
+                continue
+            self._buffer.append(result)
+
+    def __iter__(self):
+        self._prepare_iter()
+        yield from self._iter_buffer_packed()
+
+    def _prepare_iter(self) -> None:
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            self._worker_id = worker_info.id
+            self._num_workers = worker_info.num_workers
+        if self._epoch > 0:
+            self._data = cast(
+                Dataset,
+                self._original_data.shuffle(
+                    seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
+                ),
+            )
+        else:
+            self._data = self._original_data
+        if self._num_workers > 1:
+            self._data = cast(
+                Dataset,
+                split_dataset_by_node(self._data, self._worker_id, self._num_workers),
+            )
+        self._sample_idx = min(self._sample_idx, len(self._data))
+
+    def _iter_buffer_packed(self):
+        self._data_iter = self._get_data_iter()
+        self._data_exhausted = False
+
+        while True:
+            self._refill_buffer()
+
+            if not self._buffer:
+                if not self.infinite:
+                    break
+                self._sample_idx = 0
+                self._epoch += 1
+                self._data = cast(
+                    Dataset,
+                    self._original_data.shuffle(
+                        seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
+                    ),
+                )
+                if self._num_workers > 1:
+                    self._data = cast(
+                        Dataset,
+                        split_dataset_by_node(
+                            self._data, self._worker_id, self._num_workers
+                        ),
+                    )
+                self._data_iter = self._get_data_iter()
+                self._data_exhausted = False
+                logger.warning(
+                    "Dataset '%s' is being re-looped (epoch %d)",
+                    self._dataset_id,
+                    self._epoch,
+                )
+                continue
+
+            yield self._pack_one_batch()
+
+    def _pack_one_batch(
+        self,
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, dict[str, int]]:
+        inputs_buf: list[int] = []
+        labels_buf: list[int] = []
+        positions_buf: list[int] = []
+        conv_ids_buf: list[int] = []
+        suffix_ids_buf: list[int] = []
+        insertion_limits_buf: list[int] = []
+
+        batch_n_total = 0
+        batch_n_trained = 0
+        batch_n_examples = 0
+        conv_counter = 1
+        suffix_counter = 1
+
+        # FIFO: pop oldest first
+        oldest = self._buffer.pop(0)
+        suffix_counter = self._place_example(
+            oldest,
+            inputs_buf, labels_buf, positions_buf,
+            conv_ids_buf, suffix_ids_buf, insertion_limits_buf,
+            conv_counter, suffix_counter,
+        )
+        batch_n_total += len(oldest.input_ids)
+        batch_n_trained += sum(1 for lbl in oldest.labels if lbl != IGNORE_INDEX)
+        batch_n_examples += 1
+        conv_counter += 1
+
+        # Fill with largest-fitting
+        while True:
+            remaining = self.seq_len - len(inputs_buf)
+            if remaining <= 0:
+                break
+            best_idx = -1
+            best_len = 0
+            for i, item in enumerate(self._buffer):
+                L = len(item.input_ids)
+                if L <= remaining and L > best_len:
+                    best_idx = i
+                    best_len = L
+            if best_idx == -1:
+                break
+            picked = self._buffer.pop(best_idx)
+            suffix_counter = self._place_example(
+                picked,
+                inputs_buf, labels_buf, positions_buf,
+                conv_ids_buf, suffix_ids_buf, insertion_limits_buf,
+                conv_counter, suffix_counter,
+            )
+            batch_n_total += len(picked.input_ids)
+            batch_n_trained += sum(1 for lbl in picked.labels if lbl != IGNORE_INDEX)
+            batch_n_examples += 1
+            conv_counter += 1
+
+        # Pad
+        pad_len = self.seq_len - len(inputs_buf)
+        if pad_len > 0:
+            inputs_buf.extend([self._eos_id] * pad_len)
+            labels_buf.extend([IGNORE_INDEX] * pad_len)
+            positions_buf.extend(range(pad_len))
+            conv_ids_buf.extend([0] * pad_len)
+            suffix_ids_buf.extend([0] * pad_len)
+            insertion_limits_buf.extend([-1] * pad_len)
+
+        return (
+            {
+                "input": torch.tensor(inputs_buf, dtype=torch.long),
+                "positions": torch.tensor(positions_buf, dtype=torch.long),
+                "conv_ids": torch.tensor(conv_ids_buf, dtype=torch.long),
+                "suffix_ids": torch.tensor(suffix_ids_buf, dtype=torch.long),
+                "insertion_limits": torch.tensor(insertion_limits_buf, dtype=torch.long),
+            },
+            torch.tensor(labels_buf, dtype=torch.long),
+            {
+                "n_total_tokens": batch_n_total,
+                "n_trained_tokens": batch_n_trained,
+                "n_examples_packed": batch_n_examples,
+            },
+        )
+
+    def _place_example(
+        self,
+        item: _BackboneSuffixItem,
+        inputs_buf: list[int],
+        labels_buf: list[int],
+        positions_buf: list[int],
+        conv_ids_buf: list[int],
+        suffix_ids_buf: list[int],
+        insertion_limits_buf: list[int],
+        conv_id: int,
+        suffix_counter_start: int,
+    ) -> int:
+        """Place one example into the packed row buffers. Returns next suffix_counter."""
+        input_ids = item.input_ids
+        labels = item.labels
+        positions = item.positions
+        suffix_starts = item.suffix_starts
+        ins_limits = item.insertion_limits
+        off = len(inputs_buf)
+        n = len(input_ids)
+        backbone_len = suffix_starts[0] if suffix_starts else n
+
+        inputs_buf.extend(input_ids)
+        labels_buf.extend(labels)
+        positions_buf.extend(positions)
+        conv_ids_buf.extend([conv_id] * n)
+
+        # suffix_ids: 0 for backbone, counter for each suffix
+        local_suffix_ids = [0] * n
+        suffix_counter = suffix_counter_start
+        for k in range(len(suffix_starts)):
+            s_start = suffix_starts[k]
+            s_end = suffix_starts[k + 1] if k + 1 < len(suffix_starts) else n
+            for j in range(s_start, s_end):
+                local_suffix_ids[j] = suffix_counter
+            suffix_counter += 1
+        suffix_ids_buf.extend(local_suffix_ids)
+
+        # insertion_limits: backbone gets off + backbone_len - 1, each suffix gets off + its limit
+        local_ins_limits = [0] * n
+        backbone_limit = off + backbone_len - 1
+        for j in range(backbone_len):
+            local_ins_limits[j] = backbone_limit
+        for k in range(len(suffix_starts)):
+            s_start = suffix_starts[k]
+            s_end = suffix_starts[k + 1] if k + 1 < len(suffix_starts) else n
+            limit_val = off + ins_limits[k]
+            for j in range(s_start, s_end):
+                local_ins_limits[j] = limit_val
+        insertion_limits_buf.extend(local_ins_limits)
+
+        return suffix_counter
+
+    def state_dict(self) -> dict:
+        return {
+            "epoch": self._epoch,
+            "sample_idx": self._sample_idx,
+            "buffer": list(self._buffer),
+        }
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        self._epoch = state_dict["epoch"]
+        self._sample_idx = state_dict["sample_idx"]
+        self._buffer = [
+            _BackboneSuffixItem(list(ids), list(lbls), list(pos), list(ss), list(il))
+            for ids, lbls, pos, ss, il in state_dict.get("buffer", [])
+        ]
+        if self._epoch > 0:
+            self._data = cast(
+                Dataset,
+                self._original_data.shuffle(
+                    seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
+                ),
+            )
+
+
 _DATASET_CLASSES: dict[str, type[PreTokenizedDataset]] = {
     "truncate_last": TruncateLastDataset,
+    "backbone_suffix": BackboneSuffixDataset,
 }
 
 
@@ -725,7 +997,15 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
             _full_dataset=full_dataset,
             _dataset_id=dataset_id,
         )
-        if config.packing == "buffer":
+        if strategy == "backbone_suffix":
+            if config.packing == "cost_balanced":
+                raise ValueError(
+                    "cost_balanced packing not yet supported for backbone_suffix"
+                )
+            dataset = BackboneSuffixDataset(
+                **dataset_kwargs, buffer_size=config.buffer_size
+            )
+        elif config.packing == "buffer":
             if strategy != "truncate_last":
                 raise ValueError(
                     f"Buffer packing only supports 'truncate_last' strategy, "

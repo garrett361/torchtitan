@@ -88,6 +88,208 @@ class TokenizationStrategy(ABC):
         ...
 
 
+class BackboneSuffixStrategy(TokenizationStrategy):
+    """Pre-tokenizes multi-turn SFT data with backbone+suffix layout.
+
+    Produces (input_ids, labels, positions, suffix_starts, insertion_limits) where:
+    - The backbone is identical to TruncateLastStrategy (truncate_history_thinking=True,
+      labels only on last assistant turn).
+    - Each suffix recovers the thinking trace from a historical assistant turn group
+      (consecutive assistant+tool turns between two user messages).
+    - Suffixes are only created when at least one turn in the group has non-empty
+      reasoning_content AND the group is followed by a later user message (which
+      triggers truncation in the backbone).
+
+    The packing layer expands suffix_starts/insertion_limits into per-token tensors
+    at runtime.
+    """
+
+    _CHAT_TEMPLATE_KWARGS: dict[str, Any] = {"truncate_history_thinking": True}
+
+    @property
+    def chat_template_kwargs(self) -> dict[str, Any]:
+        return self._CHAT_TEMPLATE_KWARGS
+
+    def _tokenize_one(self, messages: list[dict]) -> dict[str, list[int] | int]:
+        _validate_messages(messages)
+        last_asst_idx = max(
+            i for i, m in enumerate(messages) if m["role"] == "assistant"
+        )
+        effective = messages[: last_asst_idx + 1]
+
+        # --- Backbone (same as TruncateLastStrategy) ---
+        full_text = self.tokenizer.apply_chat_template(
+            effective, **self.chat_template_kwargs
+        ).rstrip("\n")
+        full_tokens = self.tokenizer.encode(full_text, add_bos=True, add_eos=False)
+        if full_tokens[-1] != self.tokenizer.eos_id:
+            full_tokens.append(self.tokenizer.eos_id)
+
+        input_ids = full_tokens[:-1]
+        label_ids = [IGNORE_INDEX] * len(input_ids)
+
+        prefix_text = self.tokenizer.apply_chat_template(
+            effective[:-1],
+            add_generation_prompt=True,
+            **self.chat_template_kwargs,
+        )
+        prefix_tokens = self.tokenizer.encode(prefix_text, add_bos=True, add_eos=False)
+        start = len(prefix_tokens) - 1
+        label_ids[start:] = full_tokens[start + 1:]
+
+        backbone_input_ids = list(input_ids)
+        backbone_labels = list(label_ids)
+        backbone_positions = list(range(len(backbone_input_ids)))
+
+        # --- Identify suffix groups ---
+        # A suffix group is a maximal run of (assistant|tool)+ between two user messages.
+        # Find user message indices in effective messages.
+        user_indices = [i for i, m in enumerate(effective) if m["role"] == "user"]
+
+        suffix_starts: list[int] = []
+        insertion_limits: list[int] = []
+        all_suffix_input_ids: list[int] = []
+        all_suffix_labels: list[int] = []
+        all_suffix_positions: list[int] = []
+
+        for ui_idx in range(len(user_indices) - 1):
+            group_start = user_indices[ui_idx] + 1  # first message after this user
+            group_end = user_indices[ui_idx + 1]  # exclusive: next user message
+
+            # Check if any assistant turn in this group has reasoning
+            has_reasoning = any(
+                m["role"] == "assistant"
+                and m.get("reasoning_content", "").strip()
+                for m in effective[group_start:group_end]
+            )
+            if not has_reasoning:
+                continue
+
+            # Compute insertion_limit: render up to first assistant in group with gen prompt
+            first_asst_in_group = next(
+                i for i in range(group_start, group_end)
+                if effective[i]["role"] == "assistant"
+            )
+            prefix_for_limit = self.tokenizer.apply_chat_template(
+                effective[:first_asst_in_group],
+                add_generation_prompt=True,
+                **self.chat_template_kwargs,
+            )
+            prefix_for_limit_tokens = self.tokenizer.encode(
+                prefix_for_limit, add_bos=True, add_eos=False
+            )
+            insertion_limit = len(prefix_for_limit_tokens) - 2  # position of <think>
+
+            # Suffix source: render messages up to (but not including) next user,
+            # with truncate=True. Since no user comes after these turns in this slice,
+            # thinking is preserved.
+            suffix_source_text = self.tokenizer.apply_chat_template(
+                effective[:group_end], **self.chat_template_kwargs
+            ).rstrip("\n")
+            suffix_source_tokens = self.tokenizer.encode(
+                suffix_source_text, add_bos=True, add_eos=False
+            )
+
+            # Suffix tokens: everything from insertion_limit+1 onward in suffix_source
+            suffix_tokens = suffix_source_tokens[insertion_limit + 1:]
+
+            if not suffix_tokens:
+                raise ValueError(
+                    f"Empty suffix: insertion_limit={insertion_limit} >= "
+                    f"len(suffix_source_tokens)={len(suffix_source_tokens)}; "
+                    "coordinate arithmetic is broken for this sample"
+                )
+
+            # Ensure suffix ends with eos
+            if suffix_tokens[-1] != self.tokenizer.eos_id:
+                suffix_tokens.append(self.tokenizer.eos_id)
+
+            # Suffix input_ids (shifted): suffix_tokens[:-1]
+            suffix_input = suffix_tokens[:-1]
+            suffix_label = [IGNORE_INDEX] * len(suffix_input)
+
+            # Compute label boundaries for each assistant turn in the group
+            for turn_idx in range(group_start, group_end):
+                if effective[turn_idx]["role"] != "assistant":
+                    continue
+
+                # label_start for this turn: render prefix up to this turn with gen prompt
+                prefix_for_turn = self.tokenizer.apply_chat_template(
+                    effective[:turn_idx],
+                    add_generation_prompt=True,
+                    **self.chat_template_kwargs,
+                )
+                prefix_for_turn_tokens = self.tokenizer.encode(
+                    prefix_for_turn, add_bos=True, add_eos=False
+                )
+                label_start_global = len(prefix_for_turn_tokens) - 1
+                label_start_in_suffix = label_start_global - (insertion_limit + 1)
+
+                # label_end: position before <|im_end|> for this turn.
+                # Render through this turn; rstripped rendering ends with <|im_end|>.
+                end_render_text = self.tokenizer.apply_chat_template(
+                    effective[: turn_idx + 1], **self.chat_template_kwargs
+                ).rstrip("\n")
+                end_render_tokens = self.tokenizer.encode(
+                    end_render_text, add_bos=True, add_eos=False
+                )
+                label_end_global = len(end_render_tokens) - 2
+                label_end_in_suffix = label_end_global - (insertion_limit + 1)
+
+                # Assign labels: from label_start to label_end (inclusive)
+                assert label_start_in_suffix >= 0, (
+                    f"label_start_in_suffix={label_start_in_suffix} < 0 for "
+                    f"turn_idx={turn_idx}; coordinate arithmetic is broken"
+                )
+                assert label_end_in_suffix >= label_start_in_suffix, (
+                    f"label_end_in_suffix={label_end_in_suffix} < "
+                    f"label_start_in_suffix={label_start_in_suffix} for "
+                    f"turn_idx={turn_idx}; coordinate arithmetic is broken"
+                )
+                for pos in range(label_start_in_suffix, min(label_end_in_suffix + 1, len(suffix_input))):
+                    suffix_label[pos] = suffix_tokens[pos + 1]
+
+            # Record this suffix
+            suffix_offset = len(backbone_input_ids) + len(all_suffix_input_ids)
+            suffix_starts.append(suffix_offset)
+            insertion_limits.append(insertion_limit)
+
+            # Positions: sequential starting at insertion_limit+1
+            suffix_pos_start = insertion_limit + 1
+            suffix_positions = list(range(suffix_pos_start, suffix_pos_start + len(suffix_input)))
+
+            all_suffix_input_ids.extend(suffix_input)
+            all_suffix_labels.extend(suffix_label)
+            all_suffix_positions.extend(suffix_positions)
+
+        # --- Assemble final output ---
+        final_input_ids = backbone_input_ids + all_suffix_input_ids
+        final_labels = backbone_labels + all_suffix_labels
+        final_positions = backbone_positions + all_suffix_positions
+
+        return {
+            "input_ids": final_input_ids,
+            "labels": final_labels,
+            "positions": final_positions,
+            "suffix_starts": suffix_starts,
+            "insertion_limits": insertion_limits,
+            "n_tokens": len(final_input_ids),
+        }
+
+    @property
+    def column_schema(self) -> dict:
+        import pyarrow as pa
+
+        return {
+            "input_ids": pa.list_(pa.int32()),
+            "labels": pa.list_(pa.int32()),
+            "positions": pa.list_(pa.int32()),
+            "suffix_starts": pa.list_(pa.int32()),
+            "insertion_limits": pa.list_(pa.int32()),
+            "n_tokens": pa.int32(),
+        }
+
+
 class TruncateLastStrategy(TokenizationStrategy):
     """Pre-tokenizes multi-turn SFT data, labeling only the final assistant turn.
 

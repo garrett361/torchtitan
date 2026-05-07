@@ -16,6 +16,7 @@ from torchtitan.models.common.attention import (
     create_attention_mask,
     create_varlen_metadata_for_document,
     FlexAttention,
+    get_backbone_suffix_mask_mod,
     get_causal_mask_mod,
     get_document_mask_mod,
     get_document_mask_mod_from_positions,
@@ -144,7 +145,50 @@ class Decoder(BaseModel):
         tokenizer: BaseTokenizer,
         attn_config: BaseAttention.Config,
         positions: torch.Tensor | None = None,
+        extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
+        if extra_inputs is not None and "suffix_ids" in extra_inputs:
+            _required = {"suffix_ids", "conv_ids", "insertion_limits"}
+            missing = _required - extra_inputs.keys()
+            if missing:
+                raise ValueError(
+                    f"backbone_suffix masking requires {_required}; missing: {missing}"
+                )
+            if not isinstance(attn_config.inner_attention, FlexAttention.Config):
+                raise ValueError(
+                    "backbone_suffix masking requires FlexAttention; "
+                    f"got {type(attn_config.inner_attention).__name__}"
+                )
+            conv_ids = extra_inputs.pop("conv_ids")
+            suffix_ids = extra_inputs.pop("suffix_ids")
+            insertion_limits = extra_inputs.pop("insertion_limits")
+            expected_shape = input_batch.shape[:2]
+            if conv_ids.shape != expected_shape:
+                raise ValueError(
+                    f"conv_ids shape {conv_ids.shape} != input shape {expected_shape}"
+                )
+            if suffix_ids.shape != expected_shape:
+                raise ValueError(
+                    f"suffix_ids shape {suffix_ids.shape} != input shape {expected_shape}"
+                )
+            if insertion_limits.shape != expected_shape:
+                raise ValueError(
+                    f"insertion_limits shape {insertion_limits.shape} != "
+                    f"input shape {expected_shape}"
+                )
+            mask_mods = [
+                get_causal_mask_mod(),
+                get_backbone_suffix_mask_mod(conv_ids, suffix_ids, insertion_limits),
+            ]
+            return create_attention_mask(
+                and_masks(*mask_mods),
+                input_batch.shape[0],
+                None,
+                input_batch.shape[1],
+                input_batch.shape[1],
+                BLOCK_SIZE=attn_config.inner_attention.block_size,
+            )
+
         mask_mods = [get_causal_mask_mod()]
 
         match attn_config.mask_type:
@@ -194,7 +238,7 @@ class Decoder(BaseModel):
         inner_attn = attn_config.inner_attention
         if isinstance(inner_attn, FlexAttention.Config):
             return self._get_flex_attention_masks(
-                input_batch, tokenizer, attn_config, positions
+                input_batch, tokenizer, attn_config, positions, extra_inputs
             )
         elif isinstance(inner_attn, VarlenAttention.Config):
             if attn_config.mask_type != "block_causal":

@@ -607,8 +607,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         mask_type = getattr(attn_config, "mask_type", "causal")
 
         positions = extra_inputs.pop("positions", None)
-        if mask_type == "block_causal":
-            # Per-document positions from the dataloader
+        if mask_type == "block_causal" or "suffix_ids" in extra_inputs:
             extra_kwargs["positions"] = positions
         elif self.parallel_dims.cp_enabled:
             # Sequential positions needed for correct RoPE after CP sharding

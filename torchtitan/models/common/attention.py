@@ -53,6 +53,7 @@ __all__ = [
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "get_causal_mask_mod",
+    "get_backbone_suffix_mask_mod",
     "get_document_mask_mod",
     "get_document_mask_mod_from_positions",
     "get_fixed_block_mask_mod",
@@ -505,6 +506,38 @@ def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
     sliding_window_mod.__name__ = f"sliding_window_mod_window_size_{window_size}"
 
     return sliding_window_mod
+
+
+def get_backbone_suffix_mask_mod(
+    conv_ids: torch.Tensor,
+    suffix_ids: torch.Tensor,
+    insertion_limits: torch.Tensor,
+) -> _mask_mod_signature:
+    """Mask for backbone+suffix training with per-suffix insertion limits.
+
+    Each position attends to: (a) backbone positions in the same conversation
+    up to its insertion_limit, or (b) positions in the same suffix. Composed
+    with get_causal_mask_mod() via and_masks to enforce causality.
+
+    Padding isolation: conv_ids=0 blocks via same_conv; insertion_limits=-1
+    blocks via kv_idx <= -1; suffix_ids=0 blocks via the >0 guard.
+    """
+
+    def backbone_suffix_mask(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        same_conv = conv_ids[b, q_idx] == conv_ids[b, kv_idx]
+
+        kv_is_backbone = suffix_ids[b, kv_idx] == 0
+        same_suffix = (suffix_ids[b, q_idx] == suffix_ids[b, kv_idx]) & (
+            suffix_ids[b, q_idx] > 0
+        )
+
+        to_backbone = kv_is_backbone & (kv_idx <= insertion_limits[b, q_idx])
+
+        return same_conv & (to_backbone | same_suffix)
+
+    return backbone_suffix_mask
 
 
 _compiled_create_block_mask = torch.compile(create_block_mask)
