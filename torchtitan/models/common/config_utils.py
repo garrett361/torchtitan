@@ -14,6 +14,7 @@ from collections.abc import Callable
 from typing import Literal
 
 from torchtitan.models.common.attention import (
+    FA4Attention,
     FlexAttention,
     FusedQKVLinear,
     GQAttention,
@@ -57,6 +58,8 @@ def get_attention_config(
         )
     elif backend == "varlen":
         return VarlenAttention.Config(), "block_causal"
+    elif backend == "fa4":
+        return FA4Attention.Config(), "causal"
     else:
         raise ValueError(f"Unknown backend: {backend}")
 

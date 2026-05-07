@@ -41,6 +41,7 @@ from torchtitan.protocols.module import Module
 
 
 __all__ = [
+    "FA4Attention",
     "FlexAttention",
     "BaseQKVLinear",
     "FusedQKVLinear",
@@ -381,6 +382,39 @@ class ScaledDotProductAttention(LocalMapInnerAttention):
             )
         # Transpose back to (bs, seq, heads, dim)
         return out.transpose(1, 2)
+
+
+class FA4Attention(LocalMapInnerAttention):
+    """Inner attention using Flash Attention 4 (CuTe DSL kernels for SM90/SM100).
+
+    FA4 operates on (B, S, H, D) layout natively — no transpose needed.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(LocalMapInnerAttention.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+
+    @torch.compiler.disable
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        scale: float | None = None,
+        enable_gqa: bool = False,
+        **kwargs,
+    ) -> torch.Tensor:
+        from flash_attn.cute import flash_attn_func
+
+        input_dtype = q.dtype
+        if input_dtype not in (torch.float16, torch.bfloat16):
+            q, k, v = q.bfloat16(), k.bfloat16(), v.bfloat16()
+        out, _ = flash_attn_func(q, k, v, causal=True, softmax_scale=scale)
+        return out.to(input_dtype)
 
 
 def get_causal_mask_mod() -> _mask_mod_signature:

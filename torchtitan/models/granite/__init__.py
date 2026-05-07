@@ -142,6 +142,50 @@ def _debugmodel(attn_backend: str = "sdpa") -> GraniteModel.Config:
     )
 
 
+def _debugmodel_fa4() -> GraniteModel.Config:
+    """Debug model sized for FA4: head_dim=64 (FA4 backward hits an ICE — internal
+    compiler error in the CuTe DSL kernel compiler — on head_dim<64)."""
+    dim = 256
+    n_heads = 4
+    n_kv_heads = 2
+    n_layers = 4
+    vocab_size = 2048
+    return GraniteModel.Config(
+        dim=dim,
+        vocab_size=vocab_size,
+        embedding_multiplier=12.0,
+        logits_scaling=16.0,
+        enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_SKIP_INIT,
+        ),
+        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        output=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        rope=RoPE.Config(
+            dim=dim // n_heads,
+            max_seq_len=131072,
+            theta=500000,
+            backend="complex",
+            scaling="none",
+        ),
+        layers=_build_granite_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+            hidden_dim=512,
+            residual_multiplier=0.22,
+            attn_backend="fa4",
+        ),
+    )
+
+
 def _8b(attn_backend: str = "sdpa") -> GraniteModel.Config:
     dim = 4096
     n_heads = 32
@@ -186,6 +230,7 @@ def _8b(attn_backend: str = "sdpa") -> GraniteModel.Config:
 
 granite_configs = {
     "debugmodel": _debugmodel,
+    "debugmodel_fa4": _debugmodel_fa4,
     "8B": _8b,
 }
 
