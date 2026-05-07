@@ -8,8 +8,7 @@ from pathlib import Path
 
 from torchtitan.models.granite.pretokenized_dataset import (
     GranitePreTokenizedDataLoader,
-    TruncateLastBufferDataset,
-    TruncateLastCostBalancedDataset,
+    TruncateLastDataset,
     _load_and_merge_manifests,
     _load_manifest,
 )
@@ -30,9 +29,11 @@ def _make_manifest_with_length_stats(seq_len: int = 16) -> dict:
     return manifest
 
 
-def _build_dataset(cls, seq_len: int = 16, buffer_size: int = 6, **extra_kwargs):
+def _build_dataset(
+    seq_len: int = 16, buffer_size: int = 6, packing: str = "buffer", **extra_kwargs
+):
     manifest = _make_manifest_with_length_stats(seq_len)
-    return cls(
+    return TruncateLastDataset(
         manifest_path=MANIFEST_PATH,
         seq_len=seq_len,
         dp_rank=0,
@@ -40,6 +41,7 @@ def _build_dataset(cls, seq_len: int = 16, buffer_size: int = 6, **extra_kwargs)
         infinite=False,
         shuffle_in_memory=True,
         _manifest=manifest,
+        packing=packing,
         buffer_size=buffer_size,
         **extra_kwargs,
     )
@@ -67,7 +69,7 @@ class TestCostBalancedPacking(unittest.TestCase):
         target_cost = seq_len * 30.0 / 5.0  # 96
 
         cost_ds = _build_dataset(
-            TruncateLastCostBalancedDataset, seq_len=seq_len, target_cost=target_cost
+            seq_len=seq_len, packing="cost_balanced", target_cost=target_cost
         )
         cost_batches = list(cost_ds)
         costs = [b[2]["batch_attention_cost"] for b in cost_batches]
@@ -82,12 +84,12 @@ class TestCostBalancedPacking(unittest.TestCase):
                 self.assertGreater(cost, 0)
 
     def test_fifo_guarantee(self):
-        """The oldest buffered example always appears in the next packed batch."""
+        """The oldest buffered example always appears at the start of the first batch."""
         seq_len = 16
         target_cost = seq_len * 30.0 / 5.0
         ds = _build_dataset(
-            TruncateLastCostBalancedDataset,
             seq_len=seq_len,
+            packing="cost_balanced",
             target_cost=target_cost,
             buffer_size=6,
         )
@@ -98,7 +100,7 @@ class TestCostBalancedPacking(unittest.TestCase):
         ds._refill_buffer()
 
         oldest_ids = list(ds._buffer[0][0])
-        batch = ds._pack_one_batch()
+        batch = next(ds._iter_packed())
         input_tensor = batch[0]["input"].tolist()
         self.assertEqual(input_tensor[: len(oldest_ids)], oldest_ids)
 
@@ -158,8 +160,8 @@ class TestCostBalancedPacking(unittest.TestCase):
         target_cost = seq_len * 30.0 / 5.0
 
         ds1 = _build_dataset(
-            TruncateLastCostBalancedDataset,
             seq_len=seq_len,
+            packing="cost_balanced",
             target_cost=target_cost,
             buffer_size=4,
         )
@@ -170,8 +172,8 @@ class TestCostBalancedPacking(unittest.TestCase):
         state = ds1.state_dict()
 
         ds2 = _build_dataset(
-            TruncateLastCostBalancedDataset,
             seq_len=seq_len,
+            packing="cost_balanced",
             target_cost=target_cost,
             buffer_size=4,
         )
@@ -192,7 +194,7 @@ class TestCostBalancedPacking(unittest.TestCase):
         seq_len = 16
         target_cost = seq_len * 30.0 / 5.0
         ds = _build_dataset(
-            TruncateLastCostBalancedDataset, seq_len=seq_len, target_cost=target_cost
+            seq_len=seq_len, packing="cost_balanced", target_cost=target_cost
         )
         for _, _, stats in ds:
             self.assertIn("batch_attention_cost", stats)
@@ -256,13 +258,14 @@ class TestCostBalancedE2E(unittest.TestCase):
         mean_tokens = length_stats[f"tokens_per_example_{k}kmax"]
         target_cost = seq_len * sq_tokens / mean_tokens
 
-        ds = TruncateLastCostBalancedDataset(
+        ds = TruncateLastDataset(
             manifest_path=manifest_file,
             seq_len=seq_len,
             dp_rank=0,
             dp_world_size=1,
             infinite=True,
             shuffle_in_memory=True,
+            packing="cost_balanced",
             buffer_size=64,
             target_cost=target_cost,
         )
@@ -328,7 +331,7 @@ class TestCostBalancedE2E(unittest.TestCase):
         )
 
         # Buffer packing
-        buffer_ds = TruncateLastBufferDataset(**common_kwargs)
+        buffer_ds = TruncateLastDataset(**common_kwargs, packing="buffer")
         buffer_costs = []
         for i, (inp, _, stats) in enumerate(buffer_ds):
             buffer_costs.append(_compute_batch_cost_from_positions((inp, None, stats)))
@@ -336,8 +339,8 @@ class TestCostBalancedE2E(unittest.TestCase):
                 break
 
         # Cost-balanced packing
-        cost_ds = TruncateLastCostBalancedDataset(
-            **common_kwargs, target_cost=target_cost
+        cost_ds = TruncateLastDataset(
+            **common_kwargs, packing="cost_balanced", target_cost=target_cost
         )
         cost_balanced_costs = []
         for i, (_, _, stats) in enumerate(cost_ds):

@@ -9,7 +9,6 @@ from datasets import Dataset
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.models.granite.pretokenized_dataset import (
-    TruncateLastBufferDataset,
     GranitePreTokenizedDataLoader,
     TruncateLastDataset,
 )
@@ -361,7 +360,7 @@ class TestMultiWorkerSharding(unittest.TestCase):
         self.assertEqual(stats_after["n_examples_packed"], stats_before["n_examples_packed"])
 
 
-class TestTruncateLastBufferDataset(unittest.TestCase):
+class TestTruncateLastBufferPacking(unittest.TestCase):
     def setUp(self):
         import tempfile
 
@@ -375,12 +374,13 @@ class TestTruncateLastBufferDataset(unittest.TestCase):
 
     def _make_dataset(
         self, examples, seq_len=16, buffer_size=4, **kwargs
-    ) -> TruncateLastBufferDataset:
+    ) -> TruncateLastDataset:
         manifest_path = _make_shard(self._tmp, examples)
-        return TruncateLastBufferDataset(
+        return TruncateLastDataset(
             manifest_path,
             seq_len=seq_len,
             infinite=False,
+            packing="buffer",
             buffer_size=buffer_size,
             **kwargs,
         )
@@ -399,27 +399,14 @@ class TestTruncateLastBufferDataset(unittest.TestCase):
             self.assertEqual(labels.shape, (seq_len,))
 
     def test_fills_gaps(self):
-        """Buffer packing uses less padding than greedy on a bimodal distribution."""
+        """Buffer packing achieves zero padding on a perfectly complementary distribution."""
         seq_len = 16
-        # 10 large (11 tokens) + 10 small (5 tokens).
-        # Optimal: pair each large with a small → 11+5=16, 0 padding per batch.
-        # Greedy: when two large examples are adjacent → 11 + pad 5 (can't fit 11).
-        # Buffer with all 20 in buffer: always finds a 5-token complement.
-        large = [list(range(11)), [IGNORE_INDEX] * 10 + [10]]
-        small = [list(range(100, 105)), [IGNORE_INDEX] * 4 + [104]]
+        # 10 large (12 tokens) + 10 small (4 tokens).
+        # Buffer packing (size=20) sees the full set and pairs each 12 with a 4:
+        # 12+4=16=seq_len → 0 padding.
+        large = [list(range(12)), [IGNORE_INDEX] * 11 + [11]]
+        small = [list(range(100, 104)), [IGNORE_INDEX] * 3 + [103]]
         examples = [tuple(large) for _ in range(10)] + [tuple(small) for _ in range(10)]
-
-        greedy_dir = self._tmp / "greedy"
-        greedy_dir.mkdir()
-        greedy_ds = TruncateLastDataset(
-            _make_shard(greedy_dir, examples), seq_len=seq_len, infinite=False
-        )
-        greedy_total_tokens = 0
-        greedy_batches = 0
-        for _, _, stats in greedy_ds:
-            greedy_total_tokens += stats["n_total_tokens"]
-            greedy_batches += 1
-        greedy_padding = greedy_batches * seq_len - greedy_total_tokens
 
         buffer_ds = self._make_dataset(examples, seq_len=seq_len, buffer_size=20)
         buffer_total_tokens = 0
@@ -429,7 +416,7 @@ class TestTruncateLastBufferDataset(unittest.TestCase):
             buffer_batches += 1
         buffer_padding = buffer_batches * seq_len - buffer_total_tokens
 
-        self.assertLess(buffer_padding, greedy_padding)
+        self.assertEqual(buffer_padding, 0)
 
     def test_fifo_guarantee(self):
         """Oldest buffered example is consumed first, not the largest."""
@@ -441,8 +428,8 @@ class TestTruncateLastBufferDataset(unittest.TestCase):
             for i in range(8)
         ]
         manifest_path = _make_shard(self._tmp, examples)
-        ds = TruncateLastBufferDataset(
-            manifest_path, seq_len=seq_len, infinite=False, buffer_size=8
+        ds = TruncateLastDataset(
+            manifest_path, seq_len=seq_len, infinite=False, packing="buffer", buffer_size=8
         )
 
         # Determine expected order from the shuffled dataset
@@ -503,22 +490,22 @@ class TestTruncateLastBufferDataset(unittest.TestCase):
         manifest_path = _make_shard(self._tmp, examples)
 
         # Reference: collect all batches in one pass.
-        ds_ref = TruncateLastBufferDataset(
-            manifest_path, seq_len=seq_len, infinite=False, buffer_size=4
+        ds_ref = TruncateLastDataset(
+            manifest_path, seq_len=seq_len, infinite=False, packing="buffer", buffer_size=4
         )
         all_batches = list(ds_ref)
         self.assertGreater(len(all_batches), 1)
 
         # Checkpoint after first batch, restore, verify remaining match.
-        ds_a = TruncateLastBufferDataset(
-            manifest_path, seq_len=seq_len, infinite=False, buffer_size=4
+        ds_a = TruncateLastDataset(
+            manifest_path, seq_len=seq_len, infinite=False, packing="buffer", buffer_size=4
         )
         it_a = iter(ds_a)
         next(it_a)
         checkpoint = ds_a.state_dict()
 
-        ds_b = TruncateLastBufferDataset(
-            manifest_path, seq_len=seq_len, infinite=False, buffer_size=4
+        ds_b = TruncateLastDataset(
+            manifest_path, seq_len=seq_len, infinite=False, packing="buffer", buffer_size=4
         )
         ds_b.load_state_dict(checkpoint)
 
@@ -538,8 +525,8 @@ class TestTruncateLastBufferDataset(unittest.TestCase):
             ([1, 4, 5, _EOS_ID], [IGNORE_INDEX, 5, _EOS_ID, IGNORE_INDEX]),
         ]
         manifest_path = _make_shard(self._tmp, examples)
-        ds = TruncateLastBufferDataset(
-            manifest_path, seq_len=seq_len, infinite=True, buffer_size=4
+        ds = TruncateLastDataset(
+            manifest_path, seq_len=seq_len, infinite=True, packing="buffer", buffer_size=4
         )
 
         it = iter(ds)
@@ -599,7 +586,7 @@ class TestGranitePreTokenizedDataLoaderDispatch(unittest.TestCase):
         self.assertIsInstance(loader.dataset, TruncateLastDataset)
 
     def test_dispatch_buffer_packing(self):
-        """DataLoader with packing='buffer' instantiates TruncateLastBufferDataset."""
+        """DataLoader with packing='buffer' instantiates TruncateLastDataset."""
         examples = [([1, 2, _EOS_ID], [IGNORE_INDEX, _EOS_ID, IGNORE_INDEX])]
         manifest_path = _make_shard(self._tmp, examples, strategy="truncate_last")
 
@@ -619,7 +606,8 @@ class TestGranitePreTokenizedDataLoaderDispatch(unittest.TestCase):
             seq_len=16,
             local_batch_size=1,
         )
-        self.assertIsInstance(loader.dataset, TruncateLastBufferDataset)
+        self.assertIsInstance(loader.dataset, TruncateLastDataset)
+        self.assertEqual(loader.dataset._packing, "buffer")
 
     def test_dispatch_unknown_strategy_raises(self):
         """DataLoader raises ValueError for an unregistered strategy."""
@@ -641,6 +629,140 @@ class TestGranitePreTokenizedDataLoaderDispatch(unittest.TestCase):
                 seq_len=16,
                 local_batch_size=1,
             )
+
+
+class TestGreedyPacking(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        import shutil
+
+        self._tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self._tmp)
+
+    def test_greedy_packs_in_stream_order(self):
+        """Greedy packing places items in sequential order without reordering."""
+        seq_len = 32
+        examples = [
+            ([100 + i, _EOS_ID], [_EOS_ID, IGNORE_INDEX])
+            for i in range(8)
+        ]
+        manifest_path = _make_shard(self._tmp, examples)
+        ds = TruncateLastDataset(
+            manifest_path, seq_len=seq_len, infinite=False, packing="greedy"
+        )
+
+        # Read the post-shuffle order from the dataset
+        expected_first_tokens = [row["input_ids"][0] for row in ds._data]
+
+        actual_first_tokens = []
+        for batch_dict, _, _ in ds:
+            inputs = batch_dict["input"].tolist()
+            positions = batch_dict["positions"].tolist()
+            for i, pos in enumerate(positions):
+                if pos == 0 and inputs[i] != _EOS_ID:
+                    actual_first_tokens.append(inputs[i])
+
+        self.assertEqual(actual_first_tokens, expected_first_tokens)
+
+    def test_greedy_flushes_when_item_doesnt_fit(self):
+        """When next item doesn't fit, greedy flushes and starts new batch."""
+        seq_len = 6
+        examples = [
+            ([1, 2, 3, 4, _EOS_ID], [IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX, 4, _EOS_ID]),
+            ([5, 6, 7, _EOS_ID], [IGNORE_INDEX, IGNORE_INDEX, 7, _EOS_ID]),
+            ([8, 9, _EOS_ID], [IGNORE_INDEX, 9, _EOS_ID]),
+        ]
+        manifest_path = _make_shard(self._tmp, examples)
+        ds = TruncateLastDataset(
+            manifest_path, seq_len=seq_len, infinite=False, packing="greedy",
+            shuffle_in_memory=False,
+        )
+
+        batches = list(ds)
+        # Example 0 (5 tokens) leaves 1 slot; example 1 (4 tokens) doesn't fit → flush
+        # Example 1 (4 tokens) + example 2 (3 tokens) = 7 > 6 → flush after example 1
+        # All three should produce batches (assuming no shuffle)
+        self.assertGreater(len(batches), 1)
+        for batch_dict, labels, _ in batches:
+            self.assertEqual(batch_dict["input"].shape[0], seq_len)
+
+
+class TestLocalBatchSizeValidation(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        import shutil
+
+        self._tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self._tmp)
+
+    def test_local_batch_size_gt1_raises(self):
+        """local_batch_size > 1 raises ValueError."""
+        examples = [([1, 2, _EOS_ID], [IGNORE_INDEX, _EOS_ID, IGNORE_INDEX])]
+        manifest_path = _make_shard(self._tmp, examples)
+
+        from torchtitan.components.tokenizer import HuggingFaceTokenizer
+
+        tokenizer = HuggingFaceTokenizer(tokenizer_path="tests/assets/tokenizer")
+        with self.assertRaises(ValueError, msg="local_batch_size must be 1"):
+            GranitePreTokenizedDataLoader(
+                GranitePreTokenizedDataLoader.Config(
+                    manifest_path=str(manifest_path),
+                    infinite=False,
+                ),
+                dp_world_size=1,
+                dp_rank=0,
+                tokenizer=tokenizer,
+                seq_len=16,
+                local_batch_size=2,
+            )
+
+    def test_cost_balanced_missing_target_cost_raises(self):
+        """cost_balanced packing without length_stats in manifest raises ValueError."""
+        examples = [([1, 2, _EOS_ID], [IGNORE_INDEX, _EOS_ID, IGNORE_INDEX])]
+        manifest_path = _make_shard(self._tmp, examples)
+
+        from torchtitan.components.tokenizer import HuggingFaceTokenizer
+
+        tokenizer = HuggingFaceTokenizer(tokenizer_path="tests/assets/tokenizer")
+        with self.assertRaises(ValueError):
+            GranitePreTokenizedDataLoader(
+                GranitePreTokenizedDataLoader.Config(
+                    manifest_path=str(manifest_path),
+                    infinite=False,
+                    packing="cost_balanced",
+                ),
+                dp_world_size=1,
+                dp_rank=0,
+                tokenizer=tokenizer,
+                seq_len=16,
+                local_batch_size=1,
+            )
+
+
+class TestDatasetSmallerThanBuffer(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        import shutil
+
+        self._tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self._tmp)
+
+    def test_dataset_smaller_than_buffer_size(self):
+        """Dataset with fewer items than buffer_size still produces correct output."""
+        seq_len = 32
+        examples = [
+            ([1, 2, _EOS_ID], [IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
+            ([3, 4, _EOS_ID], [IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
+        ]
+        manifest_path = _make_shard(self._tmp, examples)
+        ds = TruncateLastDataset(
+            manifest_path, seq_len=seq_len, infinite=False, packing="buffer", buffer_size=64
+        )
+        batches = list(ds)
+        self.assertGreater(len(batches), 0)
+        for batch_dict, labels, stats in batches:
+            self.assertEqual(batch_dict["input"].shape[0], seq_len)
+            self.assertGreater(stats["n_examples_packed"], 0)
 
 
 if __name__ == "__main__":

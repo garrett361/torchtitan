@@ -530,5 +530,119 @@ class TestBackboneSuffixDatasetCheckpointing(unittest.TestCase):
             self.assertTrue(torch.equal(la, lb))
 
 
+class TestBackboneSuffixGreedyPacking(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        import shutil
+
+        self._tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self._tmp)
+
+    def _make_dataset(self, examples, seq_len=32):
+        from torchtitan.models.granite.pretokenized_dataset import (
+            BackboneSuffixDataset,
+        )
+
+        manifest_path = _make_backbone_suffix_shard(self._tmp, examples)
+        return BackboneSuffixDataset(
+            manifest_path, seq_len=seq_len, infinite=False, packing="greedy"
+        )
+
+    def test_greedy_produces_valid_output(self):
+        """Greedy packing with backbone_suffix format yields correct structure."""
+        seq_len = 32
+        ds = self._make_dataset([_example_no_suffix(), _example_one_suffix()], seq_len=seq_len)
+        batches = list(ds)
+        self.assertGreater(len(batches), 0)
+        for batch_dict, labels, stats in batches:
+            self.assertEqual(batch_dict["input"].shape, (seq_len,))
+            self.assertIn("conv_ids", batch_dict)
+            self.assertIn("suffix_ids", batch_dict)
+            self.assertIn("insertion_limits", batch_dict)
+            self.assertGreater(stats["n_examples_packed"], 0)
+
+    def test_greedy_preserves_stream_order(self):
+        """Greedy packing doesn't reorder examples relative to the data stream."""
+        seq_len = 32
+        examples = [_example_no_suffix(), _example_one_suffix(), _example_two_suffixes()]
+        ds = self._make_dataset(examples, seq_len=seq_len)
+
+        # Read post-shuffle order
+        expected_first_tokens = [row["input_ids"][0] for row in ds._data]
+
+        actual_first_tokens = []
+        for batch_dict, _, _ in ds:
+            conv_ids = batch_dict["conv_ids"].tolist()
+            inputs = batch_dict["input"].tolist()
+            seen_convs = set()
+            for i, cid in enumerate(conv_ids):
+                if cid > 0 and cid not in seen_convs:
+                    seen_convs.add(cid)
+                    actual_first_tokens.append(inputs[i])
+
+        self.assertEqual(actual_first_tokens, expected_first_tokens)
+
+
+class TestBackboneSuffixCostBalanced(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        import shutil
+
+        self._tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self._tmp)
+
+    def test_cost_balanced_produces_stats(self):
+        """Cost-balanced packing with backbone_suffix includes batch_attention_cost."""
+        from torchtitan.models.granite.pretokenized_dataset import (
+            BackboneSuffixDataset,
+        )
+
+        seq_len = 32
+        examples = [
+            _example_no_suffix(),
+            _example_one_suffix(),
+            _example_two_suffixes(),
+            _example_no_suffix(),
+        ]
+        manifest_path = _make_backbone_suffix_shard(self._tmp, examples)
+        ds = BackboneSuffixDataset(
+            manifest_path,
+            seq_len=seq_len,
+            infinite=False,
+            packing="cost_balanced",
+            buffer_size=4,
+            target_cost=500.0,
+        )
+        batches = list(ds)
+        self.assertGreater(len(batches), 0)
+        for _, _, stats in batches:
+            self.assertIn("batch_attention_cost", stats)
+            self.assertIsInstance(stats["batch_attention_cost"], int)
+
+    def test_cost_balanced_valid_structure(self):
+        """Cost-balanced batches maintain correct backbone_suffix tensor structure."""
+        from torchtitan.models.granite.pretokenized_dataset import (
+            BackboneSuffixDataset,
+        )
+
+        seq_len = 32
+        examples = [_example_one_suffix(), _example_two_suffixes()]
+        manifest_path = _make_backbone_suffix_shard(self._tmp, examples)
+        ds = BackboneSuffixDataset(
+            manifest_path,
+            seq_len=seq_len,
+            infinite=False,
+            packing="cost_balanced",
+            buffer_size=4,
+            target_cost=500.0,
+        )
+        for batch_dict, labels, _ in ds:
+            self.assertEqual(batch_dict["input"].shape, (seq_len,))
+            self.assertEqual(batch_dict["conv_ids"].shape, (seq_len,))
+            self.assertEqual(batch_dict["suffix_ids"].shape, (seq_len,))
+            self.assertEqual(batch_dict["insertion_limits"].shape, (seq_len,))
+            self.assertEqual(labels.shape, (seq_len,))
+
+
 if __name__ == "__main__":
     unittest.main()

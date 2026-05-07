@@ -4,16 +4,21 @@ Reads Arrow shards produced by pretokenize_sft.py. Strategy dispatch happens
 at GranitePreTokenizedDataLoader construction time via manifest["strategy"].
 
 Class hierarchy:
-    PreTokenizedDataset        — abstract base: manifest loading, DP sharding,
-                                 checkpointing skeleton
-    TruncateLastDataset        — greedy packing for (input_ids, labels, n_tokens) shards
-    GranitePreTokenizedDataLoader — single dataloader; dispatches to the right dataset
+    PreTokenizedDataset           — abstract base: manifest loading, DP sharding,
+                                    unified packing loop, checkpointing
+    TruncateLastDataset           — format primitives for (input_ids, labels) shards
+    BackboneSuffixDataset         — format primitives for backbone+suffix shards
+    GranitePreTokenizedDataLoader — dataloader; dispatches to the right dataset
                                     class based on manifest["strategy"]
+
+Packing mode (greedy, buffer, cost_balanced) is a constructor parameter on
+PreTokenizedDataset, not a separate class hierarchy.
 """
 
 import json
 from abc import abstractmethod
-from collections.abc import Iterator
+from collections import deque
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, cast
@@ -147,35 +152,96 @@ def _load_and_merge_manifests(
     return merged_manifest, combined
 
 
+# ---------------------------------------------------------------------------
+# Selection functions
+# ---------------------------------------------------------------------------
+
+SelectFn = Callable[["PreTokenizedDataset", int, dict], int]
+
+
+def _select_greedy(dataset: "PreTokenizedDataset", remaining: int, batch: dict) -> int:
+    if dataset._buffer and dataset._item_length(dataset._buffer[0]) <= remaining:
+        return 0
+    return -1
+
+
+def _select_largest_fitting(
+    dataset: "PreTokenizedDataset", remaining: int, batch: dict
+) -> int:
+    best_idx, best_len = -1, 0
+    for i, item in enumerate(dataset._buffer):
+        L = dataset._item_length(item)
+        if L <= remaining and L > best_len:
+            best_idx, best_len = i, L
+    return best_idx
+
+
+def _select_cost_balanced(
+    dataset: "PreTokenizedDataset", remaining: int, batch: dict
+) -> int:
+    current_cost = batch.get("cost", 0)
+    best_idx, best_gap = -1, float("inf")
+    for i, item in enumerate(dataset._buffer):
+        L = dataset._item_length(item)
+        if L > remaining:
+            continue
+        gap = abs(current_cost + L * L - dataset._target_cost)
+        if gap < best_gap:
+            best_gap, best_idx = gap, i
+    return best_idx
+
+
+_SELECT_FNS: dict[str, SelectFn] = {
+    "greedy": _select_greedy,
+    "buffer": _select_largest_fitting,
+    "cost_balanced": _select_cost_balanced,
+}
+
+
+# ---------------------------------------------------------------------------
+# Base class
+# ---------------------------------------------------------------------------
+
+
 class PreTokenizedDataset(IterableDataset, Stateful):
     """Abstract base for pre-tokenized SFT datasets.
 
-    Handles manifest loading, shard concatenation, DP sharding, and the
-    checkpointing fields shared across all strategies. Subclasses own the
-    packing loop and batch format.
+    Handles manifest loading, shard concatenation, DP sharding, the unified
+    packing loop, and checkpointing. Subclasses implement format-specific
+    primitives (_tokenize_sample, _new_batch, _place_item, _pad_and_flush).
 
-    Subclass contract:
-    - Implement __iter__ (typically delegates to a _iter_* packing method).
-    - At end-of-epoch when re-looping, re-shuffle _data via
-        self._data = cast(Dataset, self._original_data.shuffle(seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory))
-      to maintain per-epoch diversity. Seed 42 covers epoch 0 (applied in __init__);
-      subsequent epochs use seed 42+epoch for a deterministic sequence.
+    Packing mode is selected via the ``packing`` constructor parameter:
+    - "greedy": packs items in stream order without reordering.
+    - "buffer": lookahead buffer with largest-fitting selection.
+    - "cost_balanced": lookahead buffer minimizing attention cost variance.
     """
 
     def __init__(
         self,
         manifest_path: str | Path,
         seq_len: int,
+        *,
         dp_rank: int = 0,
         dp_world_size: int = 1,
         cp_rank: int = 0,
         infinite: bool = False,
         shuffle_in_memory: bool = True,
         tokenizer: BaseTokenizer | None = None,
+        packing: str = "buffer",
+        buffer_size: int = 64,
+        target_cost: float | None = None,
         _manifest: dict[str, Any] | None = None,
         _full_dataset: Dataset | None = None,
         _dataset_id: str | None = None,
     ) -> None:
+        if packing not in _SELECT_FNS:
+            raise ValueError(
+                f"Unknown packing mode: {packing!r}. "
+                f"Supported: {sorted(_SELECT_FNS)}"
+            )
+        if packing == "cost_balanced" and target_cost is None:
+            raise ValueError("target_cost is required for cost_balanced packing")
+
         manifest_path = Path(manifest_path)
         manifest = _manifest if _manifest is not None else _load_manifest(manifest_path)
 
@@ -205,6 +271,11 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         self.seq_len = seq_len
         self.infinite = infinite
 
+        self._packing = packing
+        self._select_fn: SelectFn = _SELECT_FNS[packing]
+        self._buffer_size = buffer_size
+        self._target_cost = target_cost or 0.0
+
         self._sample_idx: int = 0
         self._epoch: int = 0
         self._logged_first_sample = False
@@ -212,21 +283,66 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         self._worker_id: int = 0
         self._num_workers: int = 1
 
+        # Buffer state (deque for O(1) popleft)
+        self._buffer: deque = deque()
+        self._data_iter: Iterator | None = None
+        self._data_exhausted: bool = False
+
+    # --- Abstract primitives (subclass contract) ---
+
+    @abstractmethod
+    def _tokenize_sample(self, sample: dict) -> Any | None:
+        """Parse raw sample into a format-specific item, or None to skip."""
+        ...
+
+    @abstractmethod
+    def _item_length(self, item) -> int:
+        """Token count of a buffered item."""
+        ...
+
+    @abstractmethod
+    def _new_batch(self) -> dict:
+        """Create empty mutable batch accumulator.
+        Must include an 'inputs' key (list[int]) for token counting."""
+        ...
+
+    @abstractmethod
+    def _place_item(self, batch: dict, item) -> None:
+        """Append one item into the batch accumulator."""
+        ...
+
+    @abstractmethod
+    def _pad_and_flush(
+        self, batch: dict
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, dict[str, int]]:
+        """Pad to seq_len and produce final (inputs_dict, labels, stats)."""
+        ...
+
+    @abstractmethod
+    def _serialize_buffer(self) -> list:
+        """Serialize buffer items for checkpointing."""
+        ...
+
+    @abstractmethod
+    def _deserialize_buffer(self, data: list) -> list:
+        """Restore buffer items from checkpoint."""
+        ...
+
+    # --- Shared infrastructure ---
+
     def _get_data_iter(self):
         if self._sample_idx == len(self._data):
             return iter([])
         return iter(self._data.skip(self._sample_idx))
 
     def _log_first_sample(self, input_ids: list[int], label_ids: list[int]) -> None:
-        """Log the first sample with trained tokens highlighted. No-op if already logged
-        or tokenizer is unavailable."""
+        """Log the first sample with trained tokens highlighted."""
         if self._logged_first_sample or self._cp_rank != 0 or self._tokenizer is None:
             return
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None and worker_info.id != 0:
             return
         RED, RESET = "\033[31m", "\033[0m"
-        # input_ids[j] is predicted at step j-1; it's "trained on" iff label_ids[j-1] != IGNORE_INDEX.
         is_trained = [False] + [
             label_ids[j - 1] != IGNORE_INDEX for j in range(1, len(input_ids))
         ]
@@ -255,16 +371,139 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         """Total examples in this rank's shard (before packing)."""
         return len(self._original_data)
 
-    @abstractmethod
-    def __iter__(self): ...
+    def _prepare_iter(self) -> None:
+        """Worker detection, epoch shuffle, sharding."""
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            self._worker_id = worker_info.id
+            self._num_workers = worker_info.num_workers
+        if self._epoch > 0:
+            self._data = cast(
+                Dataset,
+                self._original_data.shuffle(
+                    seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
+                ),
+            )
+        else:
+            self._data = self._original_data
+        if self._num_workers > 1:
+            self._data = cast(
+                Dataset,
+                split_dataset_by_node(self._data, self._worker_id, self._num_workers),
+            )
+        self._sample_idx = min(self._sample_idx, len(self._data))
+
+    def _advance_epoch(self) -> None:
+        self._sample_idx = 0
+        self._epoch += 1
+        self._data = cast(
+            Dataset,
+            self._original_data.shuffle(
+                seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
+            ),
+        )
+        if self._num_workers > 1:
+            self._data = cast(
+                Dataset,
+                split_dataset_by_node(
+                    self._data, self._worker_id, self._num_workers
+                ),
+            )
+        self._data_iter = self._get_data_iter()
+        self._data_exhausted = False
+        logger.warning(
+            "Dataset '%s' is being re-looped (epoch %d)",
+            self._dataset_id,
+            self._epoch,
+        )
+
+    def _refill_buffer(self) -> None:
+        while len(self._buffer) < self._buffer_size and not self._data_exhausted:
+            sample = next(self._data_iter, None)
+            if sample is None:
+                self._data_exhausted = True
+                break
+            result = self._tokenize_sample(sample)
+            self._sample_idx += 1
+            if result is None:
+                continue
+            self._buffer.append(result)
+
+    # --- Unified packing loop ---
+
+    def _iter_packed(self):
+        self._data_iter = self._get_data_iter()
+        self._data_exhausted = False
+
+        while True:
+            self._refill_buffer()
+
+            if not self._buffer:
+                if not self.infinite:
+                    break
+                self._advance_epoch()
+                continue
+
+            batch = self._new_batch()
+            first = self._buffer.popleft()
+            self._place_item(batch, first)
+            batch["cost"] = self._item_length(first) ** 2
+
+            while True:
+                remaining = self.seq_len - len(batch["inputs"])
+                if remaining <= 0:
+                    break
+                idx = self._select_fn(self, remaining, batch)
+                if idx == -1:
+                    break
+                picked = self._buffer[idx]
+                del self._buffer[idx]
+                self._place_item(batch, picked)
+                batch["cost"] += self._item_length(picked) ** 2
+                if not self._buffer:
+                    self._refill_buffer()
+
+            yield self._pad_and_flush(batch)
+
+    def __iter__(self):
+        self._prepare_iter()
+        yield from self._iter_packed()
+
+    # --- Checkpointing ---
+
+    def state_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "epoch": self._epoch,
+            "sample_idx": self._sample_idx,
+        }
+        if self._buffer:
+            d["buffer"] = self._serialize_buffer()
+        return d
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        self._epoch = state_dict["epoch"]
+        self._sample_idx = state_dict["sample_idx"]
+        if "buffer" in state_dict:
+            self._buffer = deque(self._deserialize_buffer(state_dict["buffer"]))
+        if self._epoch > 0:
+            self._data = cast(
+                Dataset,
+                self._original_data.shuffle(
+                    seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
+                ),
+            )
+
+
+# ---------------------------------------------------------------------------
+# Format: truncate_last
+# ---------------------------------------------------------------------------
 
 
 class TruncateLastDataset(PreTokenizedDataset):
-    """Greedy-packs pre-tokenized (input_ids, labels, n_tokens) shards.
+    """Pre-tokenized (input_ids, labels, n_tokens) shards.
 
     Produced by TruncateLastStrategy. Labels only the final assistant turn;
-    all earlier turns are IGNORE_INDEX. Packing and checkpointing match
-    ChatDataset behavior exactly.
+    all earlier turns are IGNORE_INDEX.
     """
 
     def _tokenize_sample(
@@ -285,355 +524,62 @@ class TruncateLastDataset(PreTokenizedDataset):
         self._log_first_sample(input_ids, label_ids)
         return input_ids, label_ids
 
-    def _prepare_iter(self) -> None:
-        """Common setup for __iter__: worker detection, epoch shuffle, sharding."""
-        worker_info = torch.utils.data.get_worker_info()
-        if worker_info is not None:
-            self._worker_id = worker_info.id
-            self._num_workers = worker_info.num_workers
-        # Recompute from _original_data to handle repeated __iter__ calls
-        # (persistent_workers=True recreates the iterator on the same instance)
-        if self._epoch > 0:
-            self._data = cast(
-                Dataset,
-                self._original_data.shuffle(
-                    seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
-                ),
-            )
-        else:
-            self._data = self._original_data
-        if self._num_workers > 1:
-            self._data = cast(
-                Dataset,
-                split_dataset_by_node(self._data, self._worker_id, self._num_workers),
-            )
-        self._sample_idx = min(self._sample_idx, len(self._data))
+    def _item_length(self, item: tuple[list[int], list[int]]) -> int:
+        return len(item[0])
 
-    def __iter__(self):
-        self._prepare_iter()
-        yield from self._iter_greedy_packed()
-
-    def _iter_greedy_packed(self):
-        inputs_buffer: list[int] = []
-        labels_buffer: list[int] = []
-        positions_buffer: list[int] = []
-        batch_n_total: int = 0
-        batch_n_trained: int = 0
-        batch_n_examples: int = 0
-
-        while True:
-            for sample in self._get_data_iter():
-                result = self._tokenize_sample(sample)
-                if result is None:
-                    self._sample_idx += 1
-                    continue
-
-                input_ids, label_ids = result
-                remaining = self.seq_len - len(inputs_buffer)
-
-                if len(input_ids) > remaining and len(inputs_buffer) > 0:
-                    pad_len = remaining
-                    inputs_buffer.extend([self._eos_id] * pad_len)
-                    labels_buffer.extend([IGNORE_INDEX] * pad_len)
-                    positions_buffer.extend(range(pad_len))
-                    yield self._flush(
-                        inputs_buffer,
-                        labels_buffer,
-                        positions_buffer,
-                        batch_n_total,
-                        batch_n_trained,
-                        batch_n_examples,
-                    )
-                    inputs_buffer, labels_buffer, positions_buffer = [], [], []
-                    batch_n_total = batch_n_trained = batch_n_examples = 0
-
-                n_trained = sum(1 for lbl in label_ids if lbl != IGNORE_INDEX)
-                batch_n_total += len(input_ids)
-                batch_n_trained += n_trained
-                batch_n_examples += 1
-
-                inputs_buffer.extend(input_ids)
-                labels_buffer.extend(label_ids)
-                positions_buffer.extend(range(len(input_ids)))
-                self._sample_idx += 1
-
-                if len(inputs_buffer) == self.seq_len:
-                    yield self._flush(
-                        inputs_buffer,
-                        labels_buffer,
-                        positions_buffer,
-                        batch_n_total,
-                        batch_n_trained,
-                        batch_n_examples,
-                    )
-                    inputs_buffer, labels_buffer, positions_buffer = [], [], []
-                    batch_n_total = batch_n_trained = batch_n_examples = 0
-
-            if len(inputs_buffer) > 0:
-                pad_len = self.seq_len - len(inputs_buffer)
-                if pad_len > 0:
-                    inputs_buffer.extend([self._eos_id] * pad_len)
-                    labels_buffer.extend([IGNORE_INDEX] * pad_len)
-                    positions_buffer.extend(range(pad_len))
-                yield self._flush(
-                    inputs_buffer,
-                    labels_buffer,
-                    positions_buffer,
-                    batch_n_total,
-                    batch_n_trained,
-                    batch_n_examples,
-                )
-                inputs_buffer, labels_buffer, positions_buffer = [], [], []
-                batch_n_total = batch_n_trained = batch_n_examples = 0
-
-            if not self.infinite:
-                logger.warning("Dataset '%s' has run out of data", self._dataset_id)
-                break
-            self._sample_idx = 0
-            self._epoch += 1
-            self._data = cast(
-                Dataset,
-                self._original_data.shuffle(
-                    seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
-                ),
-            )
-            if self._num_workers > 1:
-                self._data = cast(
-                    Dataset,
-                    split_dataset_by_node(
-                        self._data, self._worker_id, self._num_workers
-                    ),
-                )
-            logger.warning(
-                "Dataset '%s' is being re-looped (epoch %d)",
-                self._dataset_id,
-                self._epoch,
-            )
-
-    def _flush(
-        self,
-        inputs: list[int],
-        labels: list[int],
-        positions: list[int],
-        n_total_tokens: int,
-        n_trained_tokens: int,
-        n_examples_packed: int,
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, dict[str, int]]:
-        return (
-            {
-                "input": torch.tensor(inputs, dtype=torch.long),
-                "positions": torch.tensor(positions, dtype=torch.long),
-            },
-            torch.tensor(labels, dtype=torch.long),
-            {
-                "n_total_tokens": n_total_tokens,
-                "n_trained_tokens": n_trained_tokens,
-                "n_examples_packed": n_examples_packed,
-            },
-        )
-
-    def state_dict(self) -> dict[str, Any]:
+    def _new_batch(self) -> dict:
         return {
-            "epoch": self._epoch,
-            "sample_idx": self._sample_idx,
+            "inputs": [],
+            "labels": [],
+            "positions": [],
+            "n_total": 0,
+            "n_trained": 0,
+            "n_examples": 0,
         }
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        self._epoch = state_dict["epoch"]
-        self._sample_idx = state_dict["sample_idx"]
-        if self._epoch > 0:
-            self._data = cast(
-                Dataset,
-                self._original_data.shuffle(
-                    seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
-                ),
-            )
+    def _place_item(self, batch: dict, item: tuple[list[int], list[int]]) -> None:
+        ids, lbls = item
+        batch["inputs"].extend(ids)
+        batch["labels"].extend(lbls)
+        batch["positions"].extend(range(len(ids)))
+        batch["n_total"] += len(ids)
+        batch["n_trained"] += sum(1 for lbl in lbls if lbl != IGNORE_INDEX)
+        batch["n_examples"] += 1
 
-
-class TruncateLastBufferDataset(TruncateLastDataset):
-    """Buffer-packing variant of TruncateLastDataset.
-
-    Maintains a lookahead buffer of pre-tokenized examples. For each batch,
-    starts with the oldest buffered example (FIFO) then fills remaining space
-    with the largest example that fits. Reduces padding waste compared to greedy
-    packing, especially at long sequence lengths.
-    """
-
-    def __init__(self, *args, buffer_size: int = 64, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._buffer_size = buffer_size
-        self._buffer: list[tuple[list[int], list[int]]] = []
-        self._data_iter: Iterator | None = None
-        self._data_exhausted: bool = False
-
-    def _refill_buffer(self) -> None:
-        while len(self._buffer) < self._buffer_size and not self._data_exhausted:
-            sample = next(self._data_iter, None)
-            if sample is None:
-                self._data_exhausted = True
-                break
-            result = self._tokenize_sample(sample)
-            self._sample_idx += 1
-            if result is None:
-                continue
-            self._buffer.append(result)
-
-    def __iter__(self):
-        self._prepare_iter()
-        yield from self._iter_buffer_packed()
-
-    def _iter_buffer_packed(self):
-        self._data_iter = self._get_data_iter()
-        self._data_exhausted = False
-
-        while True:
-            self._refill_buffer()
-
-            if not self._buffer:
-                if not self.infinite:
-                    break
-                self._sample_idx = 0
-                self._epoch += 1
-                self._data = cast(
-                    Dataset,
-                    self._original_data.shuffle(
-                        seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
-                    ),
-                )
-                if self._num_workers > 1:
-                    self._data = cast(
-                        Dataset,
-                        split_dataset_by_node(
-                            self._data, self._worker_id, self._num_workers
-                        ),
-                    )
-                self._data_iter = self._get_data_iter()
-                self._data_exhausted = False
-                logger.warning(
-                    "Dataset '%s' is being re-looped (epoch %d)",
-                    self._dataset_id,
-                    self._epoch,
-                )
-                continue
-
-            yield self._pack_one_batch()
-
-    def _start_batch(
-        self,
-    ) -> tuple[list[int], list[int], list[int], int, int, int]:
-        """Pop oldest from buffer (FIFO), return initial batch state."""
-        oldest_ids, oldest_lbls = self._buffer.pop(0)
-        inputs_buf = list(oldest_ids)
-        labels_buf = list(oldest_lbls)
-        positions_buf = list(range(len(oldest_ids)))
-        batch_n_total = len(oldest_ids)
-        batch_n_trained = sum(1 for lbl in oldest_lbls if lbl != IGNORE_INDEX)
-        batch_n_examples = 1
-        return inputs_buf, labels_buf, positions_buf, batch_n_total, batch_n_trained, batch_n_examples
-
-    def _pack_one_batch(self):
-        inputs_buf, labels_buf, positions_buf, batch_n_total, batch_n_trained, batch_n_examples = self._start_batch()
-
-        while True:
-            remaining = self.seq_len - len(inputs_buf)
-            if remaining <= 0:
-                break
-            best_idx = -1
-            best_len = 0
-            for i, (ids, _) in enumerate(self._buffer):
-                L = len(ids)
-                if L <= remaining and L > best_len:
-                    best_idx = i
-                    best_len = L
-            if best_idx == -1:
-                break
-            picked_ids, picked_lbls = self._buffer.pop(best_idx)
-            inputs_buf.extend(picked_ids)
-            labels_buf.extend(picked_lbls)
-            positions_buf.extend(range(len(picked_ids)))
-            batch_n_total += len(picked_ids)
-            batch_n_trained += sum(
-                1 for lbl in picked_lbls if lbl != IGNORE_INDEX
-            )
-            batch_n_examples += 1
-
-        pad_len = self.seq_len - len(inputs_buf)
+    def _pad_and_flush(
+        self, batch: dict
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, dict[str, int]]:
+        pad_len = self.seq_len - len(batch["inputs"])
         if pad_len > 0:
-            inputs_buf.extend([self._eos_id] * pad_len)
-            labels_buf.extend([IGNORE_INDEX] * pad_len)
-            positions_buf.extend(range(pad_len))
-
-        return self._flush(
-            inputs_buf,
-            labels_buf,
-            positions_buf,
-            batch_n_total,
-            batch_n_trained,
-            batch_n_examples,
+            batch["inputs"].extend([self._eos_id] * pad_len)
+            batch["labels"].extend([IGNORE_INDEX] * pad_len)
+            batch["positions"].extend(range(pad_len))
+        stats: dict[str, int] = {
+            "n_total_tokens": batch["n_total"],
+            "n_trained_tokens": batch["n_trained"],
+            "n_examples_packed": batch["n_examples"],
+        }
+        if self._packing == "cost_balanced":
+            stats["batch_attention_cost"] = batch["cost"]
+        return (
+            {
+                "input": torch.tensor(batch["inputs"], dtype=torch.long),
+                "positions": torch.tensor(batch["positions"], dtype=torch.long),
+            },
+            torch.tensor(batch["labels"], dtype=torch.long),
+            stats,
         )
 
-    def state_dict(self) -> dict[str, Any]:
-        d = super().state_dict()
-        d["buffer"] = [(ids, lbls) for ids, lbls in self._buffer]
-        return d
+    def _serialize_buffer(self) -> list:
+        return [(ids, lbls) for ids, lbls in self._buffer]
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        buffer = state_dict.pop("buffer", [])
-        super().load_state_dict(state_dict)
-        self._buffer = [(list(ids), list(lbls)) for ids, lbls in buffer]
+    def _deserialize_buffer(self, data: list) -> list:
+        return [(list(ids), list(lbls)) for ids, lbls in data]
 
 
-class TruncateLastCostBalancedDataset(TruncateLastBufferDataset):
-    """Cost-balanced packing: targets uniform attention cost per sequence.
-
-    Selects buffer examples to minimize |sum(l_i²) - T| where T is the
-    expected attention cost derived from manifest length stats.
-    """
-
-    def __init__(self, *args, target_cost: float, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._target_cost = target_cost
-
-    def _pack_one_batch(self):
-        inputs_buf, labels_buf, positions_buf, batch_n_total, batch_n_trained, batch_n_examples = self._start_batch()
-        current_cost = len(inputs_buf) ** 2
-
-        while True:
-            remaining = self.seq_len - len(inputs_buf)
-            if remaining <= 0:
-                break
-            best_idx, best_gap = -1, float("inf")
-            for i, (ids, _) in enumerate(self._buffer):
-                L = len(ids)
-                if L > remaining:
-                    continue
-                gap = abs(current_cost + L * L - self._target_cost)
-                if gap < best_gap:
-                    best_gap = gap
-                    best_idx = i
-            if best_idx == -1:
-                break
-            picked_ids, picked_lbls = self._buffer.pop(best_idx)
-            current_cost += len(picked_ids) ** 2
-            inputs_buf.extend(picked_ids)
-            labels_buf.extend(picked_lbls)
-            positions_buf.extend(range(len(picked_ids)))
-            batch_n_total += len(picked_ids)
-            batch_n_trained += sum(1 for lbl in picked_lbls if lbl != IGNORE_INDEX)
-            batch_n_examples += 1
-
-        pad_len = self.seq_len - len(inputs_buf)
-        if pad_len > 0:
-            inputs_buf.extend([self._eos_id] * pad_len)
-            labels_buf.extend([IGNORE_INDEX] * pad_len)
-            positions_buf.extend(range(pad_len))
-
-        result = self._flush(
-            inputs_buf, labels_buf, positions_buf,
-            batch_n_total, batch_n_trained, batch_n_examples,
-        )
-        result[2]["batch_attention_cost"] = current_cost
-        return result
+# ---------------------------------------------------------------------------
+# Format: backbone_suffix
+# ---------------------------------------------------------------------------
 
 
 class _BackboneSuffixItem(NamedTuple):
@@ -645,19 +591,12 @@ class _BackboneSuffixItem(NamedTuple):
 
 
 class BackboneSuffixDataset(PreTokenizedDataset):
-    """Buffer-packing for backbone+suffix pre-tokenized data.
+    """Pre-tokenized backbone+suffix shards for flex attention.
 
     Reads (input_ids, labels, positions, suffix_starts, insertion_limits, n_tokens)
-    and expands the compressed suffix_starts/insertion_limits into per-token
-    [seq_len] tensors (conv_ids, suffix_ids, insertion_limits) for flex attention.
+    and expands the compressed suffix metadata into per-token [seq_len] tensors
+    (conv_ids, suffix_ids, insertion_limits) during packing.
     """
-
-    def __init__(self, *args, buffer_size: int = 64, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._buffer_size = buffer_size
-        self._buffer: list[_BackboneSuffixItem] = []
-        self._data_iter: Iterator | None = None
-        self._data_exhausted: bool = False
 
     def _tokenize_sample(self, sample: dict) -> _BackboneSuffixItem | None:
         n_tokens = sample["n_tokens"]
@@ -675,201 +614,58 @@ class BackboneSuffixDataset(PreTokenizedDataset):
         suffix_starts = list(sample["suffix_starts"])
         insertion_limits = list(sample["insertion_limits"])
         self._log_first_sample(input_ids, labels)
-        return _BackboneSuffixItem(input_ids, labels, positions, suffix_starts, insertion_limits)
-
-    def _refill_buffer(self) -> None:
-        while len(self._buffer) < self._buffer_size and not self._data_exhausted:
-            sample = next(self._data_iter, None)
-            if sample is None:
-                self._data_exhausted = True
-                break
-            result = self._tokenize_sample(sample)
-            self._sample_idx += 1
-            if result is None:
-                continue
-            self._buffer.append(result)
-
-    def __iter__(self):
-        self._prepare_iter()
-        yield from self._iter_buffer_packed()
-
-    def _prepare_iter(self) -> None:
-        worker_info = torch.utils.data.get_worker_info()
-        if worker_info is not None:
-            self._worker_id = worker_info.id
-            self._num_workers = worker_info.num_workers
-        if self._epoch > 0:
-            self._data = cast(
-                Dataset,
-                self._original_data.shuffle(
-                    seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
-                ),
-            )
-        else:
-            self._data = self._original_data
-        if self._num_workers > 1:
-            self._data = cast(
-                Dataset,
-                split_dataset_by_node(self._data, self._worker_id, self._num_workers),
-            )
-        self._sample_idx = min(self._sample_idx, len(self._data))
-
-    def _iter_buffer_packed(self):
-        self._data_iter = self._get_data_iter()
-        self._data_exhausted = False
-
-        while True:
-            self._refill_buffer()
-
-            if not self._buffer:
-                if not self.infinite:
-                    break
-                self._sample_idx = 0
-                self._epoch += 1
-                self._data = cast(
-                    Dataset,
-                    self._original_data.shuffle(
-                        seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
-                    ),
-                )
-                if self._num_workers > 1:
-                    self._data = cast(
-                        Dataset,
-                        split_dataset_by_node(
-                            self._data, self._worker_id, self._num_workers
-                        ),
-                    )
-                self._data_iter = self._get_data_iter()
-                self._data_exhausted = False
-                logger.warning(
-                    "Dataset '%s' is being re-looped (epoch %d)",
-                    self._dataset_id,
-                    self._epoch,
-                )
-                continue
-
-            yield self._pack_one_batch()
-
-    def _pack_one_batch(
-        self,
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, dict[str, int]]:
-        inputs_buf: list[int] = []
-        labels_buf: list[int] = []
-        positions_buf: list[int] = []
-        conv_ids_buf: list[int] = []
-        suffix_ids_buf: list[int] = []
-        insertion_limits_buf: list[int] = []
-
-        batch_n_total = 0
-        batch_n_trained = 0
-        batch_n_examples = 0
-        conv_counter = 1
-        suffix_counter = 1
-
-        # FIFO: pop oldest first
-        oldest = self._buffer.pop(0)
-        suffix_counter = self._place_example(
-            oldest,
-            inputs_buf, labels_buf, positions_buf,
-            conv_ids_buf, suffix_ids_buf, insertion_limits_buf,
-            conv_counter, suffix_counter,
-        )
-        batch_n_total += len(oldest.input_ids)
-        batch_n_trained += sum(1 for lbl in oldest.labels if lbl != IGNORE_INDEX)
-        batch_n_examples += 1
-        conv_counter += 1
-
-        # Fill with largest-fitting
-        while True:
-            remaining = self.seq_len - len(inputs_buf)
-            if remaining <= 0:
-                break
-            best_idx = -1
-            best_len = 0
-            for i, item in enumerate(self._buffer):
-                L = len(item.input_ids)
-                if L <= remaining and L > best_len:
-                    best_idx = i
-                    best_len = L
-            if best_idx == -1:
-                break
-            picked = self._buffer.pop(best_idx)
-            suffix_counter = self._place_example(
-                picked,
-                inputs_buf, labels_buf, positions_buf,
-                conv_ids_buf, suffix_ids_buf, insertion_limits_buf,
-                conv_counter, suffix_counter,
-            )
-            batch_n_total += len(picked.input_ids)
-            batch_n_trained += sum(1 for lbl in picked.labels if lbl != IGNORE_INDEX)
-            batch_n_examples += 1
-            conv_counter += 1
-
-        # Pad
-        pad_len = self.seq_len - len(inputs_buf)
-        if pad_len > 0:
-            inputs_buf.extend([self._eos_id] * pad_len)
-            labels_buf.extend([IGNORE_INDEX] * pad_len)
-            positions_buf.extend(range(pad_len))
-            conv_ids_buf.extend([0] * pad_len)
-            suffix_ids_buf.extend([0] * pad_len)
-            insertion_limits_buf.extend([-1] * pad_len)
-
-        return (
-            {
-                "input": torch.tensor(inputs_buf, dtype=torch.long),
-                "positions": torch.tensor(positions_buf, dtype=torch.long),
-                "conv_ids": torch.tensor(conv_ids_buf, dtype=torch.long),
-                "suffix_ids": torch.tensor(suffix_ids_buf, dtype=torch.long),
-                "insertion_limits": torch.tensor(insertion_limits_buf, dtype=torch.long),
-            },
-            torch.tensor(labels_buf, dtype=torch.long),
-            {
-                "n_total_tokens": batch_n_total,
-                "n_trained_tokens": batch_n_trained,
-                "n_examples_packed": batch_n_examples,
-            },
+        return _BackboneSuffixItem(
+            input_ids, labels, positions, suffix_starts, insertion_limits
         )
 
-    def _place_example(
-        self,
-        item: _BackboneSuffixItem,
-        inputs_buf: list[int],
-        labels_buf: list[int],
-        positions_buf: list[int],
-        conv_ids_buf: list[int],
-        suffix_ids_buf: list[int],
-        insertion_limits_buf: list[int],
-        conv_id: int,
-        suffix_counter_start: int,
-    ) -> int:
-        """Place one example into the packed row buffers. Returns next suffix_counter."""
+    def _item_length(self, item: _BackboneSuffixItem) -> int:
+        return len(item.input_ids)
+
+    def _new_batch(self) -> dict:
+        return {
+            "inputs": [],
+            "labels": [],
+            "positions": [],
+            "conv_ids": [],
+            "suffix_ids": [],
+            "insertion_limits": [],
+            "n_total": 0,
+            "n_trained": 0,
+            "n_examples": 0,
+            "conv_counter": 1,
+            "suffix_counter": 1,
+        }
+
+    def _place_item(self, batch: dict, item: _BackboneSuffixItem) -> None:
         input_ids = item.input_ids
         labels = item.labels
         positions = item.positions
         suffix_starts = item.suffix_starts
         ins_limits = item.insertion_limits
-        off = len(inputs_buf)
+        off = len(batch["inputs"])
         n = len(input_ids)
         backbone_len = suffix_starts[0] if suffix_starts else n
+        conv_id = batch["conv_counter"]
 
-        inputs_buf.extend(input_ids)
-        labels_buf.extend(labels)
-        positions_buf.extend(positions)
-        conv_ids_buf.extend([conv_id] * n)
+        batch["inputs"].extend(input_ids)
+        batch["labels"].extend(labels)
+        batch["positions"].extend(positions)
+        batch["conv_ids"].extend([conv_id] * n)
 
-        # suffix_ids: 0 for backbone, counter for each suffix
+        # suffix_ids: 0 for backbone, unique counter for each suffix
         local_suffix_ids = [0] * n
-        suffix_counter = suffix_counter_start
+        suffix_counter = batch["suffix_counter"]
         for k in range(len(suffix_starts)):
             s_start = suffix_starts[k]
             s_end = suffix_starts[k + 1] if k + 1 < len(suffix_starts) else n
             for j in range(s_start, s_end):
                 local_suffix_ids[j] = suffix_counter
             suffix_counter += 1
-        suffix_ids_buf.extend(local_suffix_ids)
+        batch["suffix_ids"].extend(local_suffix_ids)
+        batch["suffix_counter"] = suffix_counter
 
-        # insertion_limits: backbone gets off + backbone_len - 1, each suffix gets off + its limit
+        # insertion_limits: backbone gets off + backbone_len - 1,
+        # each suffix gets off + its compressed limit value
         local_ins_limits = [0] * n
         backbone_limit = off + backbone_len - 1
         for j in range(backbone_len):
@@ -880,32 +676,58 @@ class BackboneSuffixDataset(PreTokenizedDataset):
             limit_val = off + ins_limits[k]
             for j in range(s_start, s_end):
                 local_ins_limits[j] = limit_val
-        insertion_limits_buf.extend(local_ins_limits)
+        batch["insertion_limits"].extend(local_ins_limits)
 
-        return suffix_counter
+        batch["n_total"] += n
+        batch["n_trained"] += sum(1 for lbl in labels if lbl != IGNORE_INDEX)
+        batch["n_examples"] += 1
+        batch["conv_counter"] += 1
 
-    def state_dict(self) -> dict:
-        return {
-            "epoch": self._epoch,
-            "sample_idx": self._sample_idx,
-            "buffer": list(self._buffer),
+    def _pad_and_flush(
+        self, batch: dict
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, dict[str, int]]:
+        pad_len = self.seq_len - len(batch["inputs"])
+        if pad_len > 0:
+            batch["inputs"].extend([self._eos_id] * pad_len)
+            batch["labels"].extend([IGNORE_INDEX] * pad_len)
+            batch["positions"].extend(range(pad_len))
+            batch["conv_ids"].extend([0] * pad_len)
+            batch["suffix_ids"].extend([0] * pad_len)
+            batch["insertion_limits"].extend([-1] * pad_len)
+        stats: dict[str, int] = {
+            "n_total_tokens": batch["n_total"],
+            "n_trained_tokens": batch["n_trained"],
+            "n_examples_packed": batch["n_examples"],
         }
-
-    def load_state_dict(self, state_dict: dict) -> None:
-        self._epoch = state_dict["epoch"]
-        self._sample_idx = state_dict["sample_idx"]
-        self._buffer = [
-            _BackboneSuffixItem(list(ids), list(lbls), list(pos), list(ss), list(il))
-            for ids, lbls, pos, ss, il in state_dict.get("buffer", [])
-        ]
-        if self._epoch > 0:
-            self._data = cast(
-                Dataset,
-                self._original_data.shuffle(
-                    seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
+        if self._packing == "cost_balanced":
+            stats["batch_attention_cost"] = batch["cost"]
+        return (
+            {
+                "input": torch.tensor(batch["inputs"], dtype=torch.long),
+                "positions": torch.tensor(batch["positions"], dtype=torch.long),
+                "conv_ids": torch.tensor(batch["conv_ids"], dtype=torch.long),
+                "suffix_ids": torch.tensor(batch["suffix_ids"], dtype=torch.long),
+                "insertion_limits": torch.tensor(
+                    batch["insertion_limits"], dtype=torch.long
                 ),
-            )
+            },
+            torch.tensor(batch["labels"], dtype=torch.long),
+            stats,
+        )
 
+    def _serialize_buffer(self) -> list:
+        return [tuple(item) for item in self._buffer]
+
+    def _deserialize_buffer(self, data: list) -> list:
+        return [
+            _BackboneSuffixItem(list(ids), list(lbls), list(pos), list(ss), list(il))
+            for ids, lbls, pos, ss, il in data
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Dataset registry + DataLoader
+# ---------------------------------------------------------------------------
 
 _DATASET_CLASSES: dict[str, type[PreTokenizedDataset]] = {
     "truncate_last": TruncateLastDataset,
@@ -945,8 +767,7 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         'cost_balanced' targets uniform attention cost per sequence."""
 
         buffer_size: int = 64
-        """Number of examples held in the lookahead buffer (per worker).
-        Only used when packing='buffer'."""
+        """Number of examples held in the lookahead buffer (per worker)."""
 
     def __init__(
         self,
@@ -959,6 +780,14 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         local_batch_size: int,
         cp_rank: int = 0,
     ) -> None:
+        if local_batch_size > 1:
+            raise ValueError(
+                f"local_batch_size must be 1 for pre-tokenized datasets (got "
+                f"{local_batch_size}). Packing handles batching within each "
+                f"sequence, and mixed strategies produce heterogeneous tensors "
+                f"that cannot be stacked."
+            )
+
         # Parse comma-separated paths
         raw_paths = [p.strip() for p in config.manifest_path.split(",") if p.strip()]
         manifest_paths: list[Path] = []
@@ -984,57 +813,27 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
                 f"Unsupported strategy {strategy!r} in {config.manifest_path}. "
                 f"Supported: {sorted(_DATASET_CLASSES)}"
             )
-        dataset_kwargs = dict(
-            manifest_path=str(manifest_paths[0]),
-            seq_len=seq_len,
-            dp_rank=dp_rank,
-            dp_world_size=dp_world_size,
-            cp_rank=cp_rank,
-            infinite=config.infinite,
-            shuffle_in_memory=config.shuffle_in_memory,
-            tokenizer=tokenizer,
-            _manifest=manifest,
-            _full_dataset=full_dataset,
-            _dataset_id=dataset_id,
-        )
-        if strategy == "backbone_suffix":
-            if config.packing == "cost_balanced":
-                raise ValueError(
-                    "cost_balanced packing not yet supported for backbone_suffix"
-                )
-            dataset = BackboneSuffixDataset(
-                **dataset_kwargs, buffer_size=config.buffer_size
-            )
-        elif config.packing == "buffer":
-            if strategy != "truncate_last":
-                raise ValueError(
-                    f"Buffer packing only supports 'truncate_last' strategy, "
-                    f"got {strategy!r}"
-                )
-            dataset = TruncateLastBufferDataset(
-                **dataset_kwargs, buffer_size=config.buffer_size
-            )
-        elif config.packing == "cost_balanced":
-            if strategy != "truncate_last":
-                raise ValueError(
-                    f"Cost-balanced packing only supports 'truncate_last' strategy, "
-                    f"got {strategy!r}"
-                )
+
+        # Compute target_cost for cost_balanced packing
+        target_cost: float | None = None
+        if config.packing == "cost_balanced":
             length_stats = manifest.get("stats", {}).get("length_stats")
             if not length_stats:
                 raise ValueError(
-                    f"cost_balanced packing requires 'length_stats' in manifest(s). "
-                    f"Re-run pretokenize_sft.py to generate stats."
+                    "cost_balanced packing requires 'length_stats' in manifest(s). "
+                    "Re-run pretokenize_sft.py to generate stats."
                 )
             _CUTOFFS = [16384, 32768, 65536, 131072, 262144, 524288]
             valid_cutoffs = [
-                c for c in _CUTOFFS
-                if c <= seq_len and f"tokens_per_example_{c // 1024}kmax" in length_stats
+                c
+                for c in _CUTOFFS
+                if c <= seq_len
+                and f"tokens_per_example_{c // 1024}kmax" in length_stats
             ]
             if not valid_cutoffs:
                 raise ValueError(
-                    f"No valid cutoff ≤ seq_len={seq_len} with tokens_per_example stats "
-                    f"in manifest {config.manifest_path}"
+                    f"No valid cutoff ≤ seq_len={seq_len} with tokens_per_example "
+                    f"stats in manifest {config.manifest_path}"
                 )
             cutoff = max(valid_cutoffs)
             k = cutoff // 1024
@@ -1043,13 +842,27 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
             target_cost = seq_len * sq_tokens / mean_tokens
             logger.info(
                 "Cost-balanced packing: target_cost=%.2e (T/seq²=%.3f, cutoff=%dk)",
-                target_cost, target_cost / seq_len**2, k,
+                target_cost,
+                target_cost / seq_len**2,
+                k,
             )
-            dataset = TruncateLastCostBalancedDataset(
-                **dataset_kwargs, buffer_size=config.buffer_size, target_cost=target_cost
-            )
-        else:
-            dataset = _DATASET_CLASSES[strategy](**dataset_kwargs)
+
+        dataset = _DATASET_CLASSES[strategy](
+            manifest_path=str(manifest_paths[0]),
+            seq_len=seq_len,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            cp_rank=cp_rank,
+            infinite=config.infinite,
+            shuffle_in_memory=config.shuffle_in_memory,
+            tokenizer=tokenizer,
+            packing=config.packing,
+            buffer_size=config.buffer_size,
+            target_cost=target_cost,
+            _manifest=manifest,
+            _full_dataset=full_dataset,
+            _dataset_id=dataset_id,
+        )
 
         self._consumed_n_total_tokens: int = 0
         self._consumed_n_trained_tokens: int = 0
