@@ -4,9 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import os
-from pathlib import Path
-
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
@@ -77,11 +74,7 @@ def granite_sft_debugmodel() -> Trainer.Config:
             steps=10,
         ),
         dataloader=GraniteSFTDataLoader.Config(
-            dataset_path="json",
-            load_dataset_kwargs={
-                "data_files": "tests/assets/sft_test/data.json",
-                "split": "train",
-            },
+            dataset_path="tests/assets/sft_test/data.json",
             sample_processor=process_sample,
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
@@ -113,7 +106,7 @@ def granite_sft_pretokenized_debugmodel() -> Trainer.Config:
             steps=10,
         ),
         dataloader=GranitePreTokenizedDataLoader.Config(
-            manifest_path="tests/assets/pretok_truncate_last/manifest.json",
+            dataset_path="tests/assets/pretok_truncate_last",
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         checkpoint=CheckpointManager.Config(
@@ -127,25 +120,11 @@ def granite_sft_pretokenized_debugmodel() -> Trainer.Config:
 
 
 def granite_4_1_8b_sft() -> Trainer.Config:
-    """SFT config for granite-4.1-8b on GLM-5.1 Reasoning with thinking template.
+    """SFT config for granite-4.1-8b on raw JSONL data.
 
-    Requires HF_ASSETS_PATH and DATA_PATH set in the environment or a .env file at the
-    repo root.
+    Requires --hf-assets-path and --dataloader.dataset-path on CLI.
     """
-    from dotenv import load_dotenv
-
-    load_dotenv()
-    ckpt_path = os.getenv("HF_ASSETS_PATH")
-    data_path = os.getenv("DATA_PATH")
-    for name, val in [
-        ("HF_ASSETS_PATH", ckpt_path),
-        ("DATA_PATH", data_path),
-    ]:
-        if val is None:
-            raise ValueError(f"{name} not set. Add it to .env or export it before running.")
-
     return Trainer.Config(
-        hf_assets_path=ckpt_path,
         model_spec=model_registry("8B", attn_backend="flex"),
         optimizer=OptimizersContainer.Config(lr=1e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -159,14 +138,7 @@ def granite_4_1_8b_sft() -> Trainer.Config:
             seq_len=8192,
             steps=1000,
         ),
-        dataloader=GraniteSFTDataLoader.Config(
-            dataset_path="json",
-            load_dataset_kwargs={
-                "data_files": str(Path(data_path) / "*.jsonl"),
-                "split": "train",
-            },
-            sample_processor=lambda s: s["messages"],
-        ),
+        dataloader=GraniteSFTDataLoader.Config(dataset_path=""),
         metrics=MetricsProcessor.Config(log_freq=10),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=ActivationCheckpointConfig(mode="selective"),
@@ -176,28 +148,11 @@ def granite_4_1_8b_sft() -> Trainer.Config:
 def granite_4_1_8b_sft_pretokenized() -> Trainer.Config:
     """SFT config for granite-4.1-8b using pre-tokenized Arrow shards.
 
-    Requires HF_ASSETS_PATH and PRETOK_DATA_PATH set in the environment or a
-    .env file at the repo root. PRETOK_DATA_PATH may be a single directory
-    containing manifest.json, or a comma-separated list of such directories
-    to merge into a single training pool.
+    Requires --hf-assets-path and --dataloader.dataset-path on CLI.
+    dataset-path may be a single directory containing manifest.json, or a
+    comma-separated list of such directories to merge into a single training pool.
     """
-    from dotenv import load_dotenv
-
-    load_dotenv()
-    ckpt_path = os.getenv("HF_ASSETS_PATH")
-    pretok_data_path = os.getenv("PRETOK_DATA_PATH")
-    for name, val in [
-        ("HF_ASSETS_PATH", ckpt_path),
-        ("PRETOK_DATA_PATH", pretok_data_path),
-    ]:
-        if val is None:
-            raise ValueError(f"{name} not set. Add it to .env or export it before running.")
-
-    paths = [p.strip() for p in pretok_data_path.split(",") if p.strip()]
-    manifest_path_str = ",".join(str(Path(p) / "manifest.json") for p in paths)
-
     return Trainer.Config(
-        hf_assets_path=ckpt_path,
         model_spec=model_registry("8B", attn_backend="flex"),
         optimizer=OptimizersContainer.Config(lr=1e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -211,9 +166,7 @@ def granite_4_1_8b_sft_pretokenized() -> Trainer.Config:
             seq_len=8192,
             steps=1000,
         ),
-        dataloader=GranitePreTokenizedDataLoader.Config(
-            manifest_path=manifest_path_str,
-        ),
+        dataloader=GranitePreTokenizedDataLoader.Config(dataset_path=""),
         metrics=MetricsProcessor.Config(log_freq=10),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=ActivationCheckpointConfig(mode="selective"),
@@ -223,20 +176,9 @@ def granite_4_1_8b_sft_pretokenized() -> Trainer.Config:
 def granite_4_1_8b_base() -> Trainer.Config:
     """Pretraining/SFT config for granite-4.1-8b-base.
 
-    Requires HF_ASSETS_PATH set in the environment or a .env file at the repo root
-    pointing to the HF checkpoint directory.
+    Requires --hf-assets-path on CLI.
     """
-    from dotenv import load_dotenv
-
-    load_dotenv()
-    ckpt_path = os.getenv("HF_ASSETS_PATH")
-    if ckpt_path is None:
-        raise ValueError(
-            "HF_ASSETS_PATH not set. Add it to .env or export it before running."
-        )
-
     return Trainer.Config(
-        hf_assets_path=ckpt_path,
         model_spec=model_registry("8B"),
         optimizer=OptimizersContainer.Config(lr=1e-4),
         lr_scheduler=LRSchedulersContainer.Config(

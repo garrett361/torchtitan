@@ -251,7 +251,7 @@ class TestMultiWorkerSharding(unittest.TestCase):
         tokenizer = HuggingFaceTokenizer(tokenizer_path="tests/assets/tokenizer")
         loader = GranitePreTokenizedDataLoader(
             GranitePreTokenizedDataLoader.Config(
-                manifest_path=str(manifest_path),
+                dataset_path=str(manifest_path),
                 infinite=False,
                 num_workers=2,
                 persistent_workers=False,
@@ -289,7 +289,7 @@ class TestMultiWorkerSharding(unittest.TestCase):
         def make_loader(num_workers):
             return GranitePreTokenizedDataLoader(
                 GranitePreTokenizedDataLoader.Config(
-                    manifest_path=str(manifest_path),
+                    dataset_path=str(manifest_path),
                     infinite=False,
                     num_workers=num_workers,
                     persistent_workers=False,
@@ -334,7 +334,7 @@ class TestMultiWorkerSharding(unittest.TestCase):
         def make_loader():
             return GranitePreTokenizedDataLoader(
                 GranitePreTokenizedDataLoader.Config(
-                    manifest_path=str(manifest_path),
+                    dataset_path=str(manifest_path),
                     infinite=False,
                     num_workers=0,
                 ),
@@ -574,7 +574,7 @@ class TestGranitePreTokenizedDataLoaderDispatch(unittest.TestCase):
         tokenizer = HuggingFaceTokenizer(tokenizer_path="tests/assets/tokenizer")
         loader = GranitePreTokenizedDataLoader(
             GranitePreTokenizedDataLoader.Config(
-                manifest_path=str(manifest_path),
+                dataset_path=str(manifest_path),
                 infinite=False,
             ),
             dp_world_size=1,
@@ -595,7 +595,7 @@ class TestGranitePreTokenizedDataLoaderDispatch(unittest.TestCase):
         tokenizer = HuggingFaceTokenizer(tokenizer_path="tests/assets/tokenizer")
         loader = GranitePreTokenizedDataLoader(
             GranitePreTokenizedDataLoader.Config(
-                manifest_path=str(manifest_path),
+                dataset_path=str(manifest_path),
                 infinite=False,
                 packing="buffer",
                 buffer_size=32,
@@ -620,7 +620,7 @@ class TestGranitePreTokenizedDataLoaderDispatch(unittest.TestCase):
         with self.assertRaises(ValueError):
             GranitePreTokenizedDataLoader(
                 GranitePreTokenizedDataLoader.Config(
-                    manifest_path=str(manifest_path),
+                    dataset_path=str(manifest_path),
                     infinite=False,
                 ),
                 dp_world_size=1,
@@ -706,7 +706,7 @@ class TestLocalBatchSizeValidation(unittest.TestCase):
         with self.assertRaises(ValueError, msg="local_batch_size must be 1"):
             GranitePreTokenizedDataLoader(
                 GranitePreTokenizedDataLoader.Config(
-                    manifest_path=str(manifest_path),
+                    dataset_path=str(manifest_path),
                     infinite=False,
                 ),
                 dp_world_size=1,
@@ -727,7 +727,7 @@ class TestLocalBatchSizeValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             GranitePreTokenizedDataLoader(
                 GranitePreTokenizedDataLoader.Config(
-                    manifest_path=str(manifest_path),
+                    dataset_path=str(manifest_path),
                     infinite=False,
                     packing="cost_balanced",
                 ),

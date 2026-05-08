@@ -748,10 +748,10 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
 
     @dataclass(kw_only=True, slots=True)
     class Config(ParallelAwareDataloader.Config):
-        manifest_path: str
-        """Path to manifest.json produced by pretokenize_sft.py, or a
-        comma-separated list of dataset directories (each containing
-        manifest.json) to merge into a single training pool."""
+        dataset_path: str
+        """Directory (or comma-separated directories) containing pretokenized
+        shards and manifest.json. Also accepts direct paths to manifest.json
+        for backward compatibility."""
 
         infinite: bool = True
         """Loop the dataset indefinitely."""
@@ -789,7 +789,11 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
             )
 
         # Parse comma-separated paths
-        raw_paths = [p.strip() for p in config.manifest_path.split(",") if p.strip()]
+        if not config.dataset_path:
+            raise ValueError(
+                "dataloader.dataset_path must be set (--dataloader.dataset-path on CLI)."
+            )
+        raw_paths = [p.strip() for p in config.dataset_path.split(",") if p.strip()]
         manifest_paths: list[Path] = []
         for p in raw_paths:
             path = Path(p)
@@ -810,7 +814,7 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         strategy = manifest.get("strategy")
         if strategy not in _DATASET_CLASSES:
             raise ValueError(
-                f"Unsupported strategy {strategy!r} in {config.manifest_path}. "
+                f"Unsupported strategy {strategy!r} in {config.dataset_path}. "
                 f"Supported: {sorted(_DATASET_CLASSES)}"
             )
 
@@ -833,7 +837,7 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
             if not valid_cutoffs:
                 raise ValueError(
                     f"No valid cutoff ≤ seq_len={seq_len} with tokens_per_example "
-                    f"stats in manifest {config.manifest_path}"
+                    f"stats in manifest {config.dataset_path}"
                 )
             cutoff = max(valid_cutoffs)
             k = cutoff // 1024

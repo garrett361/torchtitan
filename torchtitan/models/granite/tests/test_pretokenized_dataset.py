@@ -421,7 +421,7 @@ class TestMultiDatasetMerge(unittest.TestCase):
     def test_single_path_no_merge(self):
         """Single path in comma-separated string behaves like non-merged."""
         config = GranitePreTokenizedDataLoader.Config(
-            manifest_path=str(MANIFEST_PATH),
+            dataset_path=str(MANIFEST_PATH),
         )
         loader = GranitePreTokenizedDataLoader(
             config,
@@ -436,7 +436,7 @@ class TestMultiDatasetMerge(unittest.TestCase):
     def test_multi_path_iteration(self):
         """Multi-dataset comma-separated path produces correct iteration."""
         config = GranitePreTokenizedDataLoader.Config(
-            manifest_path=f"{MANIFEST_PATH},{MANIFEST_PATH_B}",
+            dataset_path=f"{MANIFEST_PATH},{MANIFEST_PATH_B}",
             infinite=False,
             packing="greedy",
         )
@@ -457,7 +457,7 @@ class TestMultiDatasetMerge(unittest.TestCase):
         dir_a = str(MANIFEST_PATH.parent)
         dir_b = str(MANIFEST_PATH_B.parent)
         config = GranitePreTokenizedDataLoader.Config(
-            manifest_path=f"{dir_a},{dir_b}",
+            dataset_path=f"{dir_a},{dir_b}",
             infinite=False,
             packing="greedy",
         )
