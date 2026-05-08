@@ -43,14 +43,22 @@ def apply_cp_to_attention_module(
         NotImplementedError: If the attention type does not support CP
     """
     from torchtitan.models.common.attention import (
+        FA4Attention,
         FlexAttention,
         ScaledDotProductAttention,
     )
 
+    # seq_dim=1: q/k/v are (B, S, H, D) when CP hooks fire (before each
+    # attention module's internal transpose). Must not be 2 — shapes still
+    # match but attention silently computes garbage (upstream PR #2963 bug).
+    SEQ_DIM = 1
+
     first = attention_modules[0]
-    if isinstance(first, FlexAttention):
+    if isinstance(first, (FlexAttention, FA4Attention)):
+        # FA4 uses FLEX type: CP hooks only handle KV all-gather (not mask
+        # manipulation). The FA4Mask is built post-sharding by the trainer.
         cp_plan = _ContextParallel(
-            seq_dim=1, attention_type=_ContextParallel.AttentionType.FLEX
+            seq_dim=SEQ_DIM, attention_type=_ContextParallel.AttentionType.FLEX
         )
     elif isinstance(first, ScaledDotProductAttention):
         # Enable the DTensor dispatcher to route SDPA operations to the
@@ -58,7 +66,7 @@ def apply_cp_to_attention_module(
         # with SDPA (but not FlexAttention).
         _enable_context_parallel_dispatcher()
         cp_plan = _ContextParallel(
-            seq_dim=1, attention_type=_ContextParallel.AttentionType.SDPA
+            seq_dim=SEQ_DIM, attention_type=_ContextParallel.AttentionType.SDPA
         )
     else:
         raise NotImplementedError(

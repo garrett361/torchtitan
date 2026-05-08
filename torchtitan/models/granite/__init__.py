@@ -142,9 +142,9 @@ def _debugmodel(attn_backend: str = "sdpa") -> GraniteModel.Config:
     )
 
 
-def _debugmodel_fa4() -> GraniteModel.Config:
-    """Debug model sized for FA4: head_dim=64 (FA4 backward hits an ICE — internal
-    compiler error in the CuTe DSL kernel compiler — on head_dim<64)."""
+def _debugmodel_fa4(attn_backend: str = "fa4") -> GraniteModel.Config:
+    """Debug model with head_dim=64 (FA4 backward hits an ICE — internal compiler
+    error in the CuTe DSL kernel compiler — on head_dim<64)."""
     dim = 256
     n_heads = 4
     n_kv_heads = 2
@@ -181,7 +181,7 @@ def _debugmodel_fa4() -> GraniteModel.Config:
             n_kv_heads=n_kv_heads,
             hidden_dim=512,
             residual_multiplier=0.22,
-            attn_backend="fa4",
+            attn_backend=attn_backend,
         ),
     )
 

@@ -13,8 +13,10 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
+    build_fa4_mask,
     create_attention_mask,
     create_varlen_metadata_for_document,
+    FA4Attention,
     FlexAttention,
     get_backbone_suffix_mask_mod,
     get_causal_mask_mod,
@@ -248,8 +250,39 @@ class Decoder(BaseModel):
                 )
             assert tokenizer.eos_id is not None
             return create_varlen_metadata_for_document(input_batch, tokenizer.eos_id)
+        elif isinstance(inner_attn, FA4Attention.Config):
+            return self._get_fa4_attention_masks(attn_config, positions)
         else:
             raise TypeError(
-                f"Only VarlenAttention and FlexAttention support attention masks, "
-                f"got {type(inner_attn).__name__}"
+                f"Only VarlenAttention, FlexAttention, and FA4Attention support "
+                f"attention masks, got {type(inner_attn).__name__}"
             )
+
+    def _get_fa4_attention_masks(
+        self,
+        attn_config: BaseAttention.Config,
+        positions: torch.Tensor | None = None,
+    ) -> AttentionMasksType:
+        """Build FA4Mask for document-packed sequences (non-CP case).
+
+        For CP, the trainer builds the FA4Mask after sharding (it needs
+        restore_indices from the load balancer).
+        """
+        if attn_config.mask_type != "block_causal":
+            raise ValueError(
+                f"FA4 _get_fa4_attention_masks requires block_causal mask_type, "
+                f"got {attn_config.mask_type}"
+            )
+        if positions is None:
+            raise ValueError(
+                "block_causal FA4 attention requires per-document positions."
+            )
+        document_ids = self._document_ids_from_positions(positions)
+        return build_fa4_mask(document_ids=document_ids)
+
+    @staticmethod
+    def _document_ids_from_positions(positions: torch.Tensor) -> torch.Tensor:
+        """Derive per-token document IDs from position resets."""
+        resets = torch.zeros_like(positions, dtype=torch.int32)
+        resets[:, 1:] = (positions[:, 1:] < positions[:, :-1]).int()
+        return torch.cumsum(resets, dim=1)

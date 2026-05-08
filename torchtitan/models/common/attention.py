@@ -42,6 +42,7 @@ from torchtitan.protocols.module import Module
 
 __all__ = [
     "FA4Attention",
+    "FA4Mask",
     "FlexAttention",
     "BaseQKVLinear",
     "FusedQKVLinear",
@@ -51,6 +52,7 @@ __all__ = [
     "ScaledDotProductAttention",
     "VarlenAttention",
     "VarlenMetadata",
+    "build_fa4_mask",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "get_causal_mask_mod",
@@ -74,7 +76,23 @@ class VarlenMetadata(NamedTuple):
     max_k: int
 
 
-AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
+class FA4Mask(NamedTuple):
+    """Pre-built mask for FA4 attention, analogous to BlockMask for FlexAttention.
+
+    Holds a CuTe DSL mask_mod function and its aux_tensors. Created upstream
+    (in the trainer or decoder) and passed through the attention_masks plumbing.
+
+    aux_tensors are data tensors (shape (B, 1, S), dtype int32) that the
+    mask_mod indexes at runtime to make masking decisions — e.g. shard_indices
+    for CP position remapping or document IDs for isolation. They're passed
+    to flash_attn_func and made available inside the mask_mod as its final arg.
+    """
+
+    mask_mod: Callable
+    aux_tensors: list[torch.Tensor]
+
+
+AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata | FA4Mask
 
 
 class LocalMapInnerAttention(Module):
@@ -404,6 +422,7 @@ class FA4Attention(LocalMapInnerAttention):
         k: torch.Tensor,
         v: torch.Tensor,
         *,
+        attention_masks: FA4Mask | None = None,
         scale: float | None = None,
         enable_gqa: bool = False,
         **kwargs,
@@ -413,8 +432,157 @@ class FA4Attention(LocalMapInnerAttention):
         input_dtype = q.dtype
         if input_dtype not in (torch.float16, torch.bfloat16):
             q, k, v = q.bfloat16(), k.bfloat16(), v.bfloat16()
-        out, _ = flash_attn_func(q, k, v, causal=True, softmax_scale=scale)
+
+        if attention_masks is None:
+            out, _ = flash_attn_func(q, k, v, causal=True, softmax_scale=scale)
+        else:
+            if not isinstance(attention_masks, FA4Mask):
+                raise TypeError(
+                    f"FA4Attention expects FA4Mask, got {type(attention_masks).__name__}"
+                )
+            out, _ = flash_attn_func(
+                q, k, v,
+                causal=False,
+                softmax_scale=scale,
+                mask_mod=attention_masks.mask_mod,
+                aux_tensors=attention_masks.aux_tensors,
+            )
         return out.to(input_dtype)
+
+
+def build_fa4_mask(
+    *,
+    shard_indices: torch.Tensor | None = None,
+    cp_rank: int = 0,
+    local_seq_len: int = 0,
+    document_ids: torch.Tensor | None = None,
+) -> FA4Mask:
+    """Build an FA4Mask for CuTe DSL masking.
+
+    Composes causal + document isolation + CP position remapping into a single
+    mask_mod with the appropriate aux_tensors.
+
+    aux_tensors use shape (B, 1, S) per CuTe DSL indexing convention:
+    ``tensor[batch[0], 0, seq_idx[0]]``.
+
+    Index direction (naming follows upstream _HeadTailLoadBalancer/_PTRRLoadBalancer):
+        ``_generate_indices(restore=False)`` → shard_indices[perm_pos] = orig_pos
+        ``_generate_indices(restore=True)``  → restore_indices[orig_pos] = perm_pos
+
+    The mask_mod receives m_idx/n_idx in permuted space and needs original
+    positions for causal comparison, so we need the perm→orig direction
+    (restore=False, a.k.a. "shard" indices).
+
+    Args:
+        shard_indices: Maps permuted index → original position, i.e.
+            ``lb._generate_indices(restore=False)``. Shape (full_seq,),
+            (1, full_seq), or (B, full_seq). Required when CP is active.
+        cp_rank: This rank's position in the CP group. Used to compute
+            the query offset into the full sequence.
+        local_seq_len: Per-rank sequence length after CP sharding.
+        document_ids: Per-position document IDs, shape (B, seq_len), indexed
+            by original position. Required for document isolation.
+    """
+    import cutlass
+    import cutlass.cute as cute
+
+    from flash_attn.cute.utils import scalar_to_ssa
+
+    has_cp = shard_indices is not None
+    has_docs = document_ids is not None
+
+    # CuTe DSL requires int32 tensors and (B, 1, S) shape
+    if has_cp:
+        shard_indices = shard_indices.to(torch.int32)
+        if shard_indices.ndim != 2:
+            raise ValueError(
+                f"shard_indices must be 2D (B, S), got ndim={shard_indices.ndim}"
+            )
+        shard_indices = shard_indices.unsqueeze(1)
+    if has_docs:
+        document_ids = document_ids.to(torch.int32)
+        if document_ids.ndim == 2:
+            document_ids = document_ids.unsqueeze(1)
+
+    if has_cp and has_docs:
+        q_offset = cp_rank * local_seq_len
+        # Pre-index document_ids through the permutation to avoid dependent
+        # reads in the mask_mod (CuTe DSL can't use a runtime value as index).
+        shard_indices_2d = shard_indices.squeeze(1)  # (1 or B, full_seq)
+        document_ids_2d = document_ids.squeeze(1)    # (B, full_seq)
+        shard_indices_2d = shard_indices_2d.expand_as(document_ids_2d)
+        perm_doc_ids = torch.gather(
+            document_ids_2d, 1, shard_indices_2d.long()
+        ).to(torch.int32)
+        q_doc_id_per_pos = perm_doc_ids[:, q_offset:q_offset + local_seq_len].unsqueeze(1)
+        kv_doc_id_per_pos = perm_doc_ids.unsqueeze(1)  # (B, 1, full_seq)
+
+        @cute.jit
+        def cp_doc_causal_mask(batch, head, m_idx, n_idx, seqlen_info, aux_tensors: list):
+            batch_idx, q_idx, kv_idx = batch[0], m_idx[0], n_idx[0]
+            shard_indices = aux_tensors[0]      # (B, 1, full_seq) perm→orig position map
+            q_doc_id_per_pos = aux_tensors[1]   # (B, 1, local_seq) doc ID per Q position
+            kv_doc_id_per_pos = aux_tensors[2]  # (B, 1, full_seq) doc ID per KV position
+            orig_q_idx = scalar_to_ssa(shard_indices[batch_idx, 0, q_idx + q_offset], cutlass.Int32)
+            orig_kv_idx = scalar_to_ssa(shard_indices[batch_idx, 0, kv_idx], cutlass.Int32)
+            q_doc_id = scalar_to_ssa(q_doc_id_per_pos[batch_idx, 0, q_idx], cutlass.Int32)
+            kv_doc_id = scalar_to_ssa(kv_doc_id_per_pos[batch_idx, 0, kv_idx], cutlass.Int32)
+            return (orig_kv_idx <= orig_q_idx) & (q_doc_id == kv_doc_id)
+
+        batch_size = document_ids_2d.shape[0]
+        if shard_indices.shape[0] == 1 and batch_size > 1:
+            raise NotImplementedError(
+                "CP+document build_fa4_mask with B > 1 is not yet tested. "
+                "shard_indices batch dim is 1 but document_ids batch dim "
+                f"is {batch_size}."
+            )
+
+        return FA4Mask(
+            mask_mod=cp_doc_causal_mask,
+            aux_tensors=[shard_indices, q_doc_id_per_pos, kv_doc_id_per_pos],
+        )
+
+    elif has_cp:
+        if shard_indices.shape[0] != 1:
+            raise NotImplementedError(
+                "CP-only build_fa4_mask only supports batch size 1 for "
+                "shard_indices. For B > 1, provide document_ids."
+            )
+        q_offset = cp_rank * local_seq_len
+
+        @cute.jit
+        def cp_causal_mask(batch, head, m_idx, n_idx, seqlen_info, aux_tensors: list):
+            batch_idx, q_idx, kv_idx = batch[0], m_idx[0], n_idx[0]
+            shard_indices = aux_tensors[0]  # (1, 1, full_seq) perm→orig position map
+            orig_q_idx = scalar_to_ssa(shard_indices[batch_idx, 0, q_idx + q_offset], cutlass.Int32)
+            orig_kv_idx = scalar_to_ssa(shard_indices[batch_idx, 0, kv_idx], cutlass.Int32)
+            return orig_kv_idx <= orig_q_idx
+
+        return FA4Mask(
+            mask_mod=cp_causal_mask,
+            aux_tensors=[shard_indices],
+        )
+
+    elif has_docs:
+
+        @cute.jit
+        def doc_causal_mask(batch, head, m_idx, n_idx, seqlen_info, aux_tensors: list):
+            batch_idx, q_idx, kv_idx = batch[0], m_idx[0], n_idx[0]
+            doc_id_per_pos = aux_tensors[0]  # (B, 1, seq_len)
+            q_doc_id = scalar_to_ssa(doc_id_per_pos[batch_idx, 0, q_idx], cutlass.Int32)
+            kv_doc_id = scalar_to_ssa(doc_id_per_pos[batch_idx, 0, kv_idx], cutlass.Int32)
+            return (kv_idx <= q_idx) & (q_doc_id == kv_doc_id)
+
+        return FA4Mask(
+            mask_mod=doc_causal_mask,
+            aux_tensors=[document_ids],
+        )
+
+    else:
+        raise ValueError(
+            "build_fa4_mask requires at least one of shard_indices or document_ids. "
+            "For plain causal attention without CP, pass attention_masks=None."
+        )
 
 
 def get_causal_mask_mod() -> _mask_mod_signature:

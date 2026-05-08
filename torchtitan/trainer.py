@@ -618,33 +618,123 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         inner_attention = getattr(attn_config, "inner_attention", None)
         if inner_attention is not None:
             from torchtitan.models.common.attention import (
+                FA4Attention,
                 FlexAttention,
                 VarlenAttention,
             )
 
             if isinstance(
-                inner_attention, (FlexAttention.Config, VarlenAttention.Config)
+                inner_attention,
+                (FlexAttention.Config, VarlenAttention.Config, FA4Attention.Config),
             ):
                 assert (
                     self.tokenizer is not None
-                ), "tokenizer is required for flex/varlen attention"
-                model = cast(Decoder, self.model_parts[0])
-                extra_kwargs["attention_masks"] = model.get_attention_masks(
-                    input_batch=inputs,
-                    tokenizer=self.tokenizer,
-                    extra_inputs=extra_inputs,
-                    positions=positions,
+                ), "tokenizer is required for flex/varlen/fa4 attention"
+                # FA4+CP builds its mask post-sharding (needs CP indices),
+                # so skip here to avoid a wasted CuTe JIT compilation.
+                fa4_cp = self.parallel_dims.cp_enabled and isinstance(
+                    inner_attention, FA4Attention.Config
                 )
+                if not fa4_cp:
+                    model = cast(Decoder, self.model_parts[0])
+                    extra_kwargs["attention_masks"] = model.get_attention_masks(
+                        input_batch=inputs,
+                        tokenizer=self.tokenizer,
+                        extra_inputs=extra_inputs,
+                        positions=positions,
+                    )
 
         if self.parallel_dims.cp_enabled:
-            inputs, labels, extra_kwargs = prepare_context_parallel_input(
-                inputs,
-                labels,
-                extra_kwargs,
-                self.parallel_dims.get_mesh("cp"),
-                self.device,
-                self.config.parallelism.context_parallel_load_balancer,
-            )
+            if inner_attention is not None and isinstance(
+                inner_attention, FA4Attention.Config
+            ):
+                # FA4+CP: construct LB once, shard inputs directly (no mask
+                # sharding needed), then build FA4Mask from same LB instance.
+                from torch.distributed.tensor.experimental._attention import (
+                    _context_parallel_shard,
+                    _HeadTailLoadBalancer,
+                    _PTRRLoadBalancer,
+                )
+
+                from torchtitan.models.common.attention import build_fa4_mask
+
+                lb_type = self.config.parallelism.context_parallel_load_balancer
+                cp_mesh = self.parallel_dims.get_mesh("cp")
+                cp_world_size = cp_mesh.size(0)
+
+                if lb_type == "ptrr":
+                    from torch.nn.attention.flex_attention import and_masks
+
+                    from torchtitan.models.common.attention import (
+                        create_attention_mask,
+                        get_causal_mask_mod,
+                        get_document_mask_mod_from_positions,
+                    )
+
+                    mask_mods = [get_causal_mask_mod()]
+                    if mask_type == "block_causal" and positions is not None:
+                        mask_mods.append(
+                            get_document_mask_mod_from_positions(positions)
+                        )
+                    ptrr_block_mask = create_attention_mask(
+                        and_masks(*mask_mods),
+                        inputs.shape[0],
+                        None,
+                        inputs.shape[1],
+                        inputs.shape[1],
+                    )
+                    lb = _PTRRLoadBalancer(ptrr_block_mask, cp_world_size)
+                elif lb_type == "headtail" or lb_type is None:
+                    lb = _HeadTailLoadBalancer(
+                        inputs.shape[1], cp_world_size, self.device.type
+                    )
+                else:
+                    raise ValueError(
+                        f"FA4 CP: unknown load_balancer_type '{lb_type}'. "
+                        f"Must be 'headtail', 'ptrr', or None."
+                    )
+
+                if positions is None:
+                    raise ValueError(
+                        "FA4+CP requires per-document positions; ensure the "
+                        "dataloader provides a 'positions' tensor."
+                    )
+                orig_positions = positions
+
+                inputs, labels, positions = _context_parallel_shard(
+                    mesh=cp_mesh,
+                    buffers=(inputs, labels, extra_kwargs["positions"]),
+                    seq_dims=(1, 1, 1),
+                    load_balancer=lb,
+                )
+                extra_kwargs["positions"] = positions
+
+                shard_indices = lb._generate_indices(restore=False)
+                local_seq_len = inputs.shape[1]
+
+                document_ids = None
+                if mask_type == "block_causal":
+                    from torchtitan.models.common.decoder import Decoder as _Dec
+
+                    document_ids = _Dec._document_ids_from_positions(
+                        orig_positions
+                    )
+
+                extra_kwargs["attention_masks"] = build_fa4_mask(
+                    shard_indices=shard_indices,
+                    cp_rank=cp_mesh.get_local_rank(),
+                    local_seq_len=local_seq_len,
+                    document_ids=document_ids,
+                )
+            else:
+                inputs, labels, extra_kwargs = prepare_context_parallel_input(
+                    inputs,
+                    labels,
+                    extra_kwargs,
+                    self.parallel_dims.get_mesh("cp"),
+                    self.device,
+                    self.config.parallelism.context_parallel_load_balancer,
+                )
 
         # Accumulate after CP sharding so counts reflect the actual unique
         # tokens this rank processes (not the full pre-split sequence).

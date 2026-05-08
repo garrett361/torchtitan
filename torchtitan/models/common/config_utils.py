@@ -59,7 +59,8 @@ def get_attention_config(
     elif backend == "varlen":
         return VarlenAttention.Config(), "block_causal"
     elif backend == "fa4":
-        return FA4Attention.Config(), "causal"
+        # block_causal: dataloader must provide per-document positions tensor
+        return FA4Attention.Config(), "block_causal"
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
