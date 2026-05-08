@@ -732,6 +732,7 @@ class BackboneSuffixDataset(PreTokenizedDataset):
 _DATASET_CLASSES: dict[str, type[PreTokenizedDataset]] = {
     "truncate_last": TruncateLastDataset,
     "backbone_suffix": BackboneSuffixDataset,
+    "full_thinking": TruncateLastDataset,
 }
 
 

@@ -35,6 +35,7 @@ from filelock import FileLock
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.models.granite.tokenization_strategies import (
     BackboneSuffixStrategy,
+    FullThinkingStrategy,
     TokenizationStrategy,
     TruncateLastStrategy,
 )
@@ -44,6 +45,7 @@ logger = logging.getLogger(__name__)
 _STRATEGIES: dict[str, type[TokenizationStrategy]] = {
     "truncate_last": TruncateLastStrategy,
     "backbone_suffix": BackboneSuffixStrategy,
+    "full_thinking": FullThinkingStrategy,
 }
 
 

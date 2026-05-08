@@ -144,6 +144,45 @@ The reasoning in the last assistant turn (the `reasoning_content` / `<think>` bl
 in the assistant message itself, not in the following tool response. Dropping the trailing
 tool response does not affect it.
 
+### FullThinkingStrategy
+
+Uses `truncate_history_thinking=False` and loss-unmasks all assistant turns that have
+`reasoning_content`. The full thinking context from every turn is preserved in the token
+sequence — matching an agentic inference setup where the model sees full conversation
+history including prior reasoning.
+
+**Loss masking rules:**
+- Assistant turns WITH `reasoning_content`: unmasked (reasoning + response + `</think>` +
+  `<|im_end|>`)
+- Assistant turns WITHOUT `reasoning_content`: masked (present as context only)
+- All other roles (system, user, tool): masked
+
+**Why no-reasoning turns are masked:** The template renders them as
+`<think></think>{response}` — a token sequence that never occurs at inference time (the
+model always receives `<think>\n` from the generation prompt, not adjacent
+`<think></think>`). Unmasking would train prediction under a context the model never sees
+during generation.
+
+**Trailing non-assistant turns** are handled identically to `TruncateLastStrategy` (dropped
+before tokenization).
+
+**Trade-offs vs other strategies:**
+- vs `truncate_last`: sequences are longer (thinking not stripped from history), more
+  assistant turns contribute training signal, but fewer examples fit per packed sequence
+- vs `backbone_suffix`: simpler (no flex attention needed), but historical thinking
+  occupies regular sequence positions and competes with training content for seq_len budget
+
+### BackboneSuffixStrategy
+
+Backbone identical to `TruncateLastStrategy` (uses `truncate_history_thinking=True`, only
+the last assistant turn is loss-unmasked). Additionally produces per-turn suffix sequences
+that recover thinking traces from historical assistant turns. Designed for flex attention
+where suffixes are attended to without consuming backbone positions.
+
+Output columns: `input_ids`, `labels`, `positions`, `suffix_starts`, `insertion_limits`,
+`n_tokens`. The packing layer expands `suffix_starts`/`insertion_limits` into per-token
+tensors at runtime for the attention mask.
+
 ## Pre-Tokenized Data Pipeline
 
 Two-phase workflow: offline pre-tokenization produces Arrow shards, online dataloader
