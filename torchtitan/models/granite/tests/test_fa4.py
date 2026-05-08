@@ -56,7 +56,7 @@ class TestFA4Masks(unittest.TestCase):
         )
         return out.transpose(1, 2).to(DTYPE)
 
-    def test_0a_causal_mask_mod_matches_causal_flag(self):
+    def test_causal_mask_mod_matches_causal_flag(self):
         """FA4 causal mask_mod produces same output+grads as causal=True."""
         import cutlass.cute as cute
         from flash_attn.cute import flash_attn_func
@@ -88,7 +88,7 @@ class TestFA4Masks(unittest.TestCase):
         self._assert_close(v.grad, dv_ref, "dv")
 
 
-    def test_0b_document_mask_with_aux_tensors(self):
+    def test_document_mask_with_aux_tensors(self):
         """FA4 document+causal mask via aux_tensors matches dense reference."""
         import cutlass
         import cutlass.cute as cute
@@ -136,7 +136,7 @@ class TestFA4Masks(unittest.TestCase):
         self._assert_close(v.grad, dv_fa4, "dv")
 
 
-    def test_0c_causal_offset_mask_cp_simulation(self):
+    def test_causal_offset_mask_cp_simulation(self):
         """FA4 causal offset mask (Q_len < KV_len) matches reference for CP last rank."""
         import cutlass
         import cutlass.cute as cute
@@ -187,83 +187,234 @@ class TestFA4Masks(unittest.TestCase):
         self._assert_close(v_fa4.grad, v_ref.grad, "dv")
 
 
-    def test_0d_compile_custom_op_no_graph_break(self):
-        """FA4 registered as custom_op compiles with fullgraph=True (no graph breaks)."""
+    def test_compile_causal_fwd_bwd(self):
+        """Production FA4 causal custom_ops compile with fullgraph=True (fwd+bwd)."""
         from flash_attn.cute import flash_attn_func
 
-        @torch.library.custom_op("test::fa4_fwd", mutates_args=())
-        def fa4_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                    softmax_scale: float, causal: bool) -> tuple[torch.Tensor, torch.Tensor]:
-            return flash_attn_func(q, k, v, causal=causal, softmax_scale=softmax_scale)
-
-        @fa4_fwd.register_fake
-        def fa4_fwd_fake(q, k, v, softmax_scale, causal):
-            lse = torch.empty(q.shape[0], q.shape[2], q.shape[1],
-                              dtype=torch.float32, device=q.device)
-            return torch.empty_like(q), lse
-
-        class FA4Module(torch.nn.Module):
-            def forward(self, q, k, v):
-                out, _ = torch.ops.test.fa4_fwd(q, k, v, SCALE, True)
-                return out
-
-        mod = torch.compile(FA4Module(), fullgraph=True)
+        import torchtitan.models.common.fa4_ops  # noqa: F401
 
         seq_len = 2048
-        q = torch.randn(B, seq_len, H, D, device="cuda", dtype=DTYPE)
-        k = torch.randn(B, seq_len, HKV, D, device="cuda", dtype=DTYPE)
-        v = torch.randn(B, seq_len, HKV, D, device="cuda", dtype=DTYPE)
 
-        with torch.no_grad():
-            out_compiled = mod(q, k, v)
-            out_eager, _ = flash_attn_func(q, k, v, causal=True, softmax_scale=SCALE)
+        @torch.compile(fullgraph=True)
+        def compiled_fwd(q, k, v, scale):
+            out, _ = torch.ops.torchtitan.fa4_causal_fwd(q, k, v, scale)
+            return out
 
-        self._assert_close(out_compiled, out_eager, "compiled vs eager")
+        q = torch.randn(B, seq_len, H, D, device="cuda", dtype=DTYPE, requires_grad=True)
+        k = torch.randn(B, seq_len, HKV, D, device="cuda", dtype=DTYPE, requires_grad=True)
+        v = torch.randn(B, seq_len, HKV, D, device="cuda", dtype=DTYPE, requires_grad=True)
 
+        out = compiled_fwd(q, k, v, SCALE)
+        out.sum().backward()
+        dq, dk, dv = q.grad.clone(), k.grad.clone(), v.grad.clone()
+        q.grad, k.grad, v.grad = None, None, None
 
-    def test_0e_compile_with_mask_mod_baked_in(self):
-        """FA4 custom_op with mask_mod closed over compiles with fullgraph=True."""
-        import cutlass.cute as cute
+        # Eager reference
+        out_ref, _ = flash_attn_func(q, k, v, causal=True, softmax_scale=SCALE)
+        out_ref.sum().backward()
+
+        self._assert_close(out, out_ref, "output")
+        self._assert_close(dq, q.grad, "dq")
+        self._assert_close(dk, k.grad, "dk")
+        self._assert_close(dv, v.grad, "dv")
+
+    def test_compile_doc_causal_fwd_bwd(self):
+        """Production FA4 doc_causal custom_ops compile with fullgraph=True (fwd+bwd)."""
         from flash_attn.cute import flash_attn_func
 
-        @cute.jit
-        def causal_mask_mod(batch, head, m_idx, n_idx, seqlen_info, aux_tensors: None):
-            return m_idx >= n_idx
+        from torchtitan.models.common.attention import build_fa4_mask
+        from torchtitan.models.common.fa4_ops import register_fa4_masked_ops
 
-        @torch.library.custom_op("test::fa4_causal", mutates_args=())
-        def fa4_causal(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                       softmax_scale: float) -> tuple[torch.Tensor, torch.Tensor]:
-            return flash_attn_func(
-                q, k, v, causal=False, softmax_scale=softmax_scale,
-                mask_mod=causal_mask_mod,
-            )
+        seq_len = 512
+        n_docs = 4
+        doc_len = seq_len // n_docs
+        document_ids = (
+            torch.arange(seq_len, device="cuda", dtype=torch.int32) // doc_len
+        ).unsqueeze(0)
 
-        @fa4_causal.register_fake
-        def fa4_causal_fake(q, k, v, softmax_scale):
-            lse = torch.empty(q.shape[0], q.shape[2], q.shape[1],
-                              dtype=torch.float32, device=q.device)
-            return torch.empty_like(q), lse
+        fa4_mask = build_fa4_mask(document_ids=document_ids)
+        register_fa4_masked_ops(fa4_mask.mask_mod, fa4_mask.variant)
 
-        class FA4CausalModule(torch.nn.Module):
-            def forward(self, q, k, v):
-                out, _ = torch.ops.test.fa4_causal(q, k, v, SCALE)
-                return out
+        aux = fa4_mask.aux_tensors
+        fwd_op = getattr(torch.ops.torchtitan, f"fa4_{fa4_mask.variant}_fwd")
 
-        mod = torch.compile(FA4CausalModule(), fullgraph=True)
+        @torch.compile(fullgraph=True)
+        def compiled_fwd(q, k, v, scale, aux0, aux1, aux2):
+            out, _ = fwd_op(q, k, v, scale, aux0, aux1, aux2)
+            return out
 
-        seq_len = 2048
-        q = torch.randn(B, seq_len, H, D, device="cuda", dtype=DTYPE)
-        k = torch.randn(B, seq_len, HKV, D, device="cuda", dtype=DTYPE)
-        v = torch.randn(B, seq_len, HKV, D, device="cuda", dtype=DTYPE)
+        q = torch.randn(B, seq_len, H, D, device="cuda", dtype=DTYPE, requires_grad=True)
+        k = torch.randn(B, seq_len, HKV, D, device="cuda", dtype=DTYPE, requires_grad=True)
+        v = torch.randn(B, seq_len, HKV, D, device="cuda", dtype=DTYPE, requires_grad=True)
 
-        with torch.no_grad():
-            out_compiled = mod(q, k, v)
-            out_eager, _ = flash_attn_func(q, k, v, causal=True, softmax_scale=SCALE)
+        out = compiled_fwd(
+            q, k, v, SCALE, aux[0],
+            aux[1] if len(aux) > 1 else None,
+            aux[2] if len(aux) > 2 else None,
+        )
+        out.sum().backward()
+        dq, dk, dv = q.grad.clone(), k.grad.clone(), v.grad.clone()
+        q.grad, k.grad, v.grad = None, None, None
 
-        self._assert_close(out_compiled, out_eager, "compiled+mask_mod vs eager causal")
+        # Eager reference
+        out_ref, _ = flash_attn_func(
+            q, k, v, causal=False, softmax_scale=SCALE,
+            mask_mod=fa4_mask.mask_mod, aux_tensors=fa4_mask.aux_tensors,
+        )
+        out_ref.sum().backward()
+
+        self._assert_close(out, out_ref, "output")
+        self._assert_close(dq, q.grad, "dq")
+        self._assert_close(dk, k.grad, "dk")
+        self._assert_close(dv, v.grad, "dv")
+
+    def test_compile_cp_causal_fwd_bwd(self):
+        """Production FA4 cp_causal custom_ops compile with fullgraph=True (fwd+bwd)."""
+        from flash_attn.cute import flash_attn_func
+        from torch.distributed.tensor.experimental._attention import (
+            _HeadTailLoadBalancer,
+        )
+
+        from torchtitan.models.common.attention import build_fa4_mask
+        from torchtitan.models.common.fa4_ops import register_fa4_masked_ops
+
+        full_seq = 2048
+        cp_world = 4
+        local_seq = full_seq // cp_world
+        rank = 2
+
+        lb = _HeadTailLoadBalancer(full_seq, cp_world, "cuda")
+        shard_indices = lb._generate_indices(restore=False)
+
+        fa4_mask = build_fa4_mask(
+            shard_indices=shard_indices,
+            cp_rank=rank,
+            local_seq_len=local_seq,
+        )
+        register_fa4_masked_ops(fa4_mask.mask_mod, fa4_mask.variant)
+
+        aux = fa4_mask.aux_tensors
+        fwd_op = getattr(torch.ops.torchtitan, f"fa4_{fa4_mask.variant}_fwd")
+        si_flat = shard_indices.squeeze(0)
+        q_start = rank * local_seq
+
+        q_full = torch.randn(B, full_seq, H, D, device="cuda", dtype=DTYPE)
+        k_full = torch.randn(B, full_seq, HKV, D, device="cuda", dtype=DTYPE)
+        v_full = torch.randn(B, full_seq, HKV, D, device="cuda", dtype=DTYPE)
+
+        q_perm = q_full[:, si_flat]
+        k_perm = k_full[:, si_flat]
+        v_perm = v_full[:, si_flat]
+
+        q_local = q_perm[:, q_start:q_start + local_seq].clone().requires_grad_(True)
+        k_cp = k_perm.clone().requires_grad_(True)
+        v_cp = v_perm.clone().requires_grad_(True)
+
+        @torch.compile(fullgraph=True)
+        def compiled_fwd(q, k, v, scale, aux0, aux1, aux2):
+            out, _ = fwd_op(q, k, v, scale, aux0, aux1, aux2)
+            return out
+
+        out = compiled_fwd(
+            q_local, k_cp, v_cp, SCALE, aux[0],
+            aux[1] if len(aux) > 1 else None,
+            aux[2] if len(aux) > 2 else None,
+        )
+        out.sum().backward()
+        dq = q_local.grad.clone()
+        dk, dv = k_cp.grad.clone(), v_cp.grad.clone()
+        q_local.grad, k_cp.grad, v_cp.grad = None, None, None
+
+        # Eager reference
+        out_ref, _ = flash_attn_func(
+            q_local, k_cp, v_cp, causal=False, softmax_scale=SCALE,
+            mask_mod=fa4_mask.mask_mod, aux_tensors=fa4_mask.aux_tensors,
+        )
+        out_ref.sum().backward()
+
+        self._assert_close(out, out_ref, "output")
+        self._assert_close(dq, q_local.grad, "dq")
+        self._assert_close(dk, k_cp.grad, "dk")
+        self._assert_close(dv, v_cp.grad, "dv")
+
+    def test_compile_cp_doc_causal_fwd_bwd(self):
+        """Production FA4 cp+doc causal custom_ops compile with fullgraph=True (fwd+bwd)."""
+        from flash_attn.cute import flash_attn_func
+        from torch.distributed.tensor.experimental._attention import (
+            _HeadTailLoadBalancer,
+        )
+
+        from torchtitan.models.common.attention import build_fa4_mask
+        from torchtitan.models.common.fa4_ops import register_fa4_masked_ops
+
+        full_seq = 2048
+        cp_world = 4
+        local_seq = full_seq // cp_world
+        rank = 1
+        n_docs = 4
+        doc_len = full_seq // n_docs
+
+        lb = _HeadTailLoadBalancer(full_seq, cp_world, "cuda")
+        shard_indices = lb._generate_indices(restore=False)
+
+        document_ids = (
+            torch.arange(full_seq, device="cuda", dtype=torch.int32) // doc_len
+        ).unsqueeze(0)
+
+        fa4_mask = build_fa4_mask(
+            shard_indices=shard_indices,
+            cp_rank=rank,
+            local_seq_len=local_seq,
+            document_ids=document_ids,
+        )
+        register_fa4_masked_ops(fa4_mask.mask_mod, fa4_mask.variant)
+
+        aux = fa4_mask.aux_tensors
+        fwd_op = getattr(torch.ops.torchtitan, f"fa4_{fa4_mask.variant}_fwd")
+        si_flat = shard_indices.squeeze(0)
+        q_start = rank * local_seq
+
+        q_full = torch.randn(B, full_seq, H, D, device="cuda", dtype=DTYPE)
+        k_full = torch.randn(B, full_seq, HKV, D, device="cuda", dtype=DTYPE)
+        v_full = torch.randn(B, full_seq, HKV, D, device="cuda", dtype=DTYPE)
+
+        q_perm = q_full[:, si_flat]
+        k_perm = k_full[:, si_flat]
+        v_perm = v_full[:, si_flat]
+
+        q_local = q_perm[:, q_start:q_start + local_seq].clone().requires_grad_(True)
+        k_cp = k_perm.clone().requires_grad_(True)
+        v_cp = v_perm.clone().requires_grad_(True)
+
+        @torch.compile(fullgraph=True)
+        def compiled_fwd(q, k, v, scale, aux0, aux1, aux2):
+            out, _ = fwd_op(q, k, v, scale, aux0, aux1, aux2)
+            return out
+
+        out = compiled_fwd(
+            q_local, k_cp, v_cp, SCALE, aux[0],
+            aux[1] if len(aux) > 1 else None,
+            aux[2] if len(aux) > 2 else None,
+        )
+        out.sum().backward()
+        dq = q_local.grad.clone()
+        dk, dv = k_cp.grad.clone(), v_cp.grad.clone()
+        q_local.grad, k_cp.grad, v_cp.grad = None, None, None
+
+        # Eager reference
+        out_ref, _ = flash_attn_func(
+            q_local, k_cp, v_cp, causal=False, softmax_scale=SCALE,
+            mask_mod=fa4_mask.mask_mod, aux_tensors=fa4_mask.aux_tensors,
+        )
+        out_ref.sum().backward()
+
+        self._assert_close(out, out_ref, "output")
+        self._assert_close(dq, q_local.grad, "dq")
+        self._assert_close(dk, k_cp.grad, "dk")
+        self._assert_close(dv, v_cp.grad, "dv")
 
 
-    def test_0f_cp_document_causal_composed(self):
+    def test_cp_document_causal_composed(self):
         """FA4 CP + document + causal mask composed via aux_tensors matches reference."""
         import cutlass
         import cutlass.cute as cute

@@ -86,10 +86,14 @@ class FA4Mask(NamedTuple):
     mask_mod indexes at runtime to make masking decisions — e.g. shard_indices
     for CP position remapping or document IDs for isolation. They're passed
     to flash_attn_func and made available inside the mask_mod as its final arg.
+
+    variant identifies the mask type for op registration (each variant gets its
+    own custom_op pair so multiple mask types can coexist in a single process).
     """
 
     mask_mod: Callable
     aux_tensors: list[torch.Tensor]
+    variant: str
 
 
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata | FA4Mask
@@ -406,6 +410,7 @@ class FA4Attention(LocalMapInnerAttention):
     """Inner attention using Flash Attention 4 (CuTe DSL kernels for SM90/SM100).
 
     FA4 operates on (B, S, H, D) layout natively — no transpose needed.
+    Dispatches through registered custom_ops to enable fullgraph compilation.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -415,7 +420,6 @@ class FA4Attention(LocalMapInnerAttention):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
 
-    @torch.compiler.disable
     def forward(
         self,
         q: torch.Tensor,
@@ -427,25 +431,38 @@ class FA4Attention(LocalMapInnerAttention):
         enable_gqa: bool = False,
         **kwargs,
     ) -> torch.Tensor:
-        from flash_attn.cute import flash_attn_func
+        import torchtitan.models.common.fa4_ops  # noqa: F401 — registers causal ops
 
         input_dtype = q.dtype
         if input_dtype not in (torch.float16, torch.bfloat16):
             q, k, v = q.bfloat16(), k.bfloat16(), v.bfloat16()
 
+        if scale is None:
+            scale = q.shape[-1] ** -0.5
+
         if attention_masks is None:
-            out, _ = flash_attn_func(q, k, v, causal=True, softmax_scale=scale)
+            out, _ = torch.ops.torchtitan.fa4_causal_fwd(q, k, v, scale)
         else:
             if not isinstance(attention_masks, FA4Mask):
                 raise TypeError(
                     f"FA4Attention expects FA4Mask, got {type(attention_masks).__name__}"
                 )
-            out, _ = flash_attn_func(
-                q, k, v,
-                causal=False,
-                softmax_scale=scale,
-                mask_mod=attention_masks.mask_mod,
-                aux_tensors=attention_masks.aux_tensors,
+            variant = attention_masks.variant
+            if not hasattr(torch.ops.torchtitan, f"fa4_{variant}_fwd"):
+                from torchtitan.models.common.fa4_ops import register_fa4_masked_ops
+
+                register_fa4_masked_ops(attention_masks.mask_mod, variant)
+
+            fwd_op = getattr(torch.ops.torchtitan, f"fa4_{variant}_fwd")
+            aux = attention_masks.aux_tensors
+            out, _ = fwd_op(
+                q,
+                k,
+                v,
+                scale,
+                aux[0],
+                aux[1] if len(aux) > 1 else None,
+                aux[2] if len(aux) > 2 else None,
             )
         return out.to(input_dtype)
 
@@ -540,6 +557,7 @@ def build_fa4_mask(
         return FA4Mask(
             mask_mod=cp_doc_causal_mask,
             aux_tensors=[shard_indices, q_doc_id_per_pos, kv_doc_id_per_pos],
+            variant="cp_doc_causal",
         )
 
     elif has_cp:
@@ -561,6 +579,7 @@ def build_fa4_mask(
         return FA4Mask(
             mask_mod=cp_causal_mask,
             aux_tensors=[shard_indices],
+            variant="cp_causal",
         )
 
     elif has_docs:
@@ -576,6 +595,7 @@ def build_fa4_mask(
         return FA4Mask(
             mask_mod=doc_causal_mask,
             aux_tensors=[document_ids],
+            variant="doc_causal",
         )
 
     else:

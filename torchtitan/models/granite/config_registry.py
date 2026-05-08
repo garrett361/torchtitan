@@ -239,6 +239,20 @@ def granite_4_1_8b_sft_pretokenized_float8_filteroutput() -> Trainer.Config:
     return config
 
 
+def granite_4_1_8b_sft_pretokenized_float8_filteroutput_autokn() -> Trainer.Config:
+    config = granite_4_1_8b_sft_pretokenized()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            Float8LinearConverter.Config(
+                enable_fsdp_float8_all_gather=True,
+                precompute_float8_dynamic_scale_for_fsdp=True,
+                filter_fqns=["output", "auto_filter_small_kn"],
+            ),
+        ],
+    )
+    return config
+
+
 def granite_4_1_8b_sft_pretokenized_float8_rowwise() -> Trainer.Config:
     config = granite_4_1_8b_sft_pretokenized()
     config.model_converters = ModelConvertersContainer.Config(
