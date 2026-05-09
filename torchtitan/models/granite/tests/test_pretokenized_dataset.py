@@ -11,6 +11,7 @@ from torchtitan.models.granite.pretokenized_dataset import (
     TruncateLastDataset,
     _load_and_merge_manifests,
     _load_manifest,
+    _select_cost_balanced,
 )
 
 MANIFEST_PATH = Path("tests/assets/pretok_truncate_last/manifest.json")
@@ -99,7 +100,8 @@ class TestCostBalancedPacking(unittest.TestCase):
         ds._data_exhausted = False
         ds._refill_buffer()
 
-        oldest_ids = list(ds._buffer[0][0])
+        oldest_idx = min(range(len(ds._ages)), key=ds._ages.__getitem__)
+        oldest_ids = list(ds._buffer[oldest_idx][0])
         batch = next(ds._iter_packed())
         input_tensor = batch[0]["input"].tolist()
         self.assertEqual(input_tensor[: len(oldest_ids)], oldest_ids)
@@ -188,6 +190,43 @@ class TestCostBalancedPacking(unittest.TestCase):
         for b1, b2 in zip(remaining1, remaining2):
             self.assertTrue(b1[0]["input"].equal(b2[0]["input"]))
             self.assertTrue(b1[1].equal(b2[1]))
+
+    def test_checkpointing_preserves_fifo_order(self):
+        """Checkpoint round-trip preserves _ages so FIFO seed order is maintained."""
+        seq_len = 16
+        target_cost = seq_len * 30.0 / 5.0
+
+        ds = _build_dataset(
+            seq_len=seq_len,
+            packing="cost_balanced",
+            target_cost=target_cost,
+            buffer_size=6,
+        )
+        ds._prepare_iter()
+        ds._data_iter = ds._get_data_iter()
+        ds._data_exhausted = False
+        ds._refill_buffer()
+
+        ages_before = list(ds._ages)
+        state = ds.state_dict()
+
+        ds2 = _build_dataset(
+            seq_len=seq_len,
+            packing="cost_balanced",
+            target_cost=target_cost,
+            buffer_size=6,
+        )
+        ds2.load_state_dict(state)
+
+        # Ages must be preserved (possibly reordered by sort, but same values)
+        self.assertEqual(sorted(ds2._ages), sorted(ages_before))
+        # The oldest item must be the same
+        oldest_before = min(range(len(ages_before)), key=ages_before.__getitem__)
+        oldest_after = min(range(len(ds2._ages)), key=ds2._ages.__getitem__)
+        self.assertEqual(
+            list(ds._buffer[oldest_before].input_ids),
+            list(ds2._buffer[oldest_after].input_ids),
+        )
 
     def test_batch_attention_cost_in_stats(self):
         """Cost-balanced batches include batch_attention_cost in stats dict."""
@@ -470,6 +509,143 @@ class TestMultiDatasetMerge(unittest.TestCase):
             local_batch_size=1,
         )
         self.assertEqual(loader.dataset.num_examples, 12)
+
+
+class TestGreedyPacking(unittest.TestCase):
+    """Greedy packing uses FIFO order and unsorted buffer."""
+
+    def test_greedy_fifo_order(self):
+        """Greedy packing processes items in insertion (FIFO) order."""
+        ds = _build_dataset(seq_len=16, packing="greedy", buffer_size=6)
+        ds._prepare_iter()
+        ds._data_iter = ds._get_data_iter()
+        ds._data_exhausted = False
+        ds._refill_buffer()
+
+        # Buffer is unsorted for greedy — items are in insertion order
+        insertion_order_ids = [list(item.input_ids) for item in ds._buffer]
+
+        batches = list(ds)
+        all_packed_ids = []
+        for inp_dict, _, _ in batches:
+            all_packed_ids.extend(inp_dict["input"].tolist())
+
+        # First item's tokens should appear at the start
+        first_ids = insertion_order_ids[0]
+        self.assertEqual(all_packed_ids[: len(first_ids)], first_ids)
+
+    def test_greedy_selection_takes_next_fitting(self):
+        """Greedy selection returns index 0 (FIFO) when item fits."""
+        from torchtitan.models.granite.pretokenized_dataset import _select_greedy
+
+        ds = _build_dataset(seq_len=16, packing="greedy", buffer_size=6)
+        ds._prepare_iter()
+        ds._data_iter = ds._get_data_iter()
+        ds._data_exhausted = False
+        ds._refill_buffer()
+
+        # With remaining > longest item, index 0 should always be returned
+        idx = _select_greedy(ds, remaining=9999, batch={})
+        self.assertEqual(idx, 0)
+
+    def test_greedy_selection_rejects_when_too_long(self):
+        """Greedy selection returns -1 when first item doesn't fit."""
+        from torchtitan.models.granite.pretokenized_dataset import _select_greedy
+
+        ds = _build_dataset(seq_len=16, packing="greedy", buffer_size=6)
+        ds._prepare_iter()
+        ds._data_iter = ds._get_data_iter()
+        ds._data_exhausted = False
+        ds._refill_buffer()
+
+        idx = _select_greedy(ds, remaining=0, batch={})
+        self.assertEqual(idx, -1)
+
+
+class TestSortedBufferInvariants(unittest.TestCase):
+    """Verify parallel array sync and sort invariants for the bisect-based buffer."""
+
+    def _get_filled_dataset(self, packing="cost_balanced"):
+        seq_len = 16
+        target_cost = seq_len * 30.0 / 5.0
+        ds = _build_dataset(
+            seq_len=seq_len,
+            packing=packing,
+            target_cost=target_cost,
+            buffer_size=6,
+        )
+        ds._prepare_iter()
+        ds._data_iter = ds._get_data_iter()
+        ds._data_exhausted = False
+        ds._refill_buffer()
+        return ds
+
+    def _assert_sync(self, ds):
+        self.assertEqual(len(ds._buffer), len(ds._lengths))
+        self.assertEqual(len(ds._buffer), len(ds._ages))
+        for i, item in enumerate(ds._buffer):
+            self.assertEqual(ds._lengths[i], len(item.input_ids))
+
+    def _assert_sorted(self, ds):
+        for i in range(len(ds._lengths) - 1):
+            self.assertLessEqual(ds._lengths[i], ds._lengths[i + 1])
+
+    def test_parallel_array_sync_after_refill(self):
+        """After refill, all three arrays are in sync."""
+        ds = self._get_filled_dataset()
+        self._assert_sync(ds)
+
+    def test_parallel_array_sync_during_iteration(self):
+        """Arrays stay in sync after consuming several batches."""
+        ds = self._get_filled_dataset()
+        it = ds._iter_packed()
+        for _ in range(3):
+            next(it, None)
+        if ds._buffer:
+            self._assert_sync(ds)
+
+    def test_sort_invariant_after_refill(self):
+        """_lengths is sorted ascending after refill."""
+        ds = self._get_filled_dataset()
+        self._assert_sorted(ds)
+
+    def test_sort_invariant_during_iteration(self):
+        """_lengths remains sorted after partial consumption."""
+        ds = self._get_filled_dataset()
+        it = ds._iter_packed()
+        next(it, None)
+        if ds._buffer:
+            self._assert_sorted(ds)
+
+    def test_selection_equivalence(self):
+        """Bisect-based cost_balanced selection matches linear scan result."""
+        ds = self._get_filled_dataset()
+        batch = ds._new_batch()
+        oldest_idx = min(range(len(ds._ages)), key=ds._ages.__getitem__)
+        first = ds._buffer[oldest_idx]
+        ds._remove_at(oldest_idx)
+        ds._place_item(batch, first)
+        batch["cost"] = len(first.input_ids) ** 2
+
+        remaining = ds.seq_len - len(batch["inputs"])
+        if not ds._buffer or remaining <= 0:
+            return
+
+        # Bisect-based selection
+        bisect_idx = _select_cost_balanced(ds, remaining, batch)
+
+        # Linear scan reference
+        current_cost = batch["cost"]
+        target = ds._target_cost
+        linear_best_idx, linear_best_gap = -1, float("inf")
+        for i, item in enumerate(ds._buffer):
+            item_len = len(item.input_ids)
+            if item_len > remaining:
+                continue
+            gap = abs(current_cost + item_len * item_len - target)
+            if gap < linear_best_gap:
+                linear_best_gap, linear_best_idx = gap, i
+        self.assertEqual(bisect_idx, linear_best_idx)
 
 
 if __name__ == "__main__":

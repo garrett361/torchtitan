@@ -15,9 +15,10 @@ Packing mode (greedy, buffer, cost_balanced) is a constructor parameter on
 PreTokenizedDataset, not a separate class hierarchy.
 """
 
+import bisect
 import json
+import math
 from abc import abstractmethod
-from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -163,8 +164,8 @@ SelectFn = Callable[["PreTokenizedDataset", int, dict], int]
 
 
 def _select_greedy(dataset: "PreTokenizedDataset", remaining: int, batch: dict) -> int:
-    """Take the next buffered item if it fits. Returns its index (0) or -1."""
-    if dataset._buffer and len(dataset._buffer[0].input_ids) <= remaining:
+    """Take the next buffered item if it fits (FIFO for unsorted buffer)."""
+    if dataset._buffer and dataset._lengths[0] <= remaining:
         return 0
     return -1
 
@@ -172,13 +173,9 @@ def _select_greedy(dataset: "PreTokenizedDataset", remaining: int, batch: dict) 
 def _select_largest_fitting(
     dataset: "PreTokenizedDataset", remaining: int, batch: dict
 ) -> int:
-    """Scan the buffer and pick the longest item that fits in `remaining` tokens."""
-    best_idx, best_len = -1, 0
-    for i, item in enumerate(dataset._buffer):
-        item_len = len(item.input_ids)
-        if item_len <= remaining and item_len > best_len:
-            best_idx, best_len = i, item_len
-    return best_idx
+    """Binary search the sorted buffer for the longest item that fits."""
+    idx = bisect.bisect_right(dataset._lengths, remaining) - 1
+    return idx if idx >= 0 else -1
 
 
 def _select_cost_balanced(
@@ -186,23 +183,24 @@ def _select_cost_balanced(
 ) -> int:
     """Pick the item whose addition brings batch cost closest to target_cost.
 
-    Cost model: each item contributes length² to the batch cost, approximating
-    quadratic attention FLOPs. The target is derived from dataset statistics so
-    that packed sequences have roughly equal compute cost.
-
-    If every candidate overshoots target_cost, we still pick the closest one—
-    overshooting is preferred over leaving large gaps that waste capacity.
+    Uses binary search on the sorted _lengths array: optimal length is
+    sqrt(target - current_cost), bisect to that point, check neighbors.
     """
+    max_idx = bisect.bisect_right(dataset._lengths, remaining) - 1
+    if max_idx < 0:
+        return -1
+
     current_cost = batch.get("cost", 0)
+    target = dataset._target_cost
+    ideal_len = math.isqrt(max(0, int(target - current_cost)))
+    ins = bisect.bisect_left(dataset._lengths, ideal_len, hi=max_idx + 1)
+
     best_idx, best_gap = -1, float("inf")
-    target_seqlen_squared_sum = dataset._target_cost
-    for i, item in enumerate(dataset._buffer):
-        item_len = len(item.input_ids)
-        if item_len > remaining:
-            continue
-        gap = abs(current_cost + item_len * item_len - target_seqlen_squared_sum)
+    for candidate in range(max(0, ins - 1), min(max_idx + 1, ins + 2)):
+        L = dataset._lengths[candidate]
+        gap = abs(current_cost + L * L - target)
         if gap < best_gap:
-            best_gap, best_idx = gap, i
+            best_gap, best_idx = gap, candidate
     return best_idx
 
 
@@ -297,8 +295,14 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         self._worker_id: int = 0
         self._num_workers: int = 1
 
-        # Buffer state (deque for O(1) popleft)
-        self._buffer: deque = deque()
+        # Sorted buffer with parallel arrays for O(log n) bisect selection.
+        # _lengths is a separate int array (~1.6× faster than bisect key=lambda).
+        self._buffer: list = []
+        self._lengths: list[int] = []
+        self._ages: list[int] = []
+        self._age_counter: int = 0
+        self._sorted = packing != "greedy"
+
         self._data_iter: Iterator | None = None
         self._data_exhausted: bool = False
 
@@ -336,6 +340,24 @@ class PreTokenizedDataset(IterableDataset, Stateful):
 
     def _deserialize_buffer(self, data: list) -> list:
         return [self._item_type(*[list(f) for f in fields]) for fields in data]
+
+    def _insert_item(self, item) -> None:
+        item_len = len(item.input_ids)
+        if self._sorted:
+            idx = bisect.bisect_left(self._lengths, item_len)
+            self._buffer.insert(idx, item)
+            self._lengths.insert(idx, item_len)
+            self._ages.insert(idx, self._age_counter)
+        else:
+            self._buffer.append(item)
+            self._lengths.append(item_len)
+            self._ages.append(self._age_counter)
+        self._age_counter += 1
+
+    def _remove_at(self, idx: int) -> None:
+        del self._buffer[idx]
+        del self._lengths[idx]
+        del self._ages[idx]
 
     def _get_data_iter(self):
         if self._sample_idx == len(self._data):
@@ -432,7 +454,7 @@ class PreTokenizedDataset(IterableDataset, Stateful):
             self._sample_idx += 1
             if result is None:
                 continue
-            self._buffer.append(result)
+            self._insert_item(result)
 
     # --- Unified packing loop ---
 
@@ -450,7 +472,12 @@ class PreTokenizedDataset(IterableDataset, Stateful):
                 continue
 
             batch = self._new_batch()
-            first = self._buffer.popleft()
+            if self._sorted:
+                oldest_idx = min(range(len(self._ages)), key=self._ages.__getitem__)
+            else:
+                oldest_idx = 0
+            first = self._buffer[oldest_idx]
+            self._remove_at(oldest_idx)
             self._place_item(batch, first)
             batch["cost"] = len(first.input_ids) ** 2
 
@@ -462,7 +489,7 @@ class PreTokenizedDataset(IterableDataset, Stateful):
                 if idx == -1:
                     break
                 picked = self._buffer[idx]
-                del self._buffer[idx]
+                self._remove_at(idx)
                 self._place_item(batch, picked)
                 batch["cost"] += len(picked.input_ids) ** 2
                 if not self._buffer:
@@ -483,13 +510,25 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         }
         if self._buffer:
             d["buffer"] = self._serialize_buffer()
+            d["ages"] = list(self._ages)
+            d["age_counter"] = self._age_counter
         return d
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self._epoch = state_dict["epoch"]
         self._sample_idx = state_dict["sample_idx"]
         if "buffer" in state_dict:
-            self._buffer = deque(self._deserialize_buffer(state_dict["buffer"]))
+            self._buffer = self._deserialize_buffer(state_dict["buffer"])
+            self._lengths = [len(item.input_ids) for item in self._buffer]
+            self._ages = state_dict.get("ages", list(range(len(self._buffer))))
+            self._age_counter = state_dict.get("age_counter", len(self._buffer))
+            if self._sorted:
+                order = sorted(
+                    range(len(self._lengths)), key=self._lengths.__getitem__
+                )
+                self._buffer = [self._buffer[i] for i in order]
+                self._lengths = [self._lengths[i] for i in order]
+                self._ages = [self._ages[i] for i in order]
         if self._epoch > 0:
             self._data = cast(
                 Dataset,
