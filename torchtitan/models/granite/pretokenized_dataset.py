@@ -120,7 +120,10 @@ def _load_and_merge_manifests(
                     1,
                 )
                 merged_length_stats[mean_key] = round(
-                    sum(ls.get(n_key, 0) * ls.get(mean_key, 0) for ls in all_length_stats)
+                    sum(
+                        ls.get(n_key, 0) * ls.get(mean_key, 0)
+                        for ls in all_length_stats
+                    )
                     / total_n,
                     1,
                 )
@@ -160,7 +163,8 @@ SelectFn = Callable[["PreTokenizedDataset", int, dict], int]
 
 
 def _select_greedy(dataset: "PreTokenizedDataset", remaining: int, batch: dict) -> int:
-    if dataset._buffer and dataset._item_length(dataset._buffer[0]) <= remaining:
+    """Take the next buffered item if it fits. Returns its index (0) or -1."""
+    if dataset._buffer and len(dataset._buffer[0].input_ids) <= remaining:
         return 0
     return -1
 
@@ -168,24 +172,35 @@ def _select_greedy(dataset: "PreTokenizedDataset", remaining: int, batch: dict) 
 def _select_largest_fitting(
     dataset: "PreTokenizedDataset", remaining: int, batch: dict
 ) -> int:
+    """Scan the buffer and pick the longest item that fits in `remaining` tokens."""
     best_idx, best_len = -1, 0
     for i, item in enumerate(dataset._buffer):
-        L = dataset._item_length(item)
-        if L <= remaining and L > best_len:
-            best_idx, best_len = i, L
+        item_len = len(item.input_ids)
+        if item_len <= remaining and item_len > best_len:
+            best_idx, best_len = i, item_len
     return best_idx
 
 
 def _select_cost_balanced(
     dataset: "PreTokenizedDataset", remaining: int, batch: dict
 ) -> int:
+    """Pick the item whose addition brings batch cost closest to target_cost.
+
+    Cost model: each item contributes length² to the batch cost, approximating
+    quadratic attention FLOPs. The target is derived from dataset statistics so
+    that packed sequences have roughly equal compute cost.
+
+    If every candidate overshoots target_cost, we still pick the closest one—
+    overshooting is preferred over leaving large gaps that waste capacity.
+    """
     current_cost = batch.get("cost", 0)
     best_idx, best_gap = -1, float("inf")
+    target_seqlen_squared_sum = dataset._target_cost
     for i, item in enumerate(dataset._buffer):
-        L = dataset._item_length(item)
-        if L > remaining:
+        item_len = len(item.input_ids)
+        if item_len > remaining:
             continue
-        gap = abs(current_cost + L * L - dataset._target_cost)
+        gap = abs(current_cost + item_len * item_len - target_seqlen_squared_sum)
         if gap < best_gap:
             best_gap, best_idx = gap, i
     return best_idx
@@ -236,8 +251,7 @@ class PreTokenizedDataset(IterableDataset, Stateful):
     ) -> None:
         if packing not in _SELECT_FNS:
             raise ValueError(
-                f"Unknown packing mode: {packing!r}. "
-                f"Supported: {sorted(_SELECT_FNS)}"
+                f"Unknown packing mode: {packing!r}. Supported: {sorted(_SELECT_FNS)}"
             )
         if packing == "cost_balanced" and target_cost is None:
             raise ValueError("target_cost is required for cost_balanced packing")
@@ -292,12 +306,7 @@ class PreTokenizedDataset(IterableDataset, Stateful):
 
     @abstractmethod
     def _tokenize_sample(self, sample: dict) -> Any | None:
-        """Parse raw sample into a format-specific item, or None to skip."""
-        ...
-
-    @abstractmethod
-    def _item_length(self, item) -> int:
-        """Token count of a buffered item."""
+        """Parse raw sample into a NamedTuple with an `input_ids` field, or None to skip."""
         ...
 
     @abstractmethod
@@ -318,17 +327,15 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         """Pad to seq_len and produce final (inputs_dict, labels, stats)."""
         ...
 
-    @abstractmethod
-    def _serialize_buffer(self) -> list:
-        """Serialize buffer items for checkpointing."""
-        ...
-
-    @abstractmethod
-    def _deserialize_buffer(self, data: list) -> list:
-        """Restore buffer items from checkpoint."""
-        ...
-
     # --- Shared infrastructure ---
+
+    _item_type: type
+
+    def _serialize_buffer(self) -> list:
+        return [list(item) for item in self._buffer]
+
+    def _deserialize_buffer(self, data: list) -> list:
+        return [self._item_type(*[list(f) for f in fields]) for fields in data]
 
     def _get_data_iter(self):
         if self._sample_idx == len(self._data):
@@ -405,9 +412,7 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         if self._num_workers > 1:
             self._data = cast(
                 Dataset,
-                split_dataset_by_node(
-                    self._data, self._worker_id, self._num_workers
-                ),
+                split_dataset_by_node(self._data, self._worker_id, self._num_workers),
             )
         self._data_iter = self._get_data_iter()
         self._data_exhausted = False
@@ -447,7 +452,7 @@ class PreTokenizedDataset(IterableDataset, Stateful):
             batch = self._new_batch()
             first = self._buffer.popleft()
             self._place_item(batch, first)
-            batch["cost"] = self._item_length(first) ** 2
+            batch["cost"] = len(first.input_ids) ** 2
 
             while True:
                 remaining = self.seq_len - len(batch["inputs"])
@@ -459,7 +464,7 @@ class PreTokenizedDataset(IterableDataset, Stateful):
                 picked = self._buffer[idx]
                 del self._buffer[idx]
                 self._place_item(batch, picked)
-                batch["cost"] += self._item_length(picked) ** 2
+                batch["cost"] += len(picked.input_ids) ** 2
                 if not self._buffer:
                     self._refill_buffer()
 
@@ -499,6 +504,11 @@ class PreTokenizedDataset(IterableDataset, Stateful):
 # ---------------------------------------------------------------------------
 
 
+class _ChatItem(NamedTuple):
+    input_ids: list[int]
+    labels: list[int]
+
+
 class TruncateLastDataset(PreTokenizedDataset):
     """Pre-tokenized (input_ids, labels, n_tokens) shards.
 
@@ -506,9 +516,9 @@ class TruncateLastDataset(PreTokenizedDataset):
     all earlier turns are IGNORE_INDEX.
     """
 
-    def _tokenize_sample(
-        self, sample: dict[str, Any]
-    ) -> tuple[list[int], list[int]] | None:
+    _item_type = _ChatItem
+
+    def _tokenize_sample(self, sample: dict[str, Any]) -> _ChatItem | None:
         input_ids: list[int] = list(sample["input_ids"])
         label_ids: list[int] = list(sample["labels"])
 
@@ -522,10 +532,7 @@ class TruncateLastDataset(PreTokenizedDataset):
             return None
 
         self._log_first_sample(input_ids, label_ids)
-        return input_ids, label_ids
-
-    def _item_length(self, item: tuple[list[int], list[int]]) -> int:
-        return len(item[0])
+        return _ChatItem(input_ids, label_ids)
 
     def _new_batch(self) -> dict:
         return {
@@ -537,13 +544,12 @@ class TruncateLastDataset(PreTokenizedDataset):
             "n_examples": 0,
         }
 
-    def _place_item(self, batch: dict, item: tuple[list[int], list[int]]) -> None:
-        ids, lbls = item
-        batch["inputs"].extend(ids)
-        batch["labels"].extend(lbls)
-        batch["positions"].extend(range(len(ids)))
-        batch["n_total"] += len(ids)
-        batch["n_trained"] += sum(1 for lbl in lbls if lbl != IGNORE_INDEX)
+    def _place_item(self, batch: dict, item: _ChatItem) -> None:
+        batch["inputs"].extend(item.input_ids)
+        batch["labels"].extend(item.labels)
+        batch["positions"].extend(range(len(item.input_ids)))
+        batch["n_total"] += len(item.input_ids)
+        batch["n_trained"] += sum(1 for lbl in item.labels if lbl != IGNORE_INDEX)
         batch["n_examples"] += 1
 
     def _pad_and_flush(
@@ -570,12 +576,6 @@ class TruncateLastDataset(PreTokenizedDataset):
             stats,
         )
 
-    def _serialize_buffer(self) -> list:
-        return [(ids, lbls) for ids, lbls in self._buffer]
-
-    def _deserialize_buffer(self, data: list) -> list:
-        return [(list(ids), list(lbls)) for ids, lbls in data]
-
 
 # ---------------------------------------------------------------------------
 # Format: backbone_suffix
@@ -598,6 +598,8 @@ class BackboneSuffixDataset(PreTokenizedDataset):
     (conv_ids, suffix_ids, insertion_limits) during packing.
     """
 
+    _item_type = _BackboneSuffixItem
+
     def _tokenize_sample(self, sample: dict) -> _BackboneSuffixItem | None:
         n_tokens = sample["n_tokens"]
         if n_tokens > self.seq_len:
@@ -617,9 +619,6 @@ class BackboneSuffixDataset(PreTokenizedDataset):
         return _BackboneSuffixItem(
             input_ids, labels, positions, suffix_starts, insertion_limits
         )
-
-    def _item_length(self, item: _BackboneSuffixItem) -> int:
-        return len(item.input_ids)
 
     def _new_batch(self) -> dict:
         return {
@@ -715,14 +714,6 @@ class BackboneSuffixDataset(PreTokenizedDataset):
             stats,
         )
 
-    def _serialize_buffer(self) -> list:
-        return [tuple(item) for item in self._buffer]
-
-    def _deserialize_buffer(self, data: list) -> list:
-        return [
-            _BackboneSuffixItem(list(ids), list(lbls), list(pos), list(ss), list(il))
-            for ids, lbls, pos, ss, il in data
-        ]
 
 
 # ---------------------------------------------------------------------------
@@ -804,9 +795,7 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
 
         if len(manifest_paths) > 1:
             manifest, full_dataset = _load_and_merge_manifests(manifest_paths)
-            dataset_id = (
-                f"pretok:merged[{','.join(p.parent.parent.name for p in manifest_paths)}]"
-            )
+            dataset_id = f"pretok:merged[{','.join(p.parent.parent.name for p in manifest_paths)}]"
         else:
             manifest = _load_manifest(manifest_paths[0])
             full_dataset = None
@@ -842,9 +831,10 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
                 )
             cutoff = max(valid_cutoffs)
             k = cutoff // 1024
-            sq_tokens = length_stats[f"squared_tokens_per_example_{k}kmax"]
-            mean_tokens = length_stats[f"tokens_per_example_{k}kmax"]
-            target_cost = seq_len * sq_tokens / mean_tokens
+            mean_sq_len = length_stats[f"squared_tokens_per_example_{k}kmax"]
+            mean_len = length_stats[f"tokens_per_example_{k}kmax"]
+            # Expected items per sequence (seq_len / E[L]) × expected cost per item (E[L²])
+            target_cost = seq_len * mean_sq_len / mean_len
             logger.info(
                 "Cost-balanced packing: target_cost=%.2e (T/seq²=%.3f, cutoff=%dk)",
                 target_cost,
