@@ -448,11 +448,6 @@ class FA4Attention(LocalMapInnerAttention):
                     f"FA4Attention expects FA4Mask, got {type(attention_masks).__name__}"
                 )
             variant = attention_masks.variant
-            if not hasattr(torch.ops.torchtitan, f"fa4_{variant}_fwd"):
-                from torchtitan.models.common.fa4_ops import register_fa4_masked_ops
-
-                register_fa4_masked_ops(attention_masks.mask_mod, variant)
-
             fwd_op = getattr(torch.ops.torchtitan, f"fa4_{variant}_fwd")
             aux = attention_masks.aux_tensors
             out, _ = fwd_op(
@@ -479,6 +474,11 @@ def build_fa4_mask(
     Composes causal + document isolation + CP position remapping into a single
     mask_mod with the appropriate aux_tensors.
 
+    Also eagerly registers the corresponding torch.library custom_ops so the
+    mask is usable inside ``torch.compile(fullgraph=True)`` blocks. Registration
+    cannot happen at import time because CuTe DSL mask_mods bake cp_rank and
+    local_seq_len as compile-time constants in the CUDA kernel closure.
+
     aux_tensors use shape (B, 1, S) per CuTe DSL indexing convention:
     ``tensor[batch[0], 0, seq_idx[0]]``.
 
@@ -504,6 +504,7 @@ def build_fa4_mask(
     import cutlass.cute as cute
 
     from flash_attn.cute.utils import scalar_to_ssa
+    from torchtitan.models.common.fa4_ops import register_fa4_masked_ops
 
     has_cp = shard_indices is not None
     has_docs = document_ids is not None
@@ -554,6 +555,7 @@ def build_fa4_mask(
                 f"is {batch_size}."
             )
 
+        register_fa4_masked_ops(cp_doc_causal_mask, "cp_doc_causal")
         return FA4Mask(
             mask_mod=cp_doc_causal_mask,
             aux_tensors=[shard_indices, q_doc_id_per_pos, kv_doc_id_per_pos],
@@ -576,6 +578,7 @@ def build_fa4_mask(
             orig_kv_idx = scalar_to_ssa(shard_indices[batch_idx, 0, kv_idx], cutlass.Int32)
             return orig_kv_idx <= orig_q_idx
 
+        register_fa4_masked_ops(cp_causal_mask, "cp_causal")
         return FA4Mask(
             mask_mod=cp_causal_mask,
             aux_tensors=[shard_indices],
@@ -592,6 +595,7 @@ def build_fa4_mask(
             kv_doc_id = scalar_to_ssa(doc_id_per_pos[batch_idx, 0, kv_idx], cutlass.Int32)
             return (kv_idx <= q_idx) & (q_doc_id == kv_doc_id)
 
+        register_fa4_masked_ops(doc_causal_mask, "doc_causal")
         return FA4Mask(
             mask_mod=doc_causal_mask,
             aux_tensors=[document_ids],
