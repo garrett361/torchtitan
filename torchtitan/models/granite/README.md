@@ -1,81 +1,5 @@
 # Granite SFT
 
-## Chat Template Behavior
-
-Template: `chat_template.jinja` (ChatML-style with thinking support).
-
-### Flags
-
-| Flag | Default | Effect |
-|------|---------|--------|
-| `enable_thinking` | `True` | Generation prompt ends with `<\|im_start\|>assistant\n<think>\n` (model fills reasoning). When `False`, emits `<think></think>` (skip reasoning). |
-| `truncate_history_thinking` | `True` | Strips reasoning from "historical" assistant turns (see below). |
-| `low_effort` | `False` | Appends `{reasoning effort: low}` to the final user message. |
-
-### Turn structure
-
-```
-<|im_start|>{role}\n{content}<|im_end|>\n
-```
-
-Assistant turns with `reasoning_content`:
-```
-<|im_start|>assistant\n<think>\n{reasoning}\n</think>\n{response}<|im_end|>\n
-```
-
-Without `reasoning_content`, the template injects empty tags **with no newlines**:
-```
-<|im_start|>assistant\n<think></think>{response}<|im_end|>\n
-```
-
-Note the three distinct forms:
-- **Full thinking**: `<think>\n{reasoning}\n</think>\n{response}` — newlines flank the reasoning AND follow `</think>`
-- **Truncated (from full)**: `<think></think>\n{response}` — reasoning removed, but the `\n` after `</think>` survives (it was part of the response prefix in the original)
-- **No reasoning / thinking off**: `<think></think>{response}` — no newlines at all between tags and response
-
-### `truncate_history_thinking` semantics
-
-The template computes `last_user_idx` by scanning `loop_messages` for `role == "user"`.
-`role == "tool"` messages do not update this index. Any assistant turn at
-`loop.index0 < last_user_idx` is "historical" and has its thinking stripped.
-
-Note on tool rendering: `tool` messages are wrapped in `<|im_start|>user … <|im_end|>`
-blocks in the output — that is, they appear inside a user-role ChatML turn, not as a
-distinct role. Consecutive tool messages share one such block. But because `last_user_idx`
-is computed from the original message list (not the rendered output), tool messages have
-no effect on it.
-
-**Pure multi-turn** (multiple user messages):
-```
-user0 → assistant0(think+response) → user1 → assistant1(think+response)
-```
-`last_user_idx = 2` (index of `user1` in loop_messages). `assistant0` is at index 1
-(`< 2`) → stripped to `<think></think>response`. `assistant1` is at index 3 (`> 2`)
-→ thinking preserved.
-
-**Tool-use chain** (single user message):
-```
-user → assistant(think+tool_call) → tool → assistant(think+tool_call) → tool → assistant(think+response)
-```
-`last_user_idx = 0` (only the initial user message). Every assistant turn has
-`loop.index0 > 0`, so **no thinking is ever stripped** — the full agentic loop is
-treated as a single "current turn."
-
-Training implication: for tool-call records with a single initial user message, all
-intermediate tool-call turns keep their full thinking in the rendered training sequence.
-This is intentional: each call represents real model output, so all thinking is trained.
-Records where intermediate tool-call turns carry `reasoning_content` produce training
-sequences where that thinking is preserved, which diverges from the inference behavior for
-pure multi-turn records and confuses tokenization tests that assume uniform stripping.
-
-### BPE boundary guarantee
-
-The pre-tokenizer regex splits on `\s*[\r\n]+` (newlines are always their own word) and
-`<think>`/`</think>` are added tokens (always atomic split points). This means the
-tokenization of response text after `</think>\n` is identical to after `</think>` alone —
-enabling reconstruction of truncated sequences from the full tokenization via token-level
-splicing without re-tokenization.
-
 ## Tokenization Strategy
 
 Strategy is chosen at pre-tokenization time and recorded in the output manifest
@@ -242,6 +166,82 @@ which does not use float8 all-gather and works correctly. Alternatively, filter 
 layer from float8 conversion (`filter_fqns=["output"]`) to avoid the double-registration.
 
 Observed: torch 2.13.0.dev20260422+cu130, torchao 0.18.0+git6367fd63, 4xGB200.
+
+## Chat Template Behavior Notes
+
+Template: `chat_template.jinja` (ChatML-style with thinking support).
+
+### Flags
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `enable_thinking` | `True` | Generation prompt ends with `<\|im_start\|>assistant\n<think>\n` (model fills reasoning). When `False`, emits `<think></think>` (skip reasoning). |
+| `truncate_history_thinking` | `True` | Strips reasoning from "historical" assistant turns (see below). |
+| `low_effort` | `False` | Appends `{reasoning effort: low}` to the final user message. |
+
+### Turn structure
+
+```
+<|im_start|>{role}\n{content}<|im_end|>\n
+```
+
+Assistant turns with `reasoning_content`:
+```
+<|im_start|>assistant\n<think>\n{reasoning}\n</think>\n{response}<|im_end|>\n
+```
+
+Without `reasoning_content`, the template injects empty tags **with no newlines**:
+```
+<|im_start|>assistant\n<think></think>{response}<|im_end|>\n
+```
+
+Note the three distinct forms:
+- **Full thinking**: `<think>\n{reasoning}\n</think>\n{response}` — newlines flank the reasoning AND follow `</think>`
+- **Truncated (from full)**: `<think></think>\n{response}` — reasoning removed, but the `\n` after `</think>` survives (it was part of the response prefix in the original)
+- **No reasoning / thinking off**: `<think></think>{response}` — no newlines at all between tags and response
+
+### `truncate_history_thinking` semantics
+
+The template computes `last_user_idx` by scanning `loop_messages` for `role == "user"`.
+`role == "tool"` messages do not update this index. Any assistant turn at
+`loop.index0 < last_user_idx` is "historical" and has its thinking stripped.
+
+Note on tool rendering: `tool` messages are wrapped in `<|im_start|>user … <|im_end|>`
+blocks in the output — that is, they appear inside a user-role ChatML turn, not as a
+distinct role. Consecutive tool messages share one such block. But because `last_user_idx`
+is computed from the original message list (not the rendered output), tool messages have
+no effect on it.
+
+**Pure multi-turn** (multiple user messages):
+```
+user0 → assistant0(think+response) → user1 → assistant1(think+response)
+```
+`last_user_idx = 2` (index of `user1` in loop_messages). `assistant0` is at index 1
+(`< 2`) → stripped to `<think></think>response`. `assistant1` is at index 3 (`> 2`)
+→ thinking preserved.
+
+**Tool-use chain** (single user message):
+```
+user → assistant(think+tool_call) → tool → assistant(think+tool_call) → tool → assistant(think+response)
+```
+`last_user_idx = 0` (only the initial user message). Every assistant turn has
+`loop.index0 > 0`, so **no thinking is ever stripped** — the full agentic loop is
+treated as a single "current turn."
+
+Training implication: for tool-call records with a single initial user message, all
+intermediate tool-call turns keep their full thinking in the rendered training sequence.
+This is intentional: each call represents real model output, so all thinking is trained.
+Records where intermediate tool-call turns carry `reasoning_content` produce training
+sequences where that thinking is preserved, which diverges from the inference behavior for
+pure multi-turn records and confuses tokenization tests that assume uniform stripping.
+
+### BPE boundary guarantee
+
+The pre-tokenizer regex splits on `\s*[\r\n]+` (newlines are always their own word) and
+`<think>`/`</think>` are added tokens (always atomic split points). This means the
+tokenization of response text after `</think>\n` is identical to after `</think>` alone —
+enabling reconstruction of truncated sequences from the full tokenization via token-level
+splicing without re-tokenization.
 
 
 
