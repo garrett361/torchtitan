@@ -129,44 +129,6 @@ examples sequentially until the sequence is full.
 Supports multi-worker DataLoader (`num_workers > 0`) — each worker gets a disjoint
 slice of the DP-sharded data via `worker_info`.
 
-## Float8 Training
-
-Float8 quantized training is supported via `torchao` (>= 0.18.0, built from source for
-GB200). Config registry entries:
-
-- `granite_debugmodel_float8` — tensorwise with FSDP all-gather (single-GPU unit tests)
-- `granite_debugmodel_float8_rowwise` — rowwise (multi-GPU integration tests)
-- `granite_4_1_8b_sft_pretokenized_float8_filteroutput` — tensorwise + all-gather, output filtered
-- `granite_4_1_8b_sft_pretokenized_float8_rowwise` — rowwise recipe
-
-### Known issue: tensorwise + FSDP float8 all-gather + weight tying
-
-Tensorwise with `enable_fsdp_float8_all_gather=True` (without filtering `output`)
-crashes during FSDP lazy init:
-
-```
-RuntimeError: Attempted to access the data pointer on an invalid python storage.
-  File "torch/distributed/fsdp/_fully_shard/_fsdp_param.py", line 950, in reset_sharded_param
-```
-
-Root cause: FSDP2's float8 all-gather path calls `reset_sharded_param()` which accesses
-the storage data pointer of the parameter. Granite's weight tying
-(`tok_embeddings.weight = output.weight`) results in the same underlying storage being
-referenced by two FSDP param groups. When one group processes it, the other's reference
-becomes invalid.
-
-**Why only `output` needs filtering**: `tok_embeddings` is `nn.Embedding`, not `nn.Linear`.
-`Float8LinearConverter` (via torchao's `swap_linear_with_float8_linear`) only converts
-`nn.Linear` modules, so the embedding is never a conversion target. Filtering `output`
-prevents it from becoming `Float8Linear`, keeping both sides of the weight tie as plain
-parameters that FSDP2 handles correctly.
-
-**Workaround**: Use the rowwise recipe (`granite_4_1_8b_sft_pretokenized_float8_rowwise`)
-which does not use float8 all-gather and works correctly. Alternatively, filter the output
-layer from float8 conversion (`filter_fqns=["output"]`) to avoid the double-registration.
-
-Observed: torch 2.13.0.dev20260422+cu130, torchao 0.18.0+git6367fd63, 4xGB200.
-
 ## Chat Template Behavior Notes
 
 Template: `chat_template.jinja` (ChatML-style with thinking support).
@@ -244,6 +206,53 @@ enabling reconstruction of truncated sequences from the full tokenization via to
 splicing without re-tokenization.
 
 
+## Float8 Training
+
+Float8 quantized training is supported via `torchao` (>= 0.18.0, built from source for
+GB200). Config registry entries:
+
+- `granite_debugmodel_float8` — tensorwise with FSDP all-gather (single-GPU unit tests)
+- `granite_debugmodel_float8_rowwise` — rowwise (multi-GPU integration tests)
+- `granite_4_1_8b_sft_pretokenized_float8_filteroutput` — tensorwise + all-gather, output filtered
+- `granite_4_1_8b_sft_pretokenized_float8_rowwise` — rowwise recipe
+
+### Known issue: tensorwise + FSDP float8 all-gather + weight tying
+
+Tensorwise with `enable_fsdp_float8_all_gather=True` (without filtering `output`)
+crashes during FSDP lazy init:
+
+```
+RuntimeError: Attempted to access the data pointer on an invalid python storage.
+  File "torch/distributed/fsdp/_fully_shard/_fsdp_param.py", line 950, in reset_sharded_param
+```
+
+Root cause: FSDP2's float8 all-gather path calls `reset_sharded_param()` which accesses
+the storage data pointer of the parameter. Granite's weight tying
+(`tok_embeddings.weight = output.weight`) results in the same underlying storage being
+referenced by two FSDP param groups. When one group processes it, the other's reference
+becomes invalid.
+
+**Why only `output` needs filtering**: `tok_embeddings` is `nn.Embedding`, not `nn.Linear`.
+`Float8LinearConverter` (via torchao's `swap_linear_with_float8_linear`) only converts
+`nn.Linear` modules, so the embedding is never a conversion target. Filtering `output`
+prevents it from becoming `Float8Linear`, keeping both sides of the weight tie as plain
+parameters that FSDP2 handles correctly.
+
+Implemented in the `granite_4_1_8b_sft_pretokenized_float8_filteroutput` model.
+
+## FA4 Training
+
+WIP: not yet competitive with FlexAttention for complex block-sparse attention patterns.
+
+- FA4 `block_sparse_tensors` for doc-causal masking is correct (fwd bit-identical to
+  non-sparse FA4, bwd within 1e-3). Bench script: `scripts/bench_fa4_block_sparse.py`.
+- Fwd is 2x faster than flex across configs. Bwd is slower, making fwd+bwd a net loss
+  at typical SFT doc counts: trails flex by ~10% at 4 docs/16k seq (5.3 vs 4.8ms) and
+  ~28% at 2 docs/32k seq (36 vs 28ms). Wins at high sparsity: 16 docs/16k seq (96%
+  block skip) is 1.95 vs 2.53ms.
+- Root cause: SM100 bwd forces `disable_2cta` when `mask_mod` or `block_sparse_tensors`
+  is set. Temporary gap in flash-attn-4 v0.0.0 (~75% of sparse bwd infra exists), not a
+  fundamental constraint. Revisit after upstream adds 2CTA + block_sparse bwd support.
 
 # Inference Notes
 
