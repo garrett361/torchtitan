@@ -136,12 +136,6 @@ class TestCPFA4(DTest):
         restore_indices = lb._generate_indices(restore=True)
         out_cp_restored = out_cp_full[:, restore_indices.squeeze(0)]
 
-        diff = (out_cp_restored.float() - out_ref.float()).abs()
-        ref_abs = out_ref.float().abs()
-        rel = diff / ref_abs.clamp(min=1e-10)
-        if cp_mesh.get_local_rank() == 0:
-            print(f"  FWD: max_abs={diff.max().item():.6e} "
-                  f"max_rel={rel.max().item():.6e}")
         torch.testing.assert_close(
             out_cp_restored, out_ref, atol=atol, rtol=rtol
         )
@@ -186,8 +180,6 @@ class TestCPFA4(DTest):
 
         seen_ids = set()
         compared = 0
-        worst_abs = 0.0
-        worst_rel = 0.0
         for (n1, p1), (n2, p2) in zip(
             ref_model.named_parameters(), cp_model.named_parameters()
         ):
@@ -199,20 +191,11 @@ class TestCPFA4(DTest):
             assert p2.grad is not None, f"CP model missing grad for {n2}"
             full_grad_ref = p1.grad.full_tensor()
             full_grad_cp = p2.grad.full_tensor()
-            diff = (full_grad_cp.float() - full_grad_ref.float()).abs()
-            ref_abs = full_grad_ref.float().abs()
-            abs_err = diff.max().item()
-            rel_err = (diff / ref_abs.clamp(min=1e-10)).max().item()
-            worst_abs = max(worst_abs, abs_err)
-            worst_rel = max(worst_rel, rel_err)
             torch.testing.assert_close(
                 full_grad_cp, full_grad_ref, atol=atol, rtol=rtol,
                 msg=f"grad mismatch: {n1}",
             )
             compared += 1
-        if cp_mesh.get_local_rank() == 0:
-            print(f"  BWD: worst_abs={worst_abs:.6e} worst_rel={worst_rel:.6e} "
-                  f"(compared {compared} params)")
         assert compared > 0, "No gradients compared"
 
     def _make_ptrr_lb(self, positions):

@@ -261,3 +261,25 @@ def granite_4_1_8b_sft_pretokenized_float8_rowwise() -> Trainer.Config:
         ],
     )
     return config
+
+
+def granite_4_1_8b_sft_pretokenized_fa4() -> Trainer.Config:
+    """SFT config for granite-4.1-8b with FA4 attention backend."""
+    config = granite_4_1_8b_sft_pretokenized()
+    config.model_spec = model_registry("8B", attn_backend="fa4")
+    return config
+
+
+def granite_4_1_8b_sft_pretokenized_fa4_float8_filteroutput() -> Trainer.Config:
+    """SFT config for granite-4.1-8b with FA4 + tensorwise float8."""
+    config = granite_4_1_8b_sft_pretokenized_fa4()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            Float8LinearConverter.Config(
+                enable_fsdp_float8_all_gather=True,
+                precompute_float8_dynamic_scale_for_fsdp=True,
+                filter_fqns=["output"],
+            ),
+        ],
+    )
+    return config
