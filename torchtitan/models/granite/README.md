@@ -81,8 +81,9 @@ A naive way to include all of this data is to break an `n`-turn conversation int
 ```
 # Packed convo:
 [usr_0, ast_0, usr_1, ast_1, usr_2, reas_2, ast_2, reas_0, ast_0, reas_1, ast_1]
+ | ----------        Backbone        ---------- |  | ------    Suffix  ------ |
 ```
-Using attention masks, we can process the above in a single forward pass (avoiding multiple, redundant passes over shared context) while preserving strict equality with the naive `n`-example strategy for the `ast_x` logit computations (up to numerics). The initial series of `usr/ast` turns is the "backbone" and the following reasoning/ast pairs are the "suffix". (Tool calling is also handled, but not explained in this schematic.)
+Using attention masks, we can process the above in a single forward pass (avoiding multiple, redundant passes over shared context) while preserving strict equality with the naive `n`-example strategy for the `ast_x` logit computations (up to numerics). The initial series of `usr/ast` turns is the "backbone" and the following reasoning/ast pairs are the "suffix". Note that the backbone matches the naive `truncate_history_thinking=True` processing of the full sequence. (Tool calling is also handled, but not explained in this schematic.)
 
 Examples:
 * The `[reas_0, ast_0]` suffix only attends to the initial `[usr_0]` backbone prefix.
