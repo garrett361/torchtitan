@@ -87,7 +87,7 @@ Using attention masks, we can process the above in a single forward pass (avoidi
 
 Examples:
 * The `[reas_0, ast_0]` suffix only attends to the initial `[usr_0]` backbone prefix.
-* The `[reas_1, ast_1]` suffix only attends to the initial `[usr_0, ast_0]` backbone prefix.
+* The `[reas_1, ast_1]` suffix only attends to the initial `[usr_0, ast_0, user_1]` backbone prefix.
 
 ## Pre-Tokenized Data Pipeline
 
