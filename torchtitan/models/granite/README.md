@@ -1,43 +1,5 @@
 # Granite SFT
 
-## Float8 Training
-
-Float8 quantized training is supported via `torchao` (>= 0.18.0, built from source for
-GB200). Config registry entries:
-
-- `granite_debugmodel_float8` — tensorwise with FSDP all-gather (single-GPU unit tests)
-- `granite_debugmodel_float8_rowwise` — rowwise (multi-GPU integration tests)
-- `granite_4_1_8b_sft_pretokenized_float8_filteroutput` — tensorwise + all-gather, output filtered
-- `granite_4_1_8b_sft_pretokenized_float8_rowwise` — rowwise recipe
-
-### Known issue: tensorwise + FSDP float8 all-gather + weight tying
-
-Tensorwise with `enable_fsdp_float8_all_gather=True` (without filtering `output`)
-crashes during FSDP lazy init:
-
-```
-RuntimeError: Attempted to access the data pointer on an invalid python storage.
-  File "torch/distributed/fsdp/_fully_shard/_fsdp_param.py", line 950, in reset_sharded_param
-```
-
-Root cause: FSDP2's float8 all-gather path calls `reset_sharded_param()` which accesses
-the storage data pointer of the parameter. Granite's weight tying
-(`tok_embeddings.weight = output.weight`) results in the same underlying storage being
-referenced by two FSDP param groups. When one group processes it, the other's reference
-becomes invalid.
-
-**Why only `output` needs filtering**: `tok_embeddings` is `nn.Embedding`, not `nn.Linear`.
-`Float8LinearConverter` (via torchao's `swap_linear_with_float8_linear`) only converts
-`nn.Linear` modules, so the embedding is never a conversion target. Filtering `output`
-prevents it from becoming `Float8Linear`, keeping both sides of the weight tie as plain
-parameters that FSDP2 handles correctly.
-
-**Workaround**: Use the rowwise recipe (`granite_4_1_8b_sft_pretokenized_float8_rowwise`)
-which does not use float8 all-gather and works correctly. Alternatively, filter the output
-layer from float8 conversion (`filter_fqns=["output"]`) to avoid the double-registration.
-
-Observed: torch 2.13.0.dev20260422+cu130, torchao 0.18.0+git6367fd63, 4xGB200.
-
 ## Chat Template Behavior
 
 Template: `chat_template.jinja` (ChatML-style with thinking support).
@@ -122,66 +84,85 @@ at runtime.
 
 ### TruncateLastStrategy
 
-Labels only the final assistant turn. All earlier turns (user, tool, and intermediate
-assistant) are masked (`IGNORE_INDEX`). Uses `truncate_history_thinking=True`, matching
-the vLLM/SGLang inference default.
+The naive `truncate_history_thinking=True` strategy. Schematically, with these settings a multi-turn conversation with assistant reasoning is processed by the chat template as in
+```
+# Raw convo:
+[usr_0, reas_0, ast_0, usr_1, reas_1, ast_1, usr_2, reas_2, ast_2]
+
+# Post chat-template with truncate_history_thinking=True.
+# This is what the model sees.
+[usr_0, ast_0, usr_1, ast_1, usr_2, reas_2, ast_2]
+```
+Historical thinking traces are removed.
+
+Only the final reasoning turn is seen by the model, and only the final reasoning and assistant response are used in the loss computation. All earlier turns (user, tool, and intermediate assistant) are masked (`IGNORE_INDEX`). Uses `truncate_history_thinking=True`, matching the vLLM/SGLang inference default.
 
 **Trailing non-assistant turns** (tool-last, user-last) are accepted. In both cases,
 messages after the last assistant turn are dropped before tokenization:
 
-- **User-last** (e.g. injected "max iterations" scaffolding): a correctness requirement.
-  A trailing `user` message shifts `last_user_idx` past the last assistant, causing
-  `truncate_history_thinking` to strip that turn's thinking traces. Dropping the trailing
-  message restores the correct `last_user_idx`.
+- **User-last** (e.g. injected "max iterations" scaffolding): a correctness requirement. A trailing `user` message would shift `last_user_idx` (tracked in the chat template) past the last assistant, causing `truncate_history_thinking` to strip that turn's thinking traces and eliminate the training signal from the example. So, we drop the final user turn and retain the reasoning trace.
 
-- **Tool-last** (agentic trajectories cut off after a tool response): efficiency only.
-  Trailing `tool` messages do not affect `last_user_idx` (the template excludes tool role
-  from that scan), so thinking is unaffected. The tokens are dropped purely to avoid
-  wasting packing budget at training time — they are all-`IGNORE_INDEX` and cannot be
-  attended to by any labeled position.
-
-The reasoning in the last assistant turn (the `reasoning_content` / `<think>` block) lives
-in the assistant message itself, not in the following tool response. Dropping the trailing
-tool response does not affect it.
+- **Tool-last** (agentic trajectories cut off after a tool response): efficiency only. Trailing `tool` messages do not affect `last_user_idx` (leaving the previous thinking trace unaffected) and do not contribute to the loss computation, so we drop these turns as irrelevant for efficiency.
 
 ### FullThinkingStrategy
 
-Uses `truncate_history_thinking=False` and loss-unmasks all assistant turns that have
-`reasoning_content`. The full thinking context from every turn is preserved in the token
-sequence — matching an agentic inference setup where the model sees full conversation
-history including prior reasoning.
+Uses `truncate_history_thinking=False` and all assistant turns that have `reasoning_content` are used in the loss computation. The full thinking context from every turn is preserved in the token sequence — matching an agentic inference setup where the model sees full conversation history including prior reasoning. Schematically
+```
+# Raw convo:
+[usr_0, reas_0, ast_0, usr_1, reas_1, ast_1, usr_2, reas_2, ast_2]
+
+# Post chat-template with truncate_history_thinking=False
+# This is what the model sees.
+[usr_0, reas_0, ast_0, usr_1, reas_1, ast_1, usr_2, reas_2, ast_2]
+```
 
 **Loss masking rules:**
-- Assistant turns WITH `reasoning_content`: unmasked (reasoning + response + `</think>` +
-  `<|im_end|>`)
+- Assistant turns WITH `reasoning_content`: unmasked (reasoning + response + `</think>` + `<|im_end|>`)
 - Assistant turns WITHOUT `reasoning_content`: masked (present as context only)
 - All other roles (system, user, tool): masked
 
-**Why no-reasoning turns are masked:** The template renders them as
-`<think></think>{response}` — a token sequence that never occurs at inference time (the
-model always receives `<think>\n` from the generation prompt, not adjacent
-`<think></think>`). Unmasking would train prediction under a context the model never sees
-during generation.
+**Why no-reasoning turns are masked:** The template renders them as `<think></think>{response}` — a token sequence that never occurs at inference time (the model always receives `<think>\n` from the generation prompt, not adjacent `<think></think>`). Unmasking would train prediction under a context the model never sees during generation.
 
-**Trailing non-assistant turns** are handled identically to `TruncateLastStrategy` (dropped
-before tokenization).
+**Trailing non-assistant turns** are handled identically to `TruncateLastStrategy` (dropped before tokenization, due to irrelevance/efficiency).
 
 **Trade-offs vs other strategies:**
-- vs `truncate_last`: sequences are longer (thinking not stripped from history), more
-  assistant turns contribute training signal, but fewer examples fit per packed sequence
-- vs `backbone_suffix`: simpler (no flex attention needed), but historical thinking
-  occupies regular sequence positions and competes with training content for seq_len budget
+- vs `truncate_last`: sequences are longer (thinking not stripped from history), more assistant turns contribute training signal, but fewer examples fit per packed sequence
+- vs `backbone_suffix`: simpler (no flex attention needed), but historical thinking occupies regular sequence positions and competes with training content for seq_len budget
 
 ### BackboneSuffixStrategy
 
-Backbone identical to `TruncateLastStrategy` (uses `truncate_history_thinking=True`, only
-the last assistant turn is loss-unmasked). Additionally produces per-turn suffix sequences
-that recover thinking traces from historical assistant turns. Designed for flex attention
-where suffixes are attended to without consuming backbone positions.
+A more data-efficient packing strategy for `truncate_history_thinking=True` chat-template application. As seen above, naive `truncate_history_thinking=True` discards all but the final reasoning trace, wasting data. `BackboneSuffixStrategy` is a packing strategy which:
+1. Preserves all reasoning traces
+2. Matches what the model sees at inference time
+3. Optimally packs the data for efficiency
 
-Output columns: `input_ids`, `labels`, `positions`, `suffix_starts`, `insertion_limits`,
-`n_tokens`. The packing layer expands `suffix_starts`/`insertion_limits` into per-token
-tensors at runtime for the attention mask.
+The model sees the below at inference time for a `truncate_history_thinking=True` conversation:
+
+```
+# Raw convo:
+[usr_0, reas_0, ast_0, usr_1, reas_1, ast_1, usr_2, reas_2, ast_2]
+
+# What the model sees
+
+# Turn 0
+[usr_0, reas_0, ast_0]
+
+# Turn 1
+[usr_0, usr_1, reas_1, ast_1]
+
+# Turn 2
+[usr_0, usr_1, usr_2, reas_2, ast_2]
+```
+A naive way to include all of this data is to break an `n`-turn conversation into `n` distinct examples to train on. A better strategy is to pack the data as in the below:
+```
+# Packed convo:
+[usr_0, ast_0, usr_1, ast_1, usr_2, reas_2, ast_2, reas_0, ast_0, reas_1, ast_1]
+```
+Using attention masks, we can process the above in a single forward pass (avoiding multiple, redundant passes over shared context) while preserving strict equality with the naive `n`-example strategy for the `ast_x` logit computations (up to numerics). The initial series of `usr/ast` turns is the "backbone" and the following reasoning/ast pairs are the "suffix". (Tool calling is also handled, but not explained in this schematic.)
+
+Examples:
+* The `[reas_0, ast_0]` suffix only attends to the initial `[usr_0]` backbone prefix.
+* The `[reas_1, ast_1]` suffix only attends to the initial `[usr_0, ast_0]` backbone prefix.
 
 ## Pre-Tokenized Data Pipeline
 
@@ -223,6 +204,46 @@ examples sequentially until the sequence is full.
 
 Supports multi-worker DataLoader (`num_workers > 0`) — each worker gets a disjoint
 slice of the DP-sharded data via `worker_info`.
+
+## Float8 Training
+
+Float8 quantized training is supported via `torchao` (>= 0.18.0, built from source for
+GB200). Config registry entries:
+
+- `granite_debugmodel_float8` — tensorwise with FSDP all-gather (single-GPU unit tests)
+- `granite_debugmodel_float8_rowwise` — rowwise (multi-GPU integration tests)
+- `granite_4_1_8b_sft_pretokenized_float8_filteroutput` — tensorwise + all-gather, output filtered
+- `granite_4_1_8b_sft_pretokenized_float8_rowwise` — rowwise recipe
+
+### Known issue: tensorwise + FSDP float8 all-gather + weight tying
+
+Tensorwise with `enable_fsdp_float8_all_gather=True` (without filtering `output`)
+crashes during FSDP lazy init:
+
+```
+RuntimeError: Attempted to access the data pointer on an invalid python storage.
+  File "torch/distributed/fsdp/_fully_shard/_fsdp_param.py", line 950, in reset_sharded_param
+```
+
+Root cause: FSDP2's float8 all-gather path calls `reset_sharded_param()` which accesses
+the storage data pointer of the parameter. Granite's weight tying
+(`tok_embeddings.weight = output.weight`) results in the same underlying storage being
+referenced by two FSDP param groups. When one group processes it, the other's reference
+becomes invalid.
+
+**Why only `output` needs filtering**: `tok_embeddings` is `nn.Embedding`, not `nn.Linear`.
+`Float8LinearConverter` (via torchao's `swap_linear_with_float8_linear`) only converts
+`nn.Linear` modules, so the embedding is never a conversion target. Filtering `output`
+prevents it from becoming `Float8Linear`, keeping both sides of the weight tie as plain
+parameters that FSDP2 handles correctly.
+
+**Workaround**: Use the rowwise recipe (`granite_4_1_8b_sft_pretokenized_float8_rowwise`)
+which does not use float8 all-gather and works correctly. Alternatively, filter the output
+layer from float8 conversion (`filter_fqns=["output"]`) to avoid the double-registration.
+
+Observed: torch 2.13.0.dev20260422+cu130, torchao 0.18.0+git6367fd63, 4xGB200.
+
+
 
 # Inference Notes
 
