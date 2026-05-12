@@ -72,10 +72,10 @@ The model sees the below at inference time for a `truncate_history_thinking=True
 [usr_0, reas_0, ast_0]
 
 # Turn 1
-[usr_0, usr_1, reas_1, ast_1]
+[usr_0, ast_0, usr_1, reas_1, ast_1]
 
 # Turn 2
-[usr_0, usr_1, usr_2, reas_2, ast_2]
+[usr_0, ast_0, usr_1, ast_1, usr_2, reas_2, ast_2]
 ```
 A naive way to include all of this data is to break an `n`-turn conversation into `n` distinct examples to train on. A better strategy is to pack the data as in the below:
 ```
