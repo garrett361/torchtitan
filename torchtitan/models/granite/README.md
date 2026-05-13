@@ -89,6 +89,10 @@ Examples:
 * The `[reas_0, ast_0]` suffix only attends to the initial `[usr_0]` backbone prefix.
 * The `[reas_1, ast_1]` suffix only attends to the initial `[usr_0, ast_0, user_1]` backbone prefix.
 
+If we model each individual `usr_x,reas_x,ast_x` segment being `O(S)` in length and there being $N$
+total turns, then the naive strategy has an attention cost of $\sim \sum_{ n=1 }^{ N } (n S)^{ 2 }
+\sim \mathcal{O}(N^{ 3 }S^{ 2 })$. In contrast, for the packed strategy the cost of the backbone (paid only once) is $\mathcal{O}(N^{ 2 }S^{ 2 })$ while the marginal additional cost from the $n$-th suffix (of length $\mathcal{O}(S)$) attending to its $\mathcal{O}(nS)$ causally available tokens is $\mathcal{O}(n S^{ 2 })$, and summing across suffixes gives a total cost of $\mathcal{O}(N^{ 2 }S^{ 2 })$
+
 ## Pre-Tokenized Data Pipeline
 
 Two-phase workflow: offline pre-tokenization produces Arrow shards, online dataloader
