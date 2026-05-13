@@ -319,36 +319,15 @@ The mismatch is indirect: later turns attend to response token hidden states tha
 encoded thinking info during training but won't at inference. See the "Tokenization
 Strategy" section for how this informs the training design choice.
 
-## TODO
+## Loss Weighting
 
-### Loss Weighting for Packed Sequences
+### Token-Uniform (current behavior)
 
-**Current behavior (token-uniform):** The loss is `cross_entropy(reduction="sum") /
-global_valid_tokens`, where `global_valid_tokens` counts all non-masked labels across
-all DP ranks. Every trained token contributes equally to the gradient regardless of
-which packed sequence it belongs to. Short sequences get less per-example influence
-than long ones — a 50-token sequence has 10x less impact than a 500-token sequence
-packed alongside it.
+The loss is `cross_entropy(reduction="sum") / global_valid_tokens`, where `global_valid_tokens` counts all non-masked labels across all DP ranks via all-reduce. Every trained token contributes equally to the gradient regardless of which packed sequence it belongs to.
 
-**Per-sequence-uniform weighting:** Each token in sequence `i` (with `N_i` trained
-tokens) gets weight `1/N_i`. The denominator becomes the total number of sequences
-(sum of weights = number of sequences across all ranks). This makes each sequence
-contribute equally regardless of length — equivalent to training on sequences in
-isolation and averaging gradients. Implementable dynamically at pack time from labels
-and position resets (no pretokenization schema changes needed).
+This seems fairly standard SFT. Token-uniform weighting means longer sequences contribute proportionally more gradient signal than shorter ones — a property shared by all language model pretraining as well.
 
-**Open question — backbone+suffix interaction:** When `sequence_uniform` is combined
-with the backbone+suffix packing strategy, how should suffix tokens be weighted
-relative to backbone tokens?
+A nice technical property is that token-uniform loss is identical whether sequences are packed or batched-with-padding. The per-token gradient contribution is `1/global_valid_tokens` either way.
 
-- **Per-segment normalization:** Treat backbone and each suffix as independent segments,
-  each with its own `1/N_segment` weight. A sample with 3 suffixes contributes 4x the
-  influence of a backbone-only sample. Matches isolated-training semantics per-segment
-  but creates variable per-example influence.
-- **Suffix discount factor:** A configurable `suffix_loss_scale` (default 1.0) multiplies
-  all suffix token weights. At 0.0, suffixes provide attention context only (no gradient
-  signal). Simple knob to tune backbone vs suffix signal balance.
-- **Fixed per-example budget:** Each example gets total weight 1.0 regardless of segment
-  count. Tokens within the example split that budget proportionally. Strictly
-  sequence-uniform across examples, but adding suffixes dilutes backbone signal.
+**Distributed correctness:** The all-reduce of valid token counts before normalization ensures true global token-uniform weighting across ranks. There are no mean-on-gpu then mean-over-world issues, which have plagued other frameworks (see huggingface/transformers#37474, e.g.).
 
