@@ -19,10 +19,22 @@ def _make_backbone_suffix_shard(
     shard_name: str = "shard_0000",
 ) -> Path:
     """Write a backbone_suffix Arrow shard + manifest to tmp_path."""
+    import pyarrow as pa
+
     shards_dir = tmp_path / "shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
 
-    ds = Dataset.from_dict(
+    # Explicit schema ensures list columns get int32 element type even when
+    # all lists are empty (Arrow would infer null type otherwise).
+    schema = pa.schema([
+        ("input_ids", pa.list_(pa.int32())),
+        ("labels", pa.list_(pa.int64())),
+        ("positions", pa.list_(pa.int32())),
+        ("suffix_starts", pa.list_(pa.int32())),
+        ("insertion_limits", pa.list_(pa.int32())),
+        ("n_tokens", pa.int64()),
+    ])
+    table = pa.table(
         {
             "input_ids": [ex["input_ids"] for ex in examples],
             "labels": [ex["labels"] for ex in examples],
@@ -30,8 +42,10 @@ def _make_backbone_suffix_shard(
             "suffix_starts": [ex["suffix_starts"] for ex in examples],
             "insertion_limits": [ex["insertion_limits"] for ex in examples],
             "n_tokens": [ex["n_tokens"] for ex in examples],
-        }
+        },
+        schema=schema,
     )
+    ds = Dataset(table)
     ds.save_to_disk(str(shards_dir / shard_name))
 
     manifest = {
@@ -561,14 +575,13 @@ class TestBackboneSuffixGreedyPacking(unittest.TestCase):
             self.assertIn("insertion_limits", batch_dict)
             self.assertGreater(stats["n_examples_packed"], 0)
 
-    def test_greedy_preserves_stream_order(self):
-        """Greedy packing doesn't reorder examples relative to the data stream."""
+    def test_greedy_packs_all_examples(self):
+        """Greedy packing includes all examples from the dataset."""
         seq_len = 32
         examples = [_example_no_suffix(), _example_one_suffix(), _example_two_suffixes()]
         ds = self._make_dataset(examples, seq_len=seq_len)
 
-        # Read post-shuffle order
-        expected_first_tokens = [row["input_ids"][0] for row in ds._data]
+        expected_first_tokens = sorted(ex["input_ids"][0] for ex in examples)
 
         actual_first_tokens = []
         for batch_dict, _, _ in ds:
@@ -580,7 +593,7 @@ class TestBackboneSuffixGreedyPacking(unittest.TestCase):
                     seen_convs.add(cid)
                     actual_first_tokens.append(inputs[i])
 
-        self.assertEqual(actual_first_tokens, expected_first_tokens)
+        self.assertEqual(sorted(actual_first_tokens), expected_first_tokens)
 
 
 class TestBackboneSuffixCostBalanced(unittest.TestCase):
@@ -642,6 +655,63 @@ class TestBackboneSuffixCostBalanced(unittest.TestCase):
             self.assertEqual(batch_dict["suffix_ids"].shape, (seq_len,))
             self.assertEqual(batch_dict["insertion_limits"].shape, (seq_len,))
             self.assertEqual(labels.shape, (seq_len,))
+
+
+class TestBackboneSuffixEpochBoundary(unittest.TestCase):
+    """Epoch boundary tests for BackboneSuffixDataset."""
+
+    def setUp(self):
+        import tempfile
+        import shutil
+
+        self._tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self._tmp)
+
+    def _make_dataset(self, examples, seq_len=32, **kwargs):
+        from torchtitan.models.granite.pretokenized_dataset import BackboneSuffixDataset
+
+        manifest_path = _make_backbone_suffix_shard(self._tmp, examples)
+        defaults = dict(infinite=False, packing="greedy", buffer_size=4)
+        defaults.update(kwargs)
+        return BackboneSuffixDataset(manifest_path, seq_len=seq_len, **defaults)
+
+    def test_partial_refill_exhausts_data(self):
+        """Fewer examples than buffer_size correctly sets _data_exhausted."""
+        examples = [_example_no_suffix(), _example_one_suffix(), _example_two_suffixes()]
+        ds = self._make_dataset(examples, buffer_size=10)
+        ds._prepare_iter()
+        ds._refill_buffer()
+        self.assertLessEqual(len(ds._buffer), 3)
+        ds._refill_buffer()
+        self.assertTrue(ds._data_exhausted)
+
+    def test_checkpoint_resume(self):
+        """Checkpoint round-trip produces identical remaining batches."""
+        examples = [_example_no_suffix(), _example_one_suffix(), _example_two_suffixes()]
+        ds1 = self._make_dataset(examples, buffer_size=2, packing="buffer")
+        it1 = iter(ds1)
+        next(it1)
+        state = ds1.state_dict()
+
+        ds2 = self._make_dataset(examples, buffer_size=2, packing="buffer")
+        ds2.load_state_dict(state)
+        remaining1 = list(it1)
+        remaining2 = list(ds2)
+        self.assertEqual(len(remaining1), len(remaining2))
+        for b1, b2 in zip(remaining1, remaining2):
+            self.assertTrue(b1[0]["input"].equal(b2[0]["input"]))
+
+    def test_infinite_epoch_rollover(self):
+        """Infinite mode crosses epoch boundary without error."""
+        examples = [_example_no_suffix(), _example_one_suffix()]
+        ds = self._make_dataset(examples, buffer_size=2, infinite=True)
+        batches = []
+        for i, batch in enumerate(ds):
+            batches.append(batch)
+            if i >= 5:
+                break
+        self.assertEqual(len(batches), 6)
+        self.assertGreater(ds._epoch, 0)
 
 
 if __name__ == "__main__":

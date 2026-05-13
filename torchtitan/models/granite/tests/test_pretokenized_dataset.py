@@ -34,18 +34,19 @@ def _build_dataset(
     seq_len: int = 16, buffer_size: int = 6, packing: str = "buffer", **extra_kwargs
 ):
     manifest = _make_manifest_with_length_stats(seq_len)
-    return TruncateLastDataset(
+    kwargs = dict(
         manifest_path=MANIFEST_PATH,
         seq_len=seq_len,
         dp_rank=0,
         dp_world_size=1,
         infinite=False,
-        shuffle_in_memory=True,
+
         _manifest=manifest,
         packing=packing,
         buffer_size=buffer_size,
-        **extra_kwargs,
     )
+    kwargs.update(extra_kwargs)
+    return TruncateLastDataset(**kwargs)
 
 
 def _compute_batch_cost_from_positions(batch) -> int:
@@ -84,8 +85,8 @@ class TestCostBalancedPacking(unittest.TestCase):
                 # With >1 example packed, cost should be non-trivial
                 self.assertGreater(cost, 0)
 
-    def test_fifo_guarantee(self):
-        """The oldest buffered example always appears at the start of the first batch."""
+    def test_seed_from_buffer(self):
+        """Batch seed item is drawn from the buffer contents."""
         seq_len = 16
         target_cost = seq_len * 30.0 / 5.0
         ds = _build_dataset(
@@ -96,15 +97,17 @@ class TestCostBalancedPacking(unittest.TestCase):
         )
 
         ds._prepare_iter()
-        ds._data_iter = ds._get_data_iter()
         ds._data_exhausted = False
         ds._refill_buffer()
 
-        oldest_idx = min(range(len(ds._ages)), key=ds._ages.__getitem__)
-        oldest_ids = list(ds._buffer[oldest_idx][0])
+        buffer_ids = {tuple(item.input_ids.tolist()) for item in ds._buffer}
         batch = next(ds._iter_packed())
         input_tensor = batch[0]["input"].tolist()
-        self.assertEqual(input_tensor[: len(oldest_ids)], oldest_ids)
+        # The first packed item must be one of the buffer items
+        for item_ids in buffer_ids:
+            if input_tensor[: len(item_ids)] == list(item_ids):
+                return
+        self.fail("Batch seed was not found among buffer items")
 
     def test_target_cost_computation(self):
         """Verify target_cost = seq_len * E[l²] / E[l] with correct cutoff selection."""
@@ -191,8 +194,8 @@ class TestCostBalancedPacking(unittest.TestCase):
             self.assertTrue(b1[0]["input"].equal(b2[0]["input"]))
             self.assertTrue(b1[1].equal(b2[1]))
 
-    def test_checkpointing_preserves_fifo_order(self):
-        """Checkpoint round-trip preserves _ages so FIFO seed order is maintained."""
+    def test_checkpointing_preserves_rng_state(self):
+        """Checkpoint round-trip preserves _batch_rng so selection is deterministic."""
         seq_len = 16
         target_cost = seq_len * 30.0 / 5.0
 
@@ -202,12 +205,8 @@ class TestCostBalancedPacking(unittest.TestCase):
             target_cost=target_cost,
             buffer_size=6,
         )
-        ds._prepare_iter()
-        ds._data_iter = ds._get_data_iter()
-        ds._data_exhausted = False
-        ds._refill_buffer()
-
-        ages_before = list(ds._ages)
+        it = iter(ds)
+        next(it)
         state = ds.state_dict()
 
         ds2 = _build_dataset(
@@ -218,15 +217,11 @@ class TestCostBalancedPacking(unittest.TestCase):
         )
         ds2.load_state_dict(state)
 
-        # Ages must be preserved (possibly reordered by sort, but same values)
-        self.assertEqual(sorted(ds2._ages), sorted(ages_before))
-        # The oldest item must be the same
-        oldest_before = min(range(len(ages_before)), key=ages_before.__getitem__)
-        oldest_after = min(range(len(ds2._ages)), key=ds2._ages.__getitem__)
-        self.assertEqual(
-            list(ds._buffer[oldest_before].input_ids),
-            list(ds2._buffer[oldest_after].input_ids),
-        )
+        remaining1 = list(it)
+        remaining2 = list(ds2)
+        self.assertEqual(len(remaining1), len(remaining2))
+        for b1, b2 in zip(remaining1, remaining2):
+            self.assertTrue(b1[0]["input"].equal(b2[0]["input"]))
 
     def test_batch_attention_cost_in_stats(self):
         """Cost-balanced batches include batch_attention_cost in stats dict."""
@@ -303,7 +298,7 @@ class TestCostBalancedE2E(unittest.TestCase):
             dp_rank=0,
             dp_world_size=1,
             infinite=True,
-            shuffle_in_memory=True,
+    
             packing="cost_balanced",
             buffer_size=64,
             target_cost=target_cost,
@@ -365,7 +360,7 @@ class TestCostBalancedE2E(unittest.TestCase):
             dp_rank=0,
             dp_world_size=1,
             infinite=True,
-            shuffle_in_memory=True,
+    
             buffer_size=64,
         )
 
@@ -512,49 +507,34 @@ class TestMultiDatasetMerge(unittest.TestCase):
 
 
 class TestGreedyPacking(unittest.TestCase):
-    """Greedy packing uses FIFO order and unsorted buffer."""
+    """Greedy packing uses random selection from fitting items."""
 
-    def test_greedy_fifo_order(self):
-        """Greedy packing processes items in insertion (FIFO) order."""
+    def test_greedy_selects_fitting_items(self):
+        """Greedy packing only selects items that fit in remaining space."""
         ds = _build_dataset(seq_len=16, packing="greedy", buffer_size=6)
-        ds._prepare_iter()
-        ds._data_iter = ds._get_data_iter()
-        ds._data_exhausted = False
-        ds._refill_buffer()
-
-        # Buffer is unsorted for greedy — items are in insertion order
-        insertion_order_ids = [list(item.input_ids) for item in ds._buffer]
-
         batches = list(ds)
-        all_packed_ids = []
-        for inp_dict, _, _ in batches:
-            all_packed_ids.extend(inp_dict["input"].tolist())
+        for inp_dict, _, stats in batches:
+            self.assertLessEqual(stats["n_total_tokens"], 16)
 
-        # First item's tokens should appear at the start
-        first_ids = insertion_order_ids[0]
-        self.assertEqual(all_packed_ids[: len(first_ids)], first_ids)
-
-    def test_greedy_selection_takes_next_fitting(self):
-        """Greedy selection returns index 0 (FIFO) when item fits."""
+    def test_greedy_selection_returns_valid_index(self):
+        """Greedy selection returns a valid buffer index when items fit."""
         from torchtitan.models.granite.pretokenized_dataset import _select_greedy
 
         ds = _build_dataset(seq_len=16, packing="greedy", buffer_size=6)
         ds._prepare_iter()
-        ds._data_iter = ds._get_data_iter()
         ds._data_exhausted = False
         ds._refill_buffer()
 
-        # With remaining > longest item, index 0 should always be returned
         idx = _select_greedy(ds, remaining=9999, batch={})
-        self.assertEqual(idx, 0)
+        self.assertGreaterEqual(idx, 0)
+        self.assertLess(idx, len(ds._buffer))
 
     def test_greedy_selection_rejects_when_too_long(self):
-        """Greedy selection returns -1 when first item doesn't fit."""
+        """Greedy selection returns -1 when no item fits."""
         from torchtitan.models.granite.pretokenized_dataset import _select_greedy
 
         ds = _build_dataset(seq_len=16, packing="greedy", buffer_size=6)
         ds._prepare_iter()
-        ds._data_iter = ds._get_data_iter()
         ds._data_exhausted = False
         ds._refill_buffer()
 
@@ -575,14 +555,12 @@ class TestSortedBufferInvariants(unittest.TestCase):
             buffer_size=6,
         )
         ds._prepare_iter()
-        ds._data_iter = ds._get_data_iter()
         ds._data_exhausted = False
         ds._refill_buffer()
         return ds
 
     def _assert_sync(self, ds):
         self.assertEqual(len(ds._buffer), len(ds._lengths))
-        self.assertEqual(len(ds._buffer), len(ds._ages))
         for i, item in enumerate(ds._buffer):
             self.assertEqual(ds._lengths[i], len(item.input_ids))
 
@@ -621,9 +599,9 @@ class TestSortedBufferInvariants(unittest.TestCase):
         """Bisect-based cost_balanced selection matches linear scan result."""
         ds = self._get_filled_dataset()
         batch = ds._new_batch()
-        oldest_idx = min(range(len(ds._ages)), key=ds._ages.__getitem__)
-        first = ds._buffer[oldest_idx]
-        ds._remove_at(oldest_idx)
+        seed_idx = int(ds._batch_rng.integers(len(ds._buffer)))
+        first = ds._buffer[seed_idx]
+        ds._remove_at(seed_idx)
         ds._place_item(batch, first)
         batch["cost"] = len(first.input_ids) ** 2
 
@@ -646,6 +624,69 @@ class TestSortedBufferInvariants(unittest.TestCase):
             if gap < linear_best_gap:
                 linear_best_gap, linear_best_idx = gap, i
         self.assertEqual(bisect_idx, linear_best_idx)
+
+
+class TestEpochBoundary(unittest.TestCase):
+    """Tests for epoch boundary behavior with Arrow-based refill."""
+
+    def test_partial_refill_exhausts_data(self):
+        """When dataset has fewer examples than buffer_size, refill fills partially."""
+        ds = _build_dataset(seq_len=16, buffer_size=10, packing="greedy")
+        ds._prepare_iter()
+        ds._refill_buffer()
+        self.assertLessEqual(len(ds._buffer), 6)
+        # Second refill discovers exhaustion
+        ds._refill_buffer()
+        self.assertTrue(ds._data_exhausted)
+        batches = list(ds._iter_packed())
+        self.assertGreater(len(batches), 0)
+
+    def test_checkpoint_resume_mid_dataset(self):
+        """Checkpoint at non-zero sample_idx resumes correctly."""
+        ds1 = _build_dataset(seq_len=16, buffer_size=3, packing="buffer")
+        it1 = iter(ds1)
+        next(it1)
+        state = ds1.state_dict()
+        self.assertGreater(state["sample_idx"], 0)
+
+        ds2 = _build_dataset(seq_len=16, buffer_size=3, packing="buffer")
+        ds2.load_state_dict(state)
+        remaining1 = list(it1)
+        remaining2 = list(ds2)
+        self.assertEqual(len(remaining1), len(remaining2))
+        for b1, b2 in zip(remaining1, remaining2):
+            self.assertTrue(b1[0]["input"].equal(b2[0]["input"]))
+
+    def test_infinite_epoch_rollover(self):
+        """Infinite mode crosses epoch boundary without error."""
+        ds = _build_dataset(seq_len=16, buffer_size=3, packing="greedy", infinite=True)
+        batches = []
+        for i, batch in enumerate(ds):
+            batches.append(batch)
+            if i >= 9:
+                break
+        self.assertEqual(len(batches), 10)
+        self.assertGreater(ds._epoch, 0)
+        for inp_dict, labels, _ in batches:
+            self.assertEqual(inp_dict["input"].shape[0], 16)
+            self.assertEqual(labels.shape[0], 16)
+
+    def test_rng_state_roundtrip(self):
+        """batch_rng_state in state_dict produces identical RNG after restore."""
+        ds = _build_dataset(seq_len=16, buffer_size=6, packing="cost_balanced",
+                            target_cost=16 * 30.0 / 5.0)
+        it = iter(ds)
+        next(it)
+        next(it)
+        state = ds.state_dict()
+
+        ds2 = _build_dataset(seq_len=16, buffer_size=6, packing="cost_balanced",
+                             target_cost=16 * 30.0 / 5.0)
+        ds2.load_state_dict(state)
+        self.assertEqual(
+            ds._batch_rng.integers(1000),
+            ds2._batch_rng.integers(1000),
+        )
 
 
 if __name__ == "__main__":

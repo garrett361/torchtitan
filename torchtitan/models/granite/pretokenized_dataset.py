@@ -19,11 +19,12 @@ import bisect
 import json
 import math
 from abc import abstractmethod
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, cast
 
+import numpy as np
 import torch
 from datasets import Dataset, concatenate_datasets, load_from_disk
 from datasets.distributed import split_dataset_by_node
@@ -164,10 +165,11 @@ SelectFn = Callable[["PreTokenizedDataset", int, dict], int]
 
 
 def _select_greedy(dataset: "PreTokenizedDataset", remaining: int, batch: dict) -> int:
-    """Take the next buffered item if it fits (FIFO for unsorted buffer)."""
-    if dataset._buffer and dataset._lengths[0] <= remaining:
-        return 0
-    return -1
+    """Random pick from items that fit (bisect on sorted buffer)."""
+    max_idx = bisect.bisect_right(dataset._lengths, remaining) - 1
+    if max_idx < 0:
+        return -1
+    return int(dataset._batch_rng.integers(max_idx + 1))
 
 
 def _select_largest_fitting(
@@ -221,7 +223,7 @@ class PreTokenizedDataset(IterableDataset, Stateful):
 
     Handles manifest loading, shard concatenation, DP sharding, the unified
     packing loop, and checkpointing. Subclasses implement format-specific
-    primitives (_tokenize_sample, _new_batch, _place_item, _pad_and_flush).
+    primitives (_item_from_arrow, _new_batch, _place_item, _pad_and_flush).
 
     Packing mode is selected via the ``packing`` constructor parameter:
     - "greedy": packs items in stream order without reordering.
@@ -238,7 +240,6 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         dp_world_size: int = 1,
         cp_rank: int = 0,
         infinite: bool = False,
-        shuffle_in_memory: bool = True,
         tokenizer: BaseTokenizer | None = None,
         packing: str = "buffer",
         buffer_size: int = 64,
@@ -263,16 +264,9 @@ class PreTokenizedDataset(IterableDataset, Stateful):
             shards_dir = manifest_path.parent / "shards"
             full_dataset = _load_shards(manifest, shards_dir)
 
-        # Shuffle before sharding so every DP rank gets a representative length
-        # distribution. split_dataset_by_node on a Dataset always returns a Dataset.
-        self._shuffle_in_memory = shuffle_in_memory
         self._original_data: Dataset = cast(
             Dataset,
-            split_dataset_by_node(
-                full_dataset.shuffle(seed=42, keep_in_memory=shuffle_in_memory),
-                dp_rank,
-                dp_world_size,
-            ),
+            split_dataset_by_node(full_dataset, dp_rank, dp_world_size),
         )
         self._data: Dataset = self._original_data
 
@@ -295,28 +289,30 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         self._worker_id: int = 0
         self._num_workers: int = 1
 
-        # Sorted buffer with parallel arrays for O(log n) bisect selection.
-        # _lengths is a separate int array (~1.6× faster than bisect key=lambda).
         self._buffer: list = []
         self._lengths: list[int] = []
-        self._ages: list[int] = []
-        self._age_counter: int = 0
-        self._sorted = packing != "greedy"
+        self._batch_rng = np.random.default_rng(42)
 
-        self._data_iter: Iterator | None = None
         self._data_exhausted: bool = False
 
     # --- Abstract primitives (subclass contract) ---
 
+    _arrow_list_columns: tuple[str, ...] = ()
+    _arrow_scalar_columns: tuple[str, ...] = ()
+
     @abstractmethod
-    def _tokenize_sample(self, sample: dict) -> Any | None:
-        """Parse raw sample into a NamedTuple with an `input_ids` field, or None to skip."""
+    def _item_from_arrow(
+        self,
+        list_arrays: dict[str, tuple[np.ndarray, np.ndarray]],
+        scalars: dict[str, np.ndarray],
+        idx: int,
+    ) -> Any | None:
+        """Construct one buffer item from pre-extracted Arrow column data."""
         ...
 
     @abstractmethod
     def _new_batch(self) -> dict:
-        """Create empty mutable batch accumulator.
-        Must include an 'inputs' key (list[int]) for token counting."""
+        """Create empty mutable batch accumulator."""
         ...
 
     @abstractmethod
@@ -336,33 +332,23 @@ class PreTokenizedDataset(IterableDataset, Stateful):
     _item_type: type
 
     def _serialize_buffer(self) -> list:
-        return [list(item) for item in self._buffer]
+        return [
+            [f.tolist() if hasattr(f, "tolist") else list(f) for f in item]
+            for item in self._buffer
+        ]
 
     def _deserialize_buffer(self, data: list) -> list:
         return [self._item_type(*[list(f) for f in fields]) for fields in data]
 
     def _insert_item(self, item) -> None:
         item_len = len(item.input_ids)
-        if self._sorted:
-            idx = bisect.bisect_left(self._lengths, item_len)
-            self._buffer.insert(idx, item)
-            self._lengths.insert(idx, item_len)
-            self._ages.insert(idx, self._age_counter)
-        else:
-            self._buffer.append(item)
-            self._lengths.append(item_len)
-            self._ages.append(self._age_counter)
-        self._age_counter += 1
+        idx = bisect.bisect_right(self._lengths, item_len)
+        self._buffer.insert(idx, item)
+        self._lengths.insert(idx, item_len)
 
     def _remove_at(self, idx: int) -> None:
         del self._buffer[idx]
         del self._lengths[idx]
-        del self._ages[idx]
-
-    def _get_data_iter(self):
-        if self._sample_idx == len(self._data):
-            return iter([])
-        return iter(self._data.skip(self._sample_idx))
 
     def _log_first_sample(self, input_ids: list[int], label_ids: list[int]) -> None:
         """Log the first sample with trained tokens highlighted."""
@@ -401,42 +387,25 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         return len(self._original_data)
 
     def _prepare_iter(self) -> None:
-        """Worker detection, epoch shuffle, sharding."""
+        """Worker detection and data sharding."""
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
             self._worker_id = worker_info.id
             self._num_workers = worker_info.num_workers
-        if self._epoch > 0:
+        if self._num_workers > 1:
             self._data = cast(
                 Dataset,
-                self._original_data.shuffle(
-                    seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
+                split_dataset_by_node(
+                    self._original_data, self._worker_id, self._num_workers
                 ),
             )
         else:
             self._data = self._original_data
-        if self._num_workers > 1:
-            self._data = cast(
-                Dataset,
-                split_dataset_by_node(self._data, self._worker_id, self._num_workers),
-            )
         self._sample_idx = min(self._sample_idx, len(self._data))
 
     def _advance_epoch(self) -> None:
         self._sample_idx = 0
         self._epoch += 1
-        self._data = cast(
-            Dataset,
-            self._original_data.shuffle(
-                seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
-            ),
-        )
-        if self._num_workers > 1:
-            self._data = cast(
-                Dataset,
-                split_dataset_by_node(self._data, self._worker_id, self._num_workers),
-            )
-        self._data_iter = self._get_data_iter()
         self._data_exhausted = False
         logger.warning(
             "Dataset '%s' is being re-looped (epoch %d)",
@@ -445,21 +414,37 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         )
 
     def _refill_buffer(self) -> None:
-        while len(self._buffer) < self._buffer_size and not self._data_exhausted:
-            sample = next(self._data_iter, None)
-            if sample is None:
-                self._data_exhausted = True
-                break
-            result = self._tokenize_sample(sample)
-            self._sample_idx += 1
-            if result is None:
-                continue
-            self._insert_item(result)
+        """Batch-read from Arrow tables via sequential table.slice()."""
+        needed = self._buffer_size - len(self._buffer)
+        if needed <= 0 or self._data_exhausted:
+            return
+        data_len = len(self._data)
+        if self._sample_idx >= data_len:
+            self._data_exhausted = True
+            return
+
+        chunk_size = min(needed, data_len - self._sample_idx)
+        table_slice = self._data.data.slice(self._sample_idx, chunk_size)
+
+        list_arrays: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for col_name in self._arrow_list_columns:
+            col = table_slice.column(col_name).combine_chunks()
+            list_arrays[col_name] = (col.offsets.to_numpy(), col.values.to_numpy())
+
+        scalars: dict[str, np.ndarray] = {}
+        for col_name in self._arrow_scalar_columns:
+            scalars[col_name] = table_slice.column(col_name).to_numpy()
+
+        for i in range(chunk_size):
+            item = self._item_from_arrow(list_arrays, scalars, i)
+            if item is not None:
+                self._insert_item(item)
+
+        self._sample_idx += chunk_size
 
     # --- Unified packing loop ---
 
     def _iter_packed(self):
-        self._data_iter = self._get_data_iter()
         self._data_exhausted = False
 
         while True:
@@ -472,17 +457,16 @@ class PreTokenizedDataset(IterableDataset, Stateful):
                 continue
 
             batch = self._new_batch()
-            if self._sorted:
-                oldest_idx = min(range(len(self._ages)), key=self._ages.__getitem__)
-            else:
-                oldest_idx = 0
-            first = self._buffer[oldest_idx]
-            self._remove_at(oldest_idx)
+            # The initial example is randomly chosen from the buffer, for some partial shuffling.
+            seed_idx = int(self._batch_rng.integers(len(self._buffer)))
+            first = self._buffer[seed_idx]
+            self._remove_at(seed_idx)
             self._place_item(batch, first)
             batch["cost"] = len(first.input_ids) ** 2
+            offset = len(first.input_ids)
 
             while True:
-                remaining = self.seq_len - len(batch["inputs"])
+                remaining = self.seq_len - offset
                 if remaining <= 0:
                     break
                 idx = self._select_fn(self, remaining, batch)
@@ -492,6 +476,7 @@ class PreTokenizedDataset(IterableDataset, Stateful):
                 self._remove_at(idx)
                 self._place_item(batch, picked)
                 batch["cost"] += len(picked.input_ids) ** 2
+                offset += len(picked.input_ids)
                 if not self._buffer:
                     self._refill_buffer()
 
@@ -507,35 +492,26 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         d: dict[str, Any] = {
             "epoch": self._epoch,
             "sample_idx": self._sample_idx,
+            "batch_rng_state": self._batch_rng.bit_generator.state,
         }
         if self._buffer:
             d["buffer"] = self._serialize_buffer()
-            d["ages"] = list(self._ages)
-            d["age_counter"] = self._age_counter
         return d
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self._epoch = state_dict["epoch"]
         self._sample_idx = state_dict["sample_idx"]
+        if "batch_rng_state" in state_dict:
+            self._batch_rng = np.random.default_rng()
+            self._batch_rng.bit_generator.state = state_dict["batch_rng_state"]
         if "buffer" in state_dict:
             self._buffer = self._deserialize_buffer(state_dict["buffer"])
             self._lengths = [len(item.input_ids) for item in self._buffer]
-            self._ages = state_dict.get("ages", list(range(len(self._buffer))))
-            self._age_counter = state_dict.get("age_counter", len(self._buffer))
-            if self._sorted:
-                order = sorted(
-                    range(len(self._lengths)), key=self._lengths.__getitem__
-                )
-                self._buffer = [self._buffer[i] for i in order]
-                self._lengths = [self._lengths[i] for i in order]
-                self._ages = [self._ages[i] for i in order]
-        if self._epoch > 0:
-            self._data = cast(
-                Dataset,
-                self._original_data.shuffle(
-                    seed=42 + self._epoch, keep_in_memory=self._shuffle_in_memory
-                ),
+            order = sorted(
+                range(len(self._lengths)), key=self._lengths.__getitem__
             )
+            self._buffer = [self._buffer[i] for i in order]
+            self._lengths = [self._lengths[i] for i in order]
 
 
 # ---------------------------------------------------------------------------
@@ -544,8 +520,8 @@ class PreTokenizedDataset(IterableDataset, Stateful):
 
 
 class _ChatItem(NamedTuple):
-    input_ids: list[int]
-    labels: list[int]
+    input_ids: np.ndarray
+    labels: np.ndarray
 
 
 class TruncateLastDataset(PreTokenizedDataset):
@@ -556,49 +532,57 @@ class TruncateLastDataset(PreTokenizedDataset):
     """
 
     _item_type = _ChatItem
+    _arrow_list_columns = ("input_ids", "labels")
 
-    def _tokenize_sample(self, sample: dict[str, Any]) -> _ChatItem | None:
-        input_ids: list[int] = list(sample["input_ids"])
-        label_ids: list[int] = list(sample["labels"])
-
-        if len(input_ids) > self.seq_len:
-            logger.debug(
-                "Dropping pre-tokenized sample %d: %d tokens > seq_len %d",
-                self._sample_idx,
-                len(input_ids),
-                self.seq_len,
+    def _deserialize_buffer(self, data: list) -> list:
+        return [
+            _ChatItem(
+                np.asarray(fields[0], dtype=np.int32),
+                np.asarray(fields[1], dtype=np.int32),
             )
-            return None
+            for fields in data
+        ]
 
-        self._log_first_sample(input_ids, label_ids)
-        return _ChatItem(input_ids, label_ids)
+    def _item_from_arrow(self, list_arrays, scalars, idx):
+        offsets, values = list_arrays["input_ids"]
+        inp = values[offsets[idx]:offsets[idx + 1]]
+        if len(inp) > self.seq_len:
+            return None
+        offsets, values = list_arrays["labels"]
+        lbl = values[offsets[idx]:offsets[idx + 1]]
+        if not self._logged_first_sample:
+            self._log_first_sample(inp.tolist(), lbl.tolist())
+        return _ChatItem(inp, lbl)
 
     def _new_batch(self) -> dict:
         return {
-            "inputs": [],
-            "labels": [],
-            "positions": [],
+            "inputs": np.full(self.seq_len, self._eos_id, dtype=np.int32),
+            "labels": np.full(self.seq_len, IGNORE_INDEX, dtype=np.int32),
+            "positions": np.zeros(self.seq_len, dtype=np.int32),
+            "offset": 0,
             "n_total": 0,
             "n_trained": 0,
             "n_examples": 0,
         }
 
     def _place_item(self, batch: dict, item: _ChatItem) -> None:
-        batch["inputs"].extend(item.input_ids)
-        batch["labels"].extend(item.labels)
-        batch["positions"].extend(range(len(item.input_ids)))
-        batch["n_total"] += len(item.input_ids)
-        batch["n_trained"] += sum(1 for lbl in item.labels if lbl != IGNORE_INDEX)
+        n = len(item.input_ids)
+        off = batch["offset"]
+        batch["inputs"][off:off + n] = item.input_ids
+        batch["labels"][off:off + n] = item.labels
+        batch["positions"][off:off + n] = np.arange(n, dtype=np.int32)
+        batch["offset"] = off + n
+        batch["n_total"] += n
+        batch["n_trained"] += int(np.count_nonzero(item.labels != IGNORE_INDEX))
         batch["n_examples"] += 1
 
     def _pad_and_flush(
         self, batch: dict
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor, dict[str, int]]:
-        pad_len = self.seq_len - len(batch["inputs"])
+        off = batch["offset"]
+        pad_len = self.seq_len - off
         if pad_len > 0:
-            batch["inputs"].extend([self._eos_id] * pad_len)
-            batch["labels"].extend([IGNORE_INDEX] * pad_len)
-            batch["positions"].extend(range(pad_len))
+            batch["positions"][off:] = np.arange(pad_len, dtype=np.int32)
         stats: dict[str, int] = {
             "n_total_tokens": batch["n_total"],
             "n_trained_tokens": batch["n_trained"],
@@ -608,12 +592,13 @@ class TruncateLastDataset(PreTokenizedDataset):
             stats["batch_attention_cost"] = batch["cost"]
         return (
             {
-                "input": torch.tensor(batch["inputs"], dtype=torch.long),
-                "positions": torch.tensor(batch["positions"], dtype=torch.long),
+                "input": torch.from_numpy(batch["inputs"].astype(np.int64)),
+                "positions": torch.from_numpy(batch["positions"].astype(np.int64)),
             },
-            torch.tensor(batch["labels"], dtype=torch.long),
+            torch.from_numpy(batch["labels"].astype(np.int64)),
             stats,
         )
+
 
 
 # ---------------------------------------------------------------------------
@@ -638,25 +623,27 @@ class BackboneSuffixDataset(PreTokenizedDataset):
     """
 
     _item_type = _BackboneSuffixItem
+    _arrow_list_columns = (
+        "input_ids", "labels", "positions", "suffix_starts", "insertion_limits",
+    )
+    _arrow_scalar_columns = ("n_tokens",)
 
-    def _tokenize_sample(self, sample: dict) -> _BackboneSuffixItem | None:
-        n_tokens = sample["n_tokens"]
+    def _item_from_arrow(self, list_arrays, scalars, idx):
+        n_tokens = int(scalars["n_tokens"][idx])
         if n_tokens > self.seq_len:
-            logger.debug(
-                "Dropping backbone_suffix sample %d: %d tokens > seq_len %d",
-                self._sample_idx,
-                n_tokens,
-                self.seq_len,
-            )
             return None
-        input_ids = list(sample["input_ids"])
-        labels = list(sample["labels"])
-        positions = list(sample["positions"])
-        suffix_starts = list(sample["suffix_starts"])
-        insertion_limits = list(sample["insertion_limits"])
-        self._log_first_sample(input_ids, labels)
+        fields = {}
+        for col_name in self._arrow_list_columns:
+            offsets, values = list_arrays[col_name]
+            fields[col_name] = values[offsets[idx]:offsets[idx + 1]].tolist()
+        if not self._logged_first_sample:
+            self._log_first_sample(fields["input_ids"], fields["labels"])
         return _BackboneSuffixItem(
-            input_ids, labels, positions, suffix_starts, insertion_limits
+            fields["input_ids"],
+            fields["labels"],
+            fields["positions"],
+            fields["suffix_starts"],
+            fields["insertion_limits"],
         )
 
     def _new_batch(self) -> dict:
@@ -787,10 +774,6 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         infinite: bool = True
         """Loop the dataset indefinitely."""
 
-        shuffle_in_memory: bool = True
-        """Keep shuffle index in memory instead of writing a cache file to the shard
-        directory. Avoids filesystem contention when many ranks start simultaneously."""
-
         packing: Literal["greedy", "buffer", "cost_balanced"] = "buffer"
         """Packing algorithm. 'buffer' maintains a lookahead buffer and selects
         largest-fitting examples (~99.9% efficiency at 128k seq_len). 'greedy'
@@ -888,7 +871,6 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
             dp_world_size=dp_world_size,
             cp_rank=cp_rank,
             infinite=config.infinite,
-            shuffle_in_memory=config.shuffle_in_memory,
             tokenizer=tokenizer,
             packing=config.packing,
             buffer_size=config.buffer_size,

@@ -418,11 +418,9 @@ class TestTruncateLastBufferPacking(unittest.TestCase):
 
         self.assertEqual(buffer_padding, 0)
 
-    def test_fifo_guarantee(self):
-        """Oldest buffered example is consumed first, not the largest."""
+    def test_all_examples_packed(self):
+        """All buffered examples are eventually consumed."""
         seq_len = 16
-        # All same-length examples: largest-fit has no preference, so FIFO
-        # determines order. Verify output order matches (shuffled) dataset order.
         examples = [
             ([100 + i, _EOS_ID], [_EOS_ID, IGNORE_INDEX])
             for i in range(8)
@@ -432,20 +430,17 @@ class TestTruncateLastBufferPacking(unittest.TestCase):
             manifest_path, seq_len=seq_len, infinite=False, packing="buffer", buffer_size=8
         )
 
-        # Determine expected order from the shuffled dataset
-        expected_first_tokens = [row["input_ids"][0] for row in ds._data]
+        expected_first_tokens = sorted(row["input_ids"][0] for row in ds._data)
 
-        # Collect actual first tokens of each packed example from output
         actual_first_tokens = []
         for batch_dict, _, _ in ds:
             inputs = batch_dict["input"].tolist()
             positions = batch_dict["positions"].tolist()
-            # Each document starts where positions reset to 0
             for i, pos in enumerate(positions):
                 if pos == 0 and inputs[i] != _EOS_ID:
                     actual_first_tokens.append(inputs[i])
 
-        self.assertEqual(actual_first_tokens, expected_first_tokens)
+        self.assertEqual(sorted(actual_first_tokens), expected_first_tokens)
 
     def test_position_resets_at_document_boundary(self):
         """Positions reset to 0 at each packed document boundary."""
@@ -639,8 +634,8 @@ class TestGreedyPacking(unittest.TestCase):
         self._tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self._tmp)
 
-    def test_greedy_packs_in_stream_order(self):
-        """Greedy packing places items in sequential order without reordering."""
+    def test_greedy_packs_all_examples(self):
+        """Greedy packing consumes all examples from the dataset."""
         seq_len = 32
         examples = [
             ([100 + i, _EOS_ID], [_EOS_ID, IGNORE_INDEX])
@@ -651,8 +646,7 @@ class TestGreedyPacking(unittest.TestCase):
             manifest_path, seq_len=seq_len, infinite=False, packing="greedy"
         )
 
-        # Read the post-shuffle order from the dataset
-        expected_first_tokens = [row["input_ids"][0] for row in ds._data]
+        expected_first_tokens = sorted(row["input_ids"][0] for row in ds._data)
 
         actual_first_tokens = []
         for batch_dict, _, _ in ds:
@@ -662,7 +656,7 @@ class TestGreedyPacking(unittest.TestCase):
                 if pos == 0 and inputs[i] != _EOS_ID:
                     actual_first_tokens.append(inputs[i])
 
-        self.assertEqual(actual_first_tokens, expected_first_tokens)
+        self.assertEqual(sorted(actual_first_tokens), expected_first_tokens)
 
     def test_greedy_flushes_when_item_doesnt_fit(self):
         """When next item doesn't fit, greedy flushes and starts new batch."""
@@ -675,7 +669,6 @@ class TestGreedyPacking(unittest.TestCase):
         manifest_path = _make_shard(self._tmp, examples)
         ds = TruncateLastDataset(
             manifest_path, seq_len=seq_len, infinite=False, packing="greedy",
-            shuffle_in_memory=False,
         )
 
         batches = list(ds)
