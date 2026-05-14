@@ -689,5 +689,127 @@ class TestEpochBoundary(unittest.TestCase):
         )
 
 
+class TestSnapshotResumeDataLoader(unittest.TestCase):
+    """Verify StatefulDataLoader resume with misaligned snapshot_every_n_steps.
+
+    When snapshot_every_n_steps=N and we stop at step S where S % N != 0,
+    the dataloader replays S - last_snapshot_step batches on resume. This test
+    verifies that the replayed sequence matches the original.
+    """
+
+    def _build_loader(self, snapshot_every_n_steps: int = 4):
+        config = GranitePreTokenizedDataLoader.Config(
+            dataset_path=str(MANIFEST_PATH),
+            infinite=True,
+            packing="greedy",
+            buffer_size=6,
+            num_workers=1,
+            prefetch_factor=2,
+            persistent_workers=False,
+            snapshot_every_n_steps=snapshot_every_n_steps,
+        )
+        return GranitePreTokenizedDataLoader(
+            config,
+            dp_world_size=1,
+            dp_rank=0,
+            tokenizer=None,
+            seq_len=16,
+            local_batch_size=1,
+        )
+
+    def test_resume_misaligned_with_snapshot(self):
+        """Resume from step 7 (snapshot at step 4) replays steps 5-7 identically."""
+        dl = self._build_loader(snapshot_every_n_steps=4)
+        it = iter(dl)
+
+        # Consume 7 batches (last snapshot at step 4, so steps_since_snapshot=3)
+        for _ in range(7):
+            next(it)
+
+        state = dl.state_dict()
+
+        # Consume 5 more batches from the original iterator
+        expected = []
+        for _ in range(5):
+            inp_dict, labels = next(it)
+            expected.append((inp_dict["input"].clone(), labels.clone()))
+
+        # Resume from checkpoint
+        dl_resumed = self._build_loader(snapshot_every_n_steps=4)
+        dl_resumed.load_state_dict(state)
+        it_resumed = iter(dl_resumed)
+
+        for i, (exp_input, exp_labels) in enumerate(expected):
+            inp_dict, labels = next(it_resumed)
+            self.assertTrue(
+                inp_dict["input"].equal(exp_input),
+                f"Batch {i} input_ids mismatch after resume",
+            )
+            self.assertTrue(
+                labels.equal(exp_labels),
+                f"Batch {i} labels mismatch after resume",
+            )
+
+    def test_resume_aligned_with_snapshot(self):
+        """Resume from step 8 (exactly on snapshot boundary) produces same sequence."""
+        dl = self._build_loader(snapshot_every_n_steps=4)
+        it = iter(dl)
+
+        for _ in range(8):
+            next(it)
+
+        state = dl.state_dict()
+
+        expected = []
+        for _ in range(5):
+            inp_dict, labels = next(it)
+            expected.append((inp_dict["input"].clone(), labels.clone()))
+
+        dl_resumed = self._build_loader(snapshot_every_n_steps=4)
+        dl_resumed.load_state_dict(state)
+        it_resumed = iter(dl_resumed)
+
+        for i, (exp_input, exp_labels) in enumerate(expected):
+            inp_dict, labels = next(it_resumed)
+            self.assertTrue(
+                inp_dict["input"].equal(exp_input),
+                f"Batch {i} input_ids mismatch after aligned resume",
+            )
+            self.assertTrue(
+                labels.equal(exp_labels),
+                f"Batch {i} labels mismatch after aligned resume",
+            )
+
+    def test_resume_with_large_snapshot_interval(self):
+        """snapshot_every_n_steps=1024 (default) still resumes correctly."""
+        dl = self._build_loader(snapshot_every_n_steps=1024)
+        it = iter(dl)
+
+        for _ in range(7):
+            next(it)
+
+        state = dl.state_dict()
+
+        expected = []
+        for _ in range(3):
+            inp_dict, labels = next(it)
+            expected.append((inp_dict["input"].clone(), labels.clone()))
+
+        dl_resumed = self._build_loader(snapshot_every_n_steps=1024)
+        dl_resumed.load_state_dict(state)
+        it_resumed = iter(dl_resumed)
+
+        for i, (exp_input, exp_labels) in enumerate(expected):
+            inp_dict, labels = next(it_resumed)
+            self.assertTrue(
+                inp_dict["input"].equal(exp_input),
+                f"Batch {i} input_ids mismatch with large snapshot interval",
+            )
+            self.assertTrue(
+                labels.equal(exp_labels),
+                f"Batch {i} labels mismatch with large snapshot interval",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
