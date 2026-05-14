@@ -1,4 +1,4 @@
-"""Generate synthetic pre-tokenized test assets for TruncateLastDataset tests.
+"""Generate synthetic pre-tokenized test assets for StandardPackingDataset tests.
 
 Writes Arrow shards + manifest.json to tests/assets/pretok_truncate_last/ using the
 test tokenizer's vocabulary.  Does NOT call apply_chat_template; examples are

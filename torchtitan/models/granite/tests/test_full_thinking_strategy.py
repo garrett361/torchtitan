@@ -297,9 +297,9 @@ class TestFullThinkingDataloaderDispatch(unittest.TestCase):
         from torchtitan.models.granite.pretokenized_dataset import _DATASET_CLASSES
 
         self.assertIn("full_thinking", _DATASET_CLASSES)
-        from torchtitan.models.granite.pretokenized_dataset import TruncateLastDataset
+        from torchtitan.models.granite.pretokenized_dataset import StandardPackingDataset
 
-        self.assertIs(_DATASET_CLASSES["full_thinking"], TruncateLastDataset)
+        self.assertIs(_DATASET_CLASSES["full_thinking"], StandardPackingDataset)
 
 
 if __name__ == "__main__":

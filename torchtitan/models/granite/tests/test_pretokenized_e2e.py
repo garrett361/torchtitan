@@ -8,7 +8,7 @@ from torchtitan.components.loss import IGNORE_INDEX, cross_entropy_loss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.models.granite import granite_configs
 from torchtitan.models.granite.model import GraniteModel
-from torchtitan.models.granite.pretokenized_dataset import TruncateLastDataset
+from torchtitan.models.granite.pretokenized_dataset import StandardPackingDataset
 
 _MANIFEST = "tests/assets/pretok_truncate_last/manifest.json"
 _TOKENIZER_PATH = "tests/assets/tokenizer"
@@ -25,7 +25,7 @@ class TestTruncateLastE2E(unittest.TestCase):
         self.model.train()
 
     def _first_batch(self):
-        ds = TruncateLastDataset(_MANIFEST, seq_len=_SEQ_LEN, infinite=False)
+        ds = StandardPackingDataset(_MANIFEST, seq_len=_SEQ_LEN, infinite=False)
         batch_dict, labels, _stats = next(iter(ds))
         tokens = batch_dict["input"].unsqueeze(0).cuda()
         positions = batch_dict["positions"].unsqueeze(0).cuda()
@@ -52,7 +52,7 @@ class TestTruncateLastE2E(unittest.TestCase):
     def test_packed_logits_match_unpacked(self):
         """Flex attention document masking isolates per-document attention.
 
-        Pulls a real packed batch from TruncateLastDataset, recovers document
+        Pulls a real packed batch from StandardPackingDataset, recovers document
         boundaries from position resets (positions[t] < positions[t-1]), runs
         each segment through the model independently, and verifies the logits
         agree with the corresponding slice of the packed forward pass.

@@ -1033,7 +1033,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "training.max_epochs requires a dataset that tracks epoch boundaries. "
                     "Use a dataset whose get_data_stats() returns a non-None 'epochs' value "
                     "(e.g. ChatDataset over a map-style HuggingFace Dataset, or "
-                    "TruncateLastDataset)."
+                    "StandardPackingDataset)."
                 )
 
         logger.info(f"Training starts at step {self.step + 1}")

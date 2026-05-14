@@ -442,3 +442,79 @@ class FullThinkingStrategy(TruncateLastStrategy):
                 label_ids[start:end] = full_tokens[start + 1 : end + 1]
 
         return {"input_ids": input_ids, "labels": label_ids, "n_tokens": len(input_ids)}
+
+
+class TruncateEveryTurnStrategy(TokenizationStrategy):
+    """Decomposes multi-turn conversations into one example per assistant turn.
+
+    For an N-assistant-turn conversation, produces N independent examples. Each
+    example is the conversation truncated to assistant turn K, with labels only
+    on turn K. Uses truncate_history_thinking=True: historical thinking traces
+    are stripped, matching vLLM/SGLang inference behavior.
+
+    This is a simple baseline for BackboneSuffixStrategy: same per-turn training
+    signal, no suffix coordinate math, at the cost of redundant context tokens.
+    """
+
+    @property
+    def chat_template_kwargs(self) -> dict[str, Any]:
+        return {"truncate_history_thinking": True}
+
+    def _tokenize_one(self, messages: list[dict]) -> dict[str, list[int] | int]:
+        _validate_messages(messages)
+        last_asst_idx = max(
+            i for i, m in enumerate(messages) if m["role"] == "assistant"
+        )
+        effective = messages[: last_asst_idx + 1]
+        full_text = self.tokenizer.apply_chat_template(
+            effective, **self.chat_template_kwargs
+        ).rstrip("\n")
+        full_tokens = self.tokenizer.encode(full_text, add_bos=True, add_eos=False)
+        if full_tokens[-1] != self.tokenizer.eos_id:
+            full_tokens.append(self.tokenizer.eos_id)
+        input_ids = full_tokens[:-1]
+        label_ids = [IGNORE_INDEX] * len(input_ids)
+        prefix_text = self.tokenizer.apply_chat_template(
+            effective[:-1],
+            add_generation_prompt=True,
+            **self.chat_template_kwargs,
+        )
+        prefix_tokens = self.tokenizer.encode(prefix_text, add_bos=True, add_eos=False)
+        start = len(prefix_tokens) - 1
+        label_ids[start:] = full_tokens[start + 1 :]
+        return {"input_ids": input_ids, "labels": label_ids, "n_tokens": len(input_ids)}
+
+    def __call__(self, batch: dict[str, list]) -> dict[str, list]:
+        results: dict[str, list] = {k: [] for k in self.column_schema}
+        failures: list[dict] = []
+        for messages in batch["messages"]:
+            try:
+                last_asst_idx = max(
+                    i for i, m in enumerate(messages) if m["role"] == "assistant"
+                )
+                effective = messages[: last_asst_idx + 1]
+                asst_indices = [
+                    i for i, m in enumerate(effective) if m["role"] == "assistant"
+                ]
+                for asst_idx in asst_indices:
+                    truncated = effective[: asst_idx + 1]
+                    result = self._tokenize_one(truncated)
+                    for key in results:
+                        results[key].append(result[key])
+            except Exception as e:
+                logger.warning("Dropping sample: %s", e)
+                if self._failures_path:
+                    failures.append({"messages": messages, "error": str(e)})
+        if failures:
+            _append_failures(self._failures_path, failures)
+        return results
+
+    @property
+    def column_schema(self) -> dict:
+        import pyarrow as pa
+
+        return {
+            "input_ids": pa.list_(pa.int32()),
+            "labels": pa.list_(pa.int32()),
+            "n_tokens": pa.int32(),
+        }

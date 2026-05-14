@@ -1,4 +1,4 @@
-"""Unit tests for TruncateLastDataset and GranitePreTokenizedDataLoader."""
+"""Unit tests for StandardPackingDataset and GranitePreTokenizedDataLoader."""
 
 import json
 import unittest
@@ -10,7 +10,7 @@ from datasets import Dataset
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.models.granite.pretokenized_dataset import (
     GranitePreTokenizedDataLoader,
-    TruncateLastDataset,
+    StandardPackingDataset,
 )
 
 _EOS_ID = 2003
@@ -61,7 +61,7 @@ def _make_shard(
     return manifest_path
 
 
-class TestTruncateLastDatasetPacking(unittest.TestCase):
+class TestStandardPackingDatasetPacking(unittest.TestCase):
     def setUp(self):
         import tempfile
 
@@ -73,9 +73,9 @@ class TestTruncateLastDatasetPacking(unittest.TestCase):
 
         shutil.rmtree(self._tmpdir)
 
-    def _make_dataset(self, examples, seq_len=16, **kwargs) -> TruncateLastDataset:
+    def _make_dataset(self, examples, seq_len=16, **kwargs) -> StandardPackingDataset:
         manifest_path = _make_shard(self._tmp, examples)
-        return TruncateLastDataset(manifest_path, seq_len=seq_len, infinite=False, **kwargs)
+        return StandardPackingDataset(manifest_path, seq_len=seq_len, infinite=False, **kwargs)
 
     def test_output_shape(self):
         """Every yielded batch has tensors of length seq_len."""
@@ -174,7 +174,7 @@ class TestTruncateLastDatasetPacking(unittest.TestCase):
         manifest_path = _make_shard(self._tmp, examples)
 
         def collect_first_tokens(rank):
-            ds = TruncateLastDataset(
+            ds = StandardPackingDataset(
                 manifest_path, seq_len=seq_len, dp_rank=rank, dp_world_size=2, infinite=False
             )
             tokens = set()
@@ -202,17 +202,17 @@ class TestTruncateLastDatasetPacking(unittest.TestCase):
         manifest_path = _make_shard(self._tmp, examples)
 
         # Reference: collect all batches in one pass.
-        ds_ref = TruncateLastDataset(manifest_path, seq_len=seq_len, infinite=False)
+        ds_ref = StandardPackingDataset(manifest_path, seq_len=seq_len, infinite=False)
         all_batches = list(ds_ref)
         self.assertGreater(len(all_batches), 1, "Need at least 2 batches to test resume")
 
         # Checkpoint after first batch, restore, then compare remaining batches.
-        ds_a = TruncateLastDataset(manifest_path, seq_len=seq_len, infinite=False)
+        ds_a = StandardPackingDataset(manifest_path, seq_len=seq_len, infinite=False)
         it_a = iter(ds_a)
         next(it_a)  # consume first batch
         checkpoint = ds_a.state_dict()
 
-        ds_b = TruncateLastDataset(manifest_path, seq_len=seq_len, infinite=False)
+        ds_b = StandardPackingDataset(manifest_path, seq_len=seq_len, infinite=False)
         ds_b.load_state_dict(checkpoint)
 
         remaining_a = list(it_a)
@@ -360,7 +360,7 @@ class TestMultiWorkerSharding(unittest.TestCase):
         self.assertEqual(stats_after["n_examples_packed"], stats_before["n_examples_packed"])
 
 
-class TestTruncateLastBufferPacking(unittest.TestCase):
+class TestStandardBufferPacking(unittest.TestCase):
     def setUp(self):
         import tempfile
 
@@ -374,9 +374,9 @@ class TestTruncateLastBufferPacking(unittest.TestCase):
 
     def _make_dataset(
         self, examples, seq_len=16, buffer_size=4, **kwargs
-    ) -> TruncateLastDataset:
+    ) -> StandardPackingDataset:
         manifest_path = _make_shard(self._tmp, examples)
-        return TruncateLastDataset(
+        return StandardPackingDataset(
             manifest_path,
             seq_len=seq_len,
             infinite=False,
@@ -426,7 +426,7 @@ class TestTruncateLastBufferPacking(unittest.TestCase):
             for i in range(8)
         ]
         manifest_path = _make_shard(self._tmp, examples)
-        ds = TruncateLastDataset(
+        ds = StandardPackingDataset(
             manifest_path, seq_len=seq_len, infinite=False, packing="buffer", buffer_size=8
         )
 
@@ -485,21 +485,21 @@ class TestTruncateLastBufferPacking(unittest.TestCase):
         manifest_path = _make_shard(self._tmp, examples)
 
         # Reference: collect all batches in one pass.
-        ds_ref = TruncateLastDataset(
+        ds_ref = StandardPackingDataset(
             manifest_path, seq_len=seq_len, infinite=False, packing="buffer", buffer_size=4
         )
         all_batches = list(ds_ref)
         self.assertGreater(len(all_batches), 1)
 
         # Checkpoint after first batch, restore, verify remaining match.
-        ds_a = TruncateLastDataset(
+        ds_a = StandardPackingDataset(
             manifest_path, seq_len=seq_len, infinite=False, packing="buffer", buffer_size=4
         )
         it_a = iter(ds_a)
         next(it_a)
         checkpoint = ds_a.state_dict()
 
-        ds_b = TruncateLastDataset(
+        ds_b = StandardPackingDataset(
             manifest_path, seq_len=seq_len, infinite=False, packing="buffer", buffer_size=4
         )
         ds_b.load_state_dict(checkpoint)
@@ -520,7 +520,7 @@ class TestTruncateLastBufferPacking(unittest.TestCase):
             ([1, 4, 5, _EOS_ID], [IGNORE_INDEX, 5, _EOS_ID, IGNORE_INDEX]),
         ]
         manifest_path = _make_shard(self._tmp, examples)
-        ds = TruncateLastDataset(
+        ds = StandardPackingDataset(
             manifest_path, seq_len=seq_len, infinite=True, packing="buffer", buffer_size=4
         )
 
@@ -560,7 +560,7 @@ class TestGranitePreTokenizedDataLoaderDispatch(unittest.TestCase):
         shutil.rmtree(self._tmpdir)
 
     def test_dispatch_truncate_last(self):
-        """DataLoader instantiates TruncateLastDataset for strategy='truncate_last'."""
+        """DataLoader instantiates StandardPackingDataset for strategy='truncate_last'."""
         examples = [([1, 2, _EOS_ID], [IGNORE_INDEX, _EOS_ID, IGNORE_INDEX])]
         manifest_path = _make_shard(self._tmp, examples, strategy="truncate_last")
 
@@ -578,10 +578,10 @@ class TestGranitePreTokenizedDataLoaderDispatch(unittest.TestCase):
             seq_len=16,
             local_batch_size=1,
         )
-        self.assertIsInstance(loader.dataset, TruncateLastDataset)
+        self.assertIsInstance(loader.dataset, StandardPackingDataset)
 
     def test_dispatch_buffer_packing(self):
-        """DataLoader with packing='buffer' instantiates TruncateLastDataset."""
+        """DataLoader with packing='buffer' instantiates StandardPackingDataset."""
         examples = [([1, 2, _EOS_ID], [IGNORE_INDEX, _EOS_ID, IGNORE_INDEX])]
         manifest_path = _make_shard(self._tmp, examples, strategy="truncate_last")
 
@@ -601,7 +601,7 @@ class TestGranitePreTokenizedDataLoaderDispatch(unittest.TestCase):
             seq_len=16,
             local_batch_size=1,
         )
-        self.assertIsInstance(loader.dataset, TruncateLastDataset)
+        self.assertIsInstance(loader.dataset, StandardPackingDataset)
         self.assertEqual(loader.dataset._packing, "buffer")
 
     def test_dispatch_unknown_strategy_raises(self):
@@ -642,7 +642,7 @@ class TestGreedyPacking(unittest.TestCase):
             for i in range(8)
         ]
         manifest_path = _make_shard(self._tmp, examples)
-        ds = TruncateLastDataset(
+        ds = StandardPackingDataset(
             manifest_path, seq_len=seq_len, infinite=False, packing="greedy"
         )
 
@@ -667,7 +667,7 @@ class TestGreedyPacking(unittest.TestCase):
             ([8, 9, _EOS_ID], [IGNORE_INDEX, 9, _EOS_ID]),
         ]
         manifest_path = _make_shard(self._tmp, examples)
-        ds = TruncateLastDataset(
+        ds = StandardPackingDataset(
             manifest_path, seq_len=seq_len, infinite=False, packing="greedy",
         )
 
@@ -748,7 +748,7 @@ class TestDatasetSmallerThanBuffer(unittest.TestCase):
             ([3, 4, _EOS_ID], [IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
         ]
         manifest_path = _make_shard(self._tmp, examples)
-        ds = TruncateLastDataset(
+        ds = StandardPackingDataset(
             manifest_path, seq_len=seq_len, infinite=False, packing="buffer", buffer_size=64
         )
         batches = list(ds)

@@ -6,7 +6,7 @@ at GranitePreTokenizedDataLoader construction time via manifest["strategy"].
 Class hierarchy:
     PreTokenizedDataset           — abstract base: manifest loading, DP sharding,
                                     unified packing loop, checkpointing
-    TruncateLastDataset           — format primitives for (input_ids, labels) shards
+    StandardPackingDataset        — format primitives for (input_ids, labels) shards
     BackboneSuffixDataset         — format primitives for backbone+suffix shards
     GranitePreTokenizedDataLoader — dataloader; dispatches to the right dataset
                                     class based on manifest["strategy"]
@@ -524,11 +524,11 @@ class _ChatItem(NamedTuple):
     labels: np.ndarray
 
 
-class TruncateLastDataset(PreTokenizedDataset):
+class StandardPackingDataset(PreTokenizedDataset):
     """Pre-tokenized (input_ids, labels, n_tokens) shards.
 
-    Produced by TruncateLastStrategy. Labels only the final assistant turn;
-    all earlier turns are IGNORE_INDEX.
+    Used by strategies that produce the standard (input_ids, labels) schema:
+    TruncateLastStrategy, FullThinkingStrategy, TruncateEveryTurnStrategy.
     """
 
     _item_type = _ChatItem
@@ -747,9 +747,10 @@ class BackboneSuffixDataset(PreTokenizedDataset):
 # ---------------------------------------------------------------------------
 
 _DATASET_CLASSES: dict[str, type[PreTokenizedDataset]] = {
-    "truncate_last": TruncateLastDataset,
+    "truncate_last": StandardPackingDataset,
     "backbone_suffix": BackboneSuffixDataset,
-    "full_thinking": TruncateLastDataset,
+    "full_thinking": StandardPackingDataset,
+    "truncate_every_turn": StandardPackingDataset,
 }
 
 

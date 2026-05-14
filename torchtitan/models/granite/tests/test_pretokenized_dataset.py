@@ -8,7 +8,7 @@ from pathlib import Path
 
 from torchtitan.models.granite.pretokenized_dataset import (
     GranitePreTokenizedDataLoader,
-    TruncateLastDataset,
+    StandardPackingDataset,
     _load_and_merge_manifests,
     _load_manifest,
     _select_cost_balanced,
@@ -46,7 +46,7 @@ def _build_dataset(
         buffer_size=buffer_size,
     )
     kwargs.update(extra_kwargs)
-    return TruncateLastDataset(**kwargs)
+    return StandardPackingDataset(**kwargs)
 
 
 def _compute_batch_cost_from_positions(batch) -> int:
@@ -292,7 +292,7 @@ class TestCostBalancedE2E(unittest.TestCase):
         mean_tokens = length_stats[f"tokens_per_example_{k}kmax"]
         target_cost = seq_len * sq_tokens / mean_tokens
 
-        ds = TruncateLastDataset(
+        ds = StandardPackingDataset(
             manifest_path=manifest_file,
             seq_len=seq_len,
             dp_rank=0,
@@ -365,7 +365,7 @@ class TestCostBalancedE2E(unittest.TestCase):
         )
 
         # Buffer packing
-        buffer_ds = TruncateLastDataset(**common_kwargs, packing="buffer")
+        buffer_ds = StandardPackingDataset(**common_kwargs, packing="buffer")
         buffer_costs = []
         for i, (inp, _, stats) in enumerate(buffer_ds):
             buffer_costs.append(_compute_batch_cost_from_positions((inp, None, stats)))
@@ -373,7 +373,7 @@ class TestCostBalancedE2E(unittest.TestCase):
                 break
 
         # Cost-balanced packing
-        cost_ds = TruncateLastDataset(
+        cost_ds = StandardPackingDataset(
             **common_kwargs, packing="cost_balanced", target_cost=target_cost
         )
         cost_balanced_costs = []
