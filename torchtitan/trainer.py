@@ -544,6 +544,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             input_dict, labels = batch
             ntokens_batch = labels.numel()
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
+            self.metrics_processor.nvalid_tokens_since_last_log += int(
+                (labels != IGNORE_INDEX).sum()
+            )
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
             )

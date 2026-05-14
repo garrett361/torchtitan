@@ -308,6 +308,7 @@ class MetricsProcessor(Configurable):
 
     gpu_peak_flops: float
     ntokens_since_last_log: int
+    nvalid_tokens_since_last_log: int
     data_loading_times: list[float]
     time_last_log: float
 
@@ -350,6 +351,7 @@ class MetricsProcessor(Configurable):
             self.device_memory_monitor.device_name
         )
         self.ntokens_since_last_log = 0
+        self.nvalid_tokens_since_last_log = 0
         self.data_loading_times = []
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
@@ -483,6 +485,10 @@ class MetricsProcessor(Configurable):
         tps = self.ntokens_since_last_log / (
             time_delta * self.parallel_dims.non_data_parallel_size
         )
+        # valid (trained) tokens per second per device
+        train_tps = self.nvalid_tokens_since_last_log / (
+            time_delta * self.parallel_dims.non_data_parallel_size
+        )
         # model FLOPS utilization
         # For its definition and calculation, please refer to the PaLM paper:
         # https://arxiv.org/abs/2204.02311
@@ -511,6 +517,7 @@ class MetricsProcessor(Configurable):
             "loss_metrics/global_max_loss": global_max_loss,
             "grad_norm": grad_norm,
             "throughput(tps)": tps,
+            "throughput(train_tps)": train_tps,
             "tflops": tflops,
             "time_metrics/end_to_end(s)": time_end_to_end,
             "time_metrics/data_loading(s)": time_data_loading,
@@ -539,6 +546,7 @@ class MetricsProcessor(Configurable):
             f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
             f"{color.blue}tps: {round(tps):,}  "
+            f"train_tps: {round(train_tps):,}  "
             f"{color.cyan}tflops: {tflops:,.2f}  "
             f"{color.magenta}mfu: {mfu_str}  "
             f"{color.white}eta: {eta}"
@@ -571,6 +579,7 @@ class MetricsProcessor(Configurable):
             logger.info(f"{color.cyan}data  " + "  ".join(parts) + color.reset)
 
         self.ntokens_since_last_log = 0
+        self.nvalid_tokens_since_last_log = 0
         self.data_loading_times.clear()
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
@@ -611,6 +620,7 @@ class MetricsProcessor(Configurable):
         )
 
         self.ntokens_since_last_log = 0
+        self.nvalid_tokens_since_last_log = 0
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 
