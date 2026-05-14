@@ -780,7 +780,7 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         packs in sequential order (simpler but ~86% efficiency at 128k).
         'cost_balanced' targets uniform attention cost per sequence."""
 
-        buffer_size: int = 64
+        buffer_size: int = 512
         """Number of examples held in the lookahead buffer (per worker)."""
 
         snapshot_every_n_steps: int = 1024
