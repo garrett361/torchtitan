@@ -25,11 +25,13 @@ import hashlib
 import json
 import logging
 import multiprocessing
+import shutil
 import time
 from pathlib import Path
 from typing import Any
 
-from datasets import load_dataset
+import numpy as np
+from datasets import concatenate_datasets, disable_caching, load_dataset, load_from_disk
 from filelock import FileLock
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
@@ -131,7 +133,6 @@ def _process_file(
     ds.save_to_disk(str(final_path))
     elapsed = time.monotonic() - t0
 
-    import numpy as np
     import pyarrow.compute as pc
 
     n_examples = len(ds)
@@ -170,8 +171,6 @@ _SEQ_LEN_CUTOFFS = [16384, 32768, 65536, 131072, 262144, 524288]
 
 def _compute_length_stats(shards_dir: Path, completed_shards: list[str]) -> dict[str, Any]:
     """Load n_tokens from all shards and compute distribution stats."""
-    import numpy as np
-    from datasets import load_from_disk
 
     all_lengths: list[int] = []
     for shard_name in completed_shards:
@@ -216,8 +215,8 @@ def _write_manifest(
     strategy_name: str,
     tokenizer_path: str,
     chat_template_kwargs: dict[str, Any],
-) -> None:
-    """Aggregate per-shard stats into manifest.json."""
+) -> bool:
+    """Aggregate per-shard stats into manifest.json. Returns True if this call wrote it."""
     tokenizer = HuggingFaceTokenizer(tokenizer_path=tokenizer_path)
     shards_dir = output_dir / "shards"
     all_stats: list[dict[str, Any]] = []
@@ -277,10 +276,186 @@ def _write_manifest(
     with FileLock(str(manifest_path) + ".lock"):
         if manifest_path.exists():
             logger.info("Manifest already written by another rank, skipping")
-            return
+            return False
         with open(manifest_path, "w") as f:
             json.dump(manifest, f, indent=2)
     logger.info("Wrote manifest to %s", manifest_path)
+    return True
+
+
+_SHUFFLE_META_FILENAME = "shuffle_meta.json"
+
+
+def _load_manifest(path: Path) -> dict[str, Any]:
+    with open(path) as f:
+        return json.load(f)
+
+
+def _finalize_shuffle(
+    output_dir: Path,
+    shards_dir: Path,
+    shuffle_meta_path: Path,
+    shuffle_seed: int,
+    num_shards: int,
+) -> None:
+    """Rewrite manifest and write completion marker after shuffle swap."""
+    manifest = _load_manifest(output_dir / "manifest.json")
+    total_examples = manifest["stats"]["total_examples"]
+
+    new_shard_names = [f"shard_{i:04d}" for i in range(num_shards)]
+    new_manifest = {
+        **manifest,
+        "shards": {
+            "completed": new_shard_names,
+            "total_expected": num_shards,
+        },
+        "shuffle": {"seed": shuffle_seed, "num_shards": num_shards},
+    }
+    tmp_manifest = output_dir / "manifest_new.json"
+    with open(tmp_manifest, "w") as f:
+        json.dump(new_manifest, f, indent=2)
+    tmp_manifest.rename(output_dir / "manifest.json")
+
+    with open(shuffle_meta_path, "w") as f:
+        json.dump(
+            {"seed": shuffle_seed, "num_shards": num_shards, "total_examples": total_examples},
+            f,
+            indent=2,
+        )
+    logger.info("Global shuffle complete (seed=%d, %d shards)", shuffle_seed, num_shards)
+
+
+def _shuffle_and_reshard(output_dir: Path, shuffle_seed: int) -> None:
+    """Phase 2: Load all shards, globally shuffle, write back same shard count.
+
+    Resumable and atomic. Recovery state is inferred from directory presence:
+    - shards_backup/ exists → crashed mid-swap, complete it
+    - shuffle_meta.json exists → already done
+    - shards_shuffled/ with partial stats → resume shard writes
+    """
+    shards_dir = output_dir / "shards"
+    shuffled_dir = output_dir / "shards_shuffled"
+    backup_dir = output_dir / "shards_backup"
+    shuffle_meta_path = output_dir / _SHUFFLE_META_FILENAME
+
+    # State recovery: if backup exists, a prior run crashed mid-swap.
+    # After recovery, shards/ contains the shuffled data — skip to finalization.
+    if backup_dir.exists():
+        if shuffled_dir.exists():
+            shuffled_dir.rename(shards_dir)
+        logger.info("Recovered from interrupted swap")
+        perm_in_shards = shards_dir / "permutation.npy"
+        if perm_in_shards.exists():
+            perm_in_shards.unlink()
+        num_shards = len([
+            p for p in shards_dir.iterdir()
+            if p.is_dir() and not p.name.endswith("_stats")
+        ])
+        _finalize_shuffle(output_dir, shards_dir, shuffle_meta_path, shuffle_seed, num_shards)
+        shutil.rmtree(backup_dir)
+        return
+
+    # Already complete?
+    if shuffle_meta_path.exists():
+        with open(shuffle_meta_path) as f:
+            meta = json.load(f)
+        if meta["seed"] != shuffle_seed:
+            raise ValueError(
+                f"Shuffle already completed with seed={meta['seed']}, "
+                f"but current invocation specifies seed={shuffle_seed}. "
+                f"Remove {shuffle_meta_path} to re-shuffle."
+            )
+        logger.info("Shuffle already complete (seed=%d), skipping", shuffle_seed)
+        return
+
+    # HF datasets caches select/concatenate results keyed by file fingerprint; on
+    # resume after a partial swap the fingerprints are stale, returning wrong data.
+    disable_caching()
+
+    manifest = _load_manifest(output_dir / "manifest.json")
+    shard_names = sorted(manifest["shards"]["completed"])
+    num_shards = len(shard_names)
+
+    logger.info(
+        "Loading %d shards for global shuffle (seed=%d)...", num_shards, shuffle_seed
+    )
+    full_dataset = concatenate_datasets(
+        [load_from_disk(str(shards_dir / name)) for name in shard_names]
+    )
+    total_examples = len(full_dataset)
+
+    # Generate or load cached permutation (numpy version-stable via snapshot)
+    shuffled_dir.mkdir(parents=True, exist_ok=True)
+    perm_path = shuffled_dir / "permutation.npy"
+    if perm_path.exists():
+        permutation = np.load(perm_path)
+        if len(permutation) != total_examples:
+            raise ValueError(
+                f"Cached permutation has {len(permutation)} entries but dataset has "
+                f"{total_examples}. Delete {perm_path} to regenerate."
+            )
+        logger.info("Loaded cached permutation from %s", perm_path)
+    else:
+        rng = np.random.default_rng(shuffle_seed)
+        permutation = rng.permutation(total_examples)
+        np.save(perm_path, permutation)
+        logger.info("Generated and saved permutation (%d examples)", total_examples)
+
+    # Write shuffled shards (resumable per shard)
+    examples_per_shard = total_examples // num_shards
+    t0 = time.monotonic()
+
+    for i in range(num_shards):
+        shard_name = f"shard_{i:04d}"
+        stats_path = shuffled_dir / f"{shard_name}_stats.json"
+        if stats_path.exists():
+            continue
+
+        start = i * examples_per_shard
+        end = (start + examples_per_shard) if i < num_shards - 1 else total_examples
+        indices = permutation[start:end].tolist()
+        shard = full_dataset.select(indices)
+        shard.save_to_disk(str(shuffled_dir / shard_name))
+
+        n_tokens_arr = np.array(shard["n_tokens"], dtype=np.int64)
+        total_trained = sum(
+            sum(1 for lbl in row if lbl != -100) for row in shard["labels"]
+        )
+        stats: dict[str, Any] = {
+            "shard_stem": shard_name,
+            "n_examples": len(shard),
+            "total_tokens": int(n_tokens_arr.sum()),
+            "sum_tokens_squared": int((n_tokens_arr**2).sum()),
+            "total_trained_tokens": total_trained,
+        }
+        with open(stats_path, "w") as f:
+            json.dump(stats, f, indent=2)
+
+        logger.info(
+            "Wrote shuffled shard %d/%d: %s (%d examples)",
+            i + 1,
+            num_shards,
+            shard_name,
+            len(shard),
+        )
+
+    elapsed = time.monotonic() - t0
+    logger.info("Shuffle write complete in %.1fs", elapsed)
+
+    # Atomic directory swap
+    shards_dir.rename(backup_dir)
+    shuffled_dir.rename(shards_dir)
+    logger.info("Swapped shards_shuffled/ → shards/")
+
+    # Remove permutation snapshot (now debris inside shards/)
+    perm_in_shards = shards_dir / "permutation.npy"
+    if perm_in_shards.exists():
+        perm_in_shards.unlink()
+
+    # Finalize before removing backup — if crash occurs after rmtree but before
+    # meta write, re-entry would not detect the completed shuffle.
+    _finalize_shuffle(output_dir, shards_dir, shuffle_meta_path, shuffle_seed, num_shards)
+    shutil.rmtree(backup_dir)
 
 
 def main() -> None:
@@ -320,6 +495,12 @@ def main() -> None:
         type=int,
         default=1024,
         help="Batch size for datasets.map tokenization",
+    )
+    parser.add_argument(
+        "--shuffle-seed",
+        type=int,
+        default=42,
+        help="Seed for global cross-shard shuffle (Phase 2)",
     )
     args = parser.parse_args()
 
@@ -399,13 +580,19 @@ def main() -> None:
 
     completed = _completed_stems(shards_dir)
     if len(completed) == len(input_files):
-        _write_manifest(
+        wrote_manifest = _write_manifest(
             output_dir,
             input_files,
             args.strategy,
             args.tokenizer_path,
             strategy.chat_template_kwargs,
         )
+        # Phase 2: global shuffle. Only one rank executes this.
+        shuffle_meta_path = output_dir / _SHUFFLE_META_FILENAME
+        if wrote_manifest or not shuffle_meta_path.exists():
+            with FileLock(str(shuffle_meta_path) + ".lock"):
+                if not shuffle_meta_path.exists():
+                    _shuffle_and_reshard(output_dir, args.shuffle_seed)
     else:
         logger.info(
             "rank %d: %d/%d shards complete, manifest will be written by the last rank to finish",

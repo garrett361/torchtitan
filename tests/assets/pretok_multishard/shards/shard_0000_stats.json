@@ -1,0 +1,8 @@
+{
+  "shard_stem": "shard_0000",
+  "n_examples": 4,
+  "n_dropped": 0,
+  "total_tokens": 20,
+  "sum_tokens_squared": 102,
+  "total_trained_tokens": 9
+}

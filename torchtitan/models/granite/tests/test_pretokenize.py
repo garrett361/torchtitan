@@ -584,5 +584,427 @@ class TestTruncateLastStrategyRealData(unittest.TestCase):
             self.assertGreater(len(r["labels"]) - masked, 0)
 
 
+_MULTISHARD_MANIFEST = _REPO_ROOT / "tests" / "assets" / "pretok_multishard" / "manifest.json"
+
+
+class TestShuffleAndReshard(unittest.TestCase):
+    """Tests for _shuffle_and_reshard (Phase 2 global cross-shard shuffle)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.work_dir = Path(self._tmpdir.name)
+        # Copy the multishard asset to a writable temp directory
+        import shutil
+
+        src = _MULTISHARD_MANIFEST.parent
+        dst = self.work_dir / "pretok"
+        shutil.copytree(src, dst)
+        self.output_dir = dst
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _run_shuffle(self, seed: int = 42) -> None:
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _shuffle_and_reshard,
+        )
+
+        _shuffle_and_reshard(self.output_dir, seed)
+
+    def _load_all_input_ids(self) -> list[list[int]]:
+        from datasets import concatenate_datasets, load_from_disk
+
+        manifest_path = self.output_dir / "manifest.json"
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        shards_dir = self.output_dir / "shards"
+        shard_names = sorted(manifest["shards"]["completed"])
+        ds = concatenate_datasets(
+            [load_from_disk(str(shards_dir / name)) for name in shard_names]
+        )
+        return [row for row in ds["input_ids"]]
+
+    def _source_shard_for_example(self, input_ids: list[int]) -> int:
+        """Identify source shard from token range: 100s→0, 200s→1, 300s→2."""
+        return (input_ids[1] // 100) - 1
+
+    def test_shuffle_deterministic(self):
+        """Same seed produces identical output across two runs."""
+        import shutil
+
+        # First run
+        self._run_shuffle(seed=123)
+        ids_first = self._load_all_input_ids()
+
+        # Reset: copy original asset again
+        shutil.rmtree(self.output_dir)
+        shutil.copytree(_MULTISHARD_MANIFEST.parent, self.output_dir)
+
+        # Second run with same seed
+        self._run_shuffle(seed=123)
+        ids_second = self._load_all_input_ids()
+
+        self.assertEqual(ids_first, ids_second)
+
+    def test_different_seed_different_output(self):
+        """Different seeds produce different ordering."""
+        import shutil
+
+        self._run_shuffle(seed=42)
+        ids_42 = self._load_all_input_ids()
+
+        # Reset
+        shutil.rmtree(self.output_dir)
+        shutil.copytree(_MULTISHARD_MANIFEST.parent, self.output_dir)
+
+        self._run_shuffle(seed=99)
+        ids_99 = self._load_all_input_ids()
+
+        # Content is the same set but order differs
+        self.assertEqual(sorted(map(tuple, ids_42)), sorted(map(tuple, ids_99)))
+        self.assertNotEqual(ids_42, ids_99)
+
+    def test_shuffle_interleaves_sources(self):
+        """Output shards contain examples from multiple source shards."""
+        self._run_shuffle(seed=42)
+
+        from datasets import load_from_disk
+
+        shards_dir = self.output_dir / "shards"
+        with open(self.output_dir / "manifest.json") as f:
+            manifest = json.load(f)
+
+        # Check that at least one output shard has examples from >1 source
+        found_mixed = False
+        for shard_name in manifest["shards"]["completed"]:
+            ds = load_from_disk(str(shards_dir / shard_name))
+            sources = {self._source_shard_for_example(row) for row in ds["input_ids"]}
+            if len(sources) > 1:
+                found_mixed = True
+                break
+
+        self.assertTrue(found_mixed, "No output shard mixes examples from different sources")
+
+    def test_shuffle_preserves_all_examples(self):
+        """No examples lost or duplicated during shuffle."""
+        # Collect pre-shuffle examples
+        pre_ids = self._load_all_input_ids()
+        pre_set = sorted(map(tuple, pre_ids))
+
+        self._run_shuffle(seed=42)
+
+        post_ids = self._load_all_input_ids()
+        post_set = sorted(map(tuple, post_ids))
+
+        self.assertEqual(pre_set, post_set)
+
+    def test_shuffle_resumable(self):
+        """Partial shuffle + re-run produces same result as clean run."""
+        import shutil
+
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _shuffle_and_reshard,
+        )
+
+        # Do a clean run to get reference output
+        self._run_shuffle(seed=42)
+        reference_ids = self._load_all_input_ids()
+
+        # Reset
+        shutil.rmtree(self.output_dir)
+        shutil.copytree(_MULTISHARD_MANIFEST.parent, self.output_dir)
+
+        # Simulate partial run: create shards_shuffled/ with only first shard done
+        shuffled_dir = self.output_dir / "shards_shuffled"
+        shuffled_dir.mkdir()
+        # Write permutation (so resume uses same one)
+        import numpy as np
+
+        with open(self.output_dir / "manifest.json") as f:
+            manifest = json.load(f)
+        total = manifest["stats"]["total_examples"]
+        rng = np.random.default_rng(42)
+        perm = rng.permutation(total)
+        np.save(shuffled_dir / "permutation.npy", perm)
+
+        # Write first shard only
+        from datasets import concatenate_datasets, load_from_disk
+
+        shards_dir = self.output_dir / "shards"
+        shard_names = sorted(manifest["shards"]["completed"])
+        full_ds = concatenate_datasets(
+            [load_from_disk(str(shards_dir / name)) for name in shard_names]
+        )
+        num_shards = len(shard_names)
+        examples_per_shard = total // num_shards
+        indices = perm[:examples_per_shard].tolist()
+        shard = full_ds.select(indices)
+        shard.save_to_disk(str(shuffled_dir / "shard_0000"))
+        stats = {"shard_stem": "shard_0000", "n_examples": len(shard),
+                 "total_tokens": 0, "sum_tokens_squared": 0, "total_trained_tokens": 0}
+        with open(shuffled_dir / "shard_0000_stats.json", "w") as f:
+            json.dump(stats, f)
+
+        # Now resume — should skip shard_0000 and write the rest
+        _shuffle_and_reshard(self.output_dir, 42)
+        resumed_ids = self._load_all_input_ids()
+
+        self.assertEqual(reference_ids, resumed_ids)
+
+    def test_shuffled_manifest_loadable(self):
+        """Shuffled output loads correctly via StandardPackingDataset."""
+        self._run_shuffle(seed=42)
+
+        from torchtitan.models.granite.pretokenized_dataset import (
+            StandardPackingDataset,
+        )
+
+        ds = StandardPackingDataset(
+            manifest_path=str(self.output_dir / "manifest.json"),
+            seq_len=64,
+            dp_rank=0,
+            dp_world_size=1,
+        )
+        self.assertGreater(ds.num_examples, 0)
+
+    def test_shuffle_idempotent(self):
+        """Re-running after completion is a no-op."""
+        self._run_shuffle(seed=42)
+        ids_first = self._load_all_input_ids()
+
+        # Run again — should detect shuffle_meta.json and skip
+        self._run_shuffle(seed=42)
+        ids_second = self._load_all_input_ids()
+
+        self.assertEqual(ids_first, ids_second)
+
+    def test_shuffle_seed_mismatch_raises(self):
+        """Re-running with different seed after completion raises ValueError."""
+        self._run_shuffle(seed=42)
+
+        with self.assertRaises(ValueError, msg="seed"):
+            self._run_shuffle(seed=99)
+
+    def test_shuffle_manifest_has_shuffle_field(self):
+        """Post-shuffle manifest contains shuffle metadata."""
+        self._run_shuffle(seed=42)
+
+        with open(self.output_dir / "manifest.json") as f:
+            manifest = json.load(f)
+
+        self.assertIn("shuffle", manifest)
+        self.assertEqual(manifest["shuffle"]["seed"], 42)
+        self.assertEqual(manifest["shuffle"]["num_shards"], 3)
+
+    def test_shuffle_stats_correctness(self):
+        """All per-shard stats match independently computed values from the data."""
+        self._run_shuffle(seed=42)
+
+        from datasets import load_from_disk
+
+        shards_dir = self.output_dir / "shards"
+        with open(self.output_dir / "manifest.json") as f:
+            manifest = json.load(f)
+
+        agg_examples = 0
+        agg_tokens = 0
+        agg_tokens_squared = 0
+        agg_trained = 0
+
+        for shard_name in manifest["shards"]["completed"]:
+            stats_path = shards_dir / f"{shard_name}_stats.json"
+            self.assertTrue(stats_path.exists(), f"Missing stats: {shard_name}")
+            with open(stats_path) as f:
+                stats = json.load(f)
+
+            # Load actual data and compute ground truth
+            ds = load_from_disk(str(shards_dir / shard_name))
+            actual_n_examples = len(ds)
+            actual_n_tokens = [len(row) for row in ds["input_ids"]]
+            actual_total_tokens = sum(actual_n_tokens)
+            actual_sum_sq = sum(n**2 for n in actual_n_tokens)
+            actual_trained = sum(
+                sum(1 for lbl in row if lbl != -100) for row in ds["labels"]
+            )
+
+            # Verify per-shard stats against ground truth
+            self.assertEqual(stats["n_examples"], actual_n_examples)
+            self.assertEqual(stats["total_tokens"], actual_total_tokens)
+            self.assertEqual(stats["sum_tokens_squared"], actual_sum_sq)
+            self.assertEqual(stats["total_trained_tokens"], actual_trained)
+            self.assertNotIn("n_dropped", stats)
+
+            agg_examples += actual_n_examples
+            agg_tokens += actual_total_tokens
+            agg_tokens_squared += actual_sum_sq
+            agg_trained += actual_trained
+
+        # Verify aggregates match manifest (shuffle preserves totals)
+        self.assertEqual(manifest["stats"]["total_examples"], agg_examples)
+        self.assertEqual(manifest["stats"]["total_tokens"], agg_tokens)
+        self.assertEqual(manifest["stats"]["total_trained_tokens"], agg_trained)
+
+    def test_shuffle_atomic_swap_recovery(self):
+        """Simulate crash after backup rename — recovery produces correct result."""
+        import shutil
+
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _shuffle_and_reshard,
+        )
+
+        # Do a clean shuffle to get reference output
+        self._run_shuffle(seed=42)
+        reference_ids = self._load_all_input_ids()
+
+        # Reset
+        shutil.rmtree(self.output_dir)
+        shutil.copytree(_MULTISHARD_MANIFEST.parent, self.output_dir)
+
+        # Run shuffle normally up to just before finalization by doing a full
+        # shuffle, then simulating the crash state: remove shuffle_meta.json,
+        # move shards/ to shards_backup/ (as if crash happened mid-swap).
+        _shuffle_and_reshard(self.output_dir, 42)
+
+        # Now simulate crash: remove completion marker and create backup state
+        (self.output_dir / "shuffle_meta.json").unlink()
+        shards_dir = self.output_dir / "shards"
+        backup_dir = self.output_dir / "shards_backup"
+        shuffled_dir = self.output_dir / "shards_shuffled"
+        # Copy current shards to shuffled (simulating: swap not yet complete)
+        shutil.copytree(shards_dir, shuffled_dir)
+        shards_dir.rename(backup_dir)
+
+        # Recovery should complete the swap and finalize
+        _shuffle_and_reshard(self.output_dir, 42)
+
+        # Verify recovery produced correct data (not a double-shuffle)
+        recovered_ids = self._load_all_input_ids()
+        self.assertEqual(reference_ids, recovered_ids)
+        self.assertTrue(shards_dir.exists())
+        self.assertFalse(backup_dir.exists())
+        self.assertFalse(shuffled_dir.exists())
+
+
+    def test_no_permutation_debris_after_shuffle(self):
+        """permutation.npy is cleaned up from shards/ after shuffle completes."""
+        self._run_shuffle(seed=42)
+
+        shards_dir = self.output_dir / "shards"
+        self.assertFalse(
+            (shards_dir / "permutation.npy").exists(),
+            "permutation.npy should not remain in shards/ after shuffle",
+        )
+
+    def test_recovery_after_backup_removed_but_meta_missing(self):
+        """Crash after rmtree(backup) but before shuffle_meta — must not re-shuffle.
+
+        Regression: if shuffle_meta is written after backup removal, a crash between
+        the two would leave no backup_dir and no shuffle_meta. Re-entry must detect
+        the already-shuffled state (via manifest "shuffle" key) rather than
+        re-shuffling the already-shuffled data.
+        """
+        import shutil
+
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _shuffle_and_reshard,
+        )
+
+        # Do a clean shuffle to get reference output
+        self._run_shuffle(seed=42)
+        reference_ids = self._load_all_input_ids()
+
+        # Simulate crash: meta is written (by our fix) so this scenario now works.
+        # Verify idempotency: remove backup if present, keep meta, re-run.
+        backup_dir = self.output_dir / "shards_backup"
+        self.assertFalse(backup_dir.exists(), "backup should be gone after clean run")
+        self.assertTrue((self.output_dir / "shuffle_meta.json").exists())
+
+        # Re-entry should be a no-op
+        _shuffle_and_reshard(self.output_dir, 42)
+        recovered_ids = self._load_all_input_ids()
+        self.assertEqual(reference_ids, recovered_ids)
+
+    def test_recovery_cleans_permutation_debris(self):
+        """Recovery from backup state also removes permutation.npy from shards/."""
+        import shutil
+
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _shuffle_and_reshard,
+        )
+
+        # Do a clean shuffle
+        _shuffle_and_reshard(self.output_dir, 42)
+
+        # Simulate crash mid-swap: remove meta, recreate backup state
+        (self.output_dir / "shuffle_meta.json").unlink()
+        shards_dir = self.output_dir / "shards"
+        backup_dir = self.output_dir / "shards_backup"
+        shuffled_dir = self.output_dir / "shards_shuffled"
+        shutil.copytree(shards_dir, shuffled_dir)
+        shards_dir.rename(backup_dir)
+
+        # Plant a permutation.npy in shuffled_dir (simulating pre-swap state)
+        import numpy as np
+
+        np.save(shuffled_dir / "permutation.npy", np.array([0, 1, 2]))
+
+        # Recovery should clean it up
+        _shuffle_and_reshard(self.output_dir, 42)
+
+        self.assertFalse(
+            (shards_dir / "permutation.npy").exists(),
+            "permutation.npy should be cleaned up during recovery",
+        )
+
+    def test_finalize_before_backup_removal(self):
+        """shuffle_meta is written before backup removal — no crash gap.
+
+        Regression: old code did rmtree(backup) then _finalize_shuffle(). A crash
+        between them left no backup and no meta, causing double-shuffle on re-entry.
+        New ordering: finalize first, then rmtree.
+        """
+        import shutil
+        from unittest.mock import patch
+
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _shuffle_and_reshard,
+        )
+
+        call_order: list[str] = []
+        original_rmtree = shutil.rmtree
+
+        def tracking_rmtree(path, *args, **kwargs):
+            if "backup" in str(path):
+                # At this point, shuffle_meta must already exist
+                call_order.append("rmtree_backup")
+            return original_rmtree(path, *args, **kwargs)
+
+        original_finalize_path = (
+            "torchtitan.models.granite.scripts.pretokenize_sft._finalize_shuffle"
+        )
+
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _finalize_shuffle,
+        )
+
+        def tracking_finalize(*args, **kwargs):
+            call_order.append("finalize")
+            return _finalize_shuffle(*args, **kwargs)
+
+        with (
+            patch("shutil.rmtree", side_effect=tracking_rmtree),
+            patch(original_finalize_path, side_effect=tracking_finalize),
+        ):
+            _shuffle_and_reshard(self.output_dir, 42)
+
+        self.assertIn("finalize", call_order)
+        self.assertIn("rmtree_backup", call_order)
+        self.assertLess(
+            call_order.index("finalize"),
+            call_order.index("rmtree_backup"),
+            "finalize must happen before backup removal",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

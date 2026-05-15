@@ -12,21 +12,19 @@
   },
   "shards": {
     "completed": [
-      "shard_0000"
+      "shard_0000",
+      "shard_0001",
+      "shard_0002"
     ],
-    "total_expected": 1
+    "total_expected": 3
   },
   "stats": {
-    "total_examples": 6,
+    "total_examples": 12,
     "examples_dropped": 0,
-    "total_tokens": 34,
-    "total_trained_tokens": 15,
-    "tokens_per_example": {
-      "mean": 5.7,
-      "median": 6,
-      "p95": 8,
-      "max": 8
-    }
+    "total_tokens": 59,
+    "total_trained_tokens": 26,
+    "tokens_per_example": 4.9,
+    "trained_tokens_per_example": 2.2
   },
   "created_at": "2026-01-01T00:00:00Z",
   "input_dir": "tests/assets/pretok_test_input",
