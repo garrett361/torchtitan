@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
 from dotenv import load_dotenv
 
 from torchtitan.components.loss import IGNORE_INDEX
@@ -702,6 +703,8 @@ class TestShuffleAndReshard(unittest.TestCase):
         """Partial shuffle + re-run produces same result as clean run."""
         import shutil
 
+        from datasets import concatenate_datasets, load_from_disk
+
         from torchtitan.models.granite.scripts.pretokenize_sft import (
             _shuffle_and_reshard,
         )
@@ -717,18 +720,12 @@ class TestShuffleAndReshard(unittest.TestCase):
         # Simulate partial run: create shards_shuffled/ with only first shard done
         shuffled_dir = self.output_dir / "shards_shuffled"
         shuffled_dir.mkdir()
-        # Write permutation (so resume uses same one)
-        import numpy as np
 
         with open(self.output_dir / "manifest.json") as f:
             manifest = json.load(f)
         total = manifest["stats"]["total_examples"]
         rng = np.random.default_rng(42)
         perm = rng.permutation(total)
-        np.save(shuffled_dir / "permutation.npy", perm)
-
-        # Write first shard only
-        from datasets import concatenate_datasets, load_from_disk
 
         shards_dir = self.output_dir / "shards"
         shard_names = sorted(manifest["shards"]["completed"])
@@ -1004,6 +1001,121 @@ class TestShuffleAndReshard(unittest.TestCase):
             call_order.index("rmtree_backup"),
             "finalize must happen before backup removal",
         )
+
+
+class TestPermutationDeterminism(unittest.TestCase):
+    """np.random.default_rng(seed).permutation(n) is deterministic across calls."""
+
+    def test_same_seed_same_permutation(self):
+        for seed in [0, 42, 2**31 - 1]:
+            for n in [10, 1000, 100_000]:
+                a = np.random.default_rng(seed).permutation(n)
+                b = np.random.default_rng(seed).permutation(n)
+                np.testing.assert_array_equal(a, b, err_msg=f"seed={seed}, n={n}")
+
+    def test_different_seeds_differ(self):
+        a = np.random.default_rng(42).permutation(10_000)
+        b = np.random.default_rng(43).permutation(10_000)
+        self.assertFalse(np.array_equal(a, b))
+
+
+class TestShardPartitioning(unittest.TestCase):
+    """range(rank, num_shards, world_size) partitions shards with no gaps or overlaps."""
+
+    def _check_partition(self, num_shards: int, world_size: int):
+        all_indices: list[int] = []
+        for rank in range(world_size):
+            indices = list(range(rank, num_shards, world_size))
+            all_indices.extend(indices)
+        self.assertEqual(sorted(all_indices), list(range(num_shards)))
+
+    def test_typical_cases(self):
+        for num_shards, world_size in [(64, 12), (64, 4), (10, 3), (7, 7)]:
+            with self.subTest(num_shards=num_shards, world_size=world_size):
+                self._check_partition(num_shards, world_size)
+
+    def test_world_size_exceeds_shards(self):
+        self._check_partition(num_shards=3, world_size=8)
+
+    def test_single_rank(self):
+        self._check_partition(num_shards=10, world_size=1)
+
+    def test_excess_ranks_get_empty_assignment(self):
+        for rank in range(5, 8):
+            indices = list(range(rank, 3, 8))
+            self.assertEqual(indices, [], f"rank {rank} should have no shards")
+
+
+class TestPyarrowTotalTrained(unittest.TestCase):
+    """pyarrow total_trained matches the Python-loop reference implementation."""
+
+    def test_equivalence_on_synthetic_data(self):
+        from datasets import Dataset
+
+        labels_data = [
+            [1, -100, 3, -100, 5],
+            [-100, -100, -100],
+            [10, 20, 30, 40],
+            [],
+        ]
+        ds = Dataset.from_dict({"labels": labels_data})
+
+        python_total = sum(
+            sum(1 for lbl in row if lbl != -100) for row in ds["labels"]
+        )
+
+        import pyarrow.compute as pa_pc
+        labels_flat = ds.data.column("labels").combine_chunks().flatten()
+        pyarrow_total = int(pa_pc.sum(pa_pc.not_equal(labels_flat, -100)).as_py())
+
+        self.assertEqual(python_total, pyarrow_total)
+        self.assertEqual(pyarrow_total, 7)
+
+
+class TestAtomicStatsWrite(unittest.TestCase):
+    """_write_stats_atomic produces valid JSON with no leftover .tmp files."""
+
+    def test_file_is_valid_json(self):
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _write_stats_atomic,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stats_path = Path(tmp) / "test_stats.json"
+            stats = {"n_examples": 42, "total_tokens": 1000}
+            _write_stats_atomic(stats_path, stats)
+
+            with open(stats_path) as f:
+                loaded = json.load(f)
+            self.assertEqual(loaded, stats)
+
+    def test_no_tmp_file_remains(self):
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _write_stats_atomic,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stats_path = Path(tmp) / "test_stats.json"
+            _write_stats_atomic(stats_path, {"key": "value"})
+
+            tmp_path = stats_path.with_suffix(".tmp")
+            self.assertFalse(
+                tmp_path.exists(), ".tmp file should not remain after atomic write"
+            )
+
+    def test_overwrites_existing(self):
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _write_stats_atomic,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stats_path = Path(tmp) / "test_stats.json"
+            _write_stats_atomic(stats_path, {"v": 1})
+            _write_stats_atomic(stats_path, {"v": 2})
+
+            with open(stats_path) as f:
+                loaded = json.load(f)
+            self.assertEqual(loaded["v"], 2)
 
 
 if __name__ == "__main__":
