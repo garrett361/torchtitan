@@ -561,6 +561,7 @@ class TestSortedBufferInvariants(unittest.TestCase):
 
     def _assert_sync(self, ds):
         self.assertEqual(len(ds._buffer), len(ds._lengths))
+        self.assertEqual(len(ds._buffer), len(ds._ages))
         for i, item in enumerate(ds._buffer):
             self.assertEqual(ds._lengths[i], len(item.input_ids))
 
@@ -687,6 +688,53 @@ class TestEpochBoundary(unittest.TestCase):
             ds._batch_rng.integers(1000),
             ds2._batch_rng.integers(1000),
         )
+
+
+class TestOldestFirstSeed(unittest.TestCase):
+    """Tests for oldest-first seed selection in the packing buffer."""
+
+    def test_seed_is_oldest_item(self):
+        """Batch seed is always the oldest (earliest-inserted) buffer item."""
+        ds = _build_dataset(seq_len=16, buffer_size=6, packing="greedy")
+        ds._prepare_iter()
+        ds._data_exhausted = False
+        ds._refill_buffer()
+
+        # Record the first-inserted item (lowest age = oldest)
+        oldest_age = min(ds._ages)
+        oldest_idx = ds._ages.index(oldest_age)
+        oldest_ids = list(ds._buffer[oldest_idx].input_ids)
+
+        batch = next(ds._iter_packed())
+        input_tensor = batch[0]["input"].tolist()
+        self.assertEqual(
+            input_tensor[: len(oldest_ids)],
+            oldest_ids,
+            "Seed should be the oldest item in the buffer",
+        )
+
+    def test_ages_checkpoint_roundtrip(self):
+        """Ages and age_counter survive checkpoint save/restore."""
+        ds1 = _build_dataset(seq_len=16, buffer_size=4, packing="greedy")
+        it1 = iter(ds1)
+        next(it1)
+
+        state = ds1.state_dict()
+        self.assertIn("ages", state)
+        self.assertIn("age_counter", state)
+
+        ds2 = _build_dataset(seq_len=16, buffer_size=4, packing="greedy")
+        ds2.load_state_dict(state)
+        ds2._prepare_iter()
+
+        self.assertEqual(ds1._ages, ds2._ages)
+        self.assertEqual(ds1._age_counter, ds2._age_counter)
+
+        remaining1 = list(it1)
+        remaining2 = list(ds2)
+        self.assertEqual(len(remaining1), len(remaining2))
+        for b1, b2 in zip(remaining1, remaining2):
+            self.assertTrue(b1[0]["input"].equal(b2[0]["input"]))
 
 
 class TestSnapshotResumeDataLoader(unittest.TestCase):

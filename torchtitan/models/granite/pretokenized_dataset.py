@@ -291,6 +291,8 @@ class PreTokenizedDataset(IterableDataset, Stateful):
 
         self._buffer: list = []
         self._lengths: list[int] = []
+        self._ages: list[int] = []
+        self._age_counter: int = 0
         self._batch_rng = np.random.default_rng(42)
 
         self._data_exhausted: bool = False
@@ -345,10 +347,13 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         idx = bisect.bisect_right(self._lengths, item_len)
         self._buffer.insert(idx, item)
         self._lengths.insert(idx, item_len)
+        self._ages.insert(idx, self._age_counter)
+        self._age_counter += 1
 
     def _remove_at(self, idx: int) -> None:
         del self._buffer[idx]
         del self._lengths[idx]
+        del self._ages[idx]
 
     def _log_first_sample(self, input_ids: list[int], label_ids: list[int]) -> None:
         """Log the first sample with trained tokens highlighted."""
@@ -457,8 +462,8 @@ class PreTokenizedDataset(IterableDataset, Stateful):
                 continue
 
             batch = self._new_batch()
-            # The initial example is randomly chosen from the buffer, for some partial shuffling.
-            seed_idx = int(self._batch_rng.integers(len(self._buffer)))
+            # Always choose the oldest buffer entry to seed the batch (argmin)
+            seed_idx = min(range(len(self._ages)), key=self._ages.__getitem__)
             first = self._buffer[seed_idx]
             self._remove_at(seed_idx)
             self._place_item(batch, first)
@@ -496,6 +501,8 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         }
         if self._buffer:
             d["buffer"] = self._serialize_buffer()
+            d["ages"] = list(self._ages)
+            d["age_counter"] = self._age_counter
         return d
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
@@ -507,11 +514,14 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         if "buffer" in state_dict:
             self._buffer = self._deserialize_buffer(state_dict["buffer"])
             self._lengths = [len(item.input_ids) for item in self._buffer]
+            self._ages = state_dict["ages"]
+            self._age_counter = state_dict["age_counter"]
             order = sorted(
                 range(len(self._lengths)), key=self._lengths.__getitem__
             )
             self._buffer = [self._buffer[i] for i in order]
             self._lengths = [self._lengths[i] for i in order]
+            self._ages = [self._ages[i] for i in order]
 
 
 # ---------------------------------------------------------------------------
