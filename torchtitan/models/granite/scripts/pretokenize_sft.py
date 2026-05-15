@@ -37,6 +37,7 @@ from torchtitan.models.granite.tokenization_strategies import (
     BackboneSuffixStrategy,
     FullThinkingStrategy,
     TokenizationStrategy,
+    TruncateEveryTurnStrategy,
     TruncateLastStrategy,
 )
 
@@ -46,6 +47,7 @@ _STRATEGIES: dict[str, type[TokenizationStrategy]] = {
     "truncate_last": TruncateLastStrategy,
     "backbone_suffix": BackboneSuffixStrategy,
     "full_thinking": FullThinkingStrategy,
+    "truncate_every_turn": TruncateEveryTurnStrategy,
 }
 
 
