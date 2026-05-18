@@ -145,7 +145,6 @@ def _process_file(
     n_examples = len(ds)
     n_tokens_arr = np.array(ds["n_tokens"], dtype=np.int64)
     total_tokens = int(n_tokens_arr.sum())
-    sum_tokens_squared = int((n_tokens_arr**2).sum())
     labels_flat = ds.data.column("labels").combine_chunks().flatten()
     total_trained = int(pc.sum(pc.not_equal(labels_flat, -100)).as_py())
 
@@ -155,7 +154,6 @@ def _process_file(
         "n_examples": n_examples,
         "n_dropped": n_lines - n_examples,
         "total_tokens": total_tokens,
-        "sum_tokens_squared": sum_tokens_squared,
         "total_trained_tokens": total_trained,
         "elapsed_seconds": round(elapsed, 2),
         "examples_per_second": round(n_examples / max(elapsed, 1e-6), 1),
@@ -170,49 +168,6 @@ def _process_file(
         total_tokens,
         stats["examples_per_second"],
     )
-
-
-_SEQ_LEN_CUTOFFS = [16384, 32768, 65536, 131072, 262144, 524288]
-
-
-def _compute_length_stats(shards_dir: Path, completed_shards: list[str]) -> dict[str, Any]:
-    """Load n_tokens from all shards and compute distribution stats."""
-
-    all_lengths: list[int] = []
-    for shard_name in completed_shards:
-        ds = load_from_disk(str(shards_dir / shard_name))
-        all_lengths.extend(ds["n_tokens"])
-
-    arr = np.array(all_lengths, dtype=np.int64)
-    squared_tokens_per_example = float((arr**2).mean())
-
-    length_stats: dict[str, Any] = {
-        "squared_tokens_per_example": round(squared_tokens_per_example, 1),
-        "min": int(arr.min()),
-        "max": int(arr.max()),
-        "mean": round(float(arr.mean()), 1),
-        "median": int(np.median(arr)),
-        "std": round(float(arr.std()), 1),
-        "p95": int(np.percentile(arr, 95)),
-    }
-
-    for cutoff in _SEQ_LEN_CUTOFFS:
-        filtered = arr[arr <= cutoff]
-        k = cutoff // 1024
-        if len(filtered) > 0:
-            length_stats[f"squared_tokens_per_example_{k}kmax"] = round(
-                float((filtered**2).mean()), 1
-            )
-            length_stats[f"tokens_per_example_{k}kmax"] = round(
-                float(filtered.mean()), 1
-            )
-            length_stats[f"n_examples_{k}kmax"] = int(len(filtered))
-        else:
-            length_stats[f"squared_tokens_per_example_{k}kmax"] = None
-            length_stats[f"tokens_per_example_{k}kmax"] = None
-            length_stats[f"n_examples_{k}kmax"] = 0
-
-    return length_stats
 
 
 def _write_manifest(
@@ -241,13 +196,17 @@ def _write_manifest(
         if d.is_dir() and not d.name.endswith("_stats")
     )
 
-    logger.info("Computing length distribution stats from %d shards...", len(completed_shards))
-    length_stats = _compute_length_stats(shards_dir, completed_shards)
-
     chat_template_sha256 = None
     jinja_path = Path(tokenizer_path) / "chat_template.jinja"
     if jinja_path.exists():
         chat_template_sha256 = _sha256_file(str(jinja_path))
+
+    # Compute length distribution stats from the concatenated shards
+    all_n_tokens = []
+    for shard_name in completed_shards:
+        shard_ds = load_from_disk(str(shards_dir / shard_name))
+        all_n_tokens.extend(shard_ds["n_tokens"])
+    n_tokens_arr = np.array(all_n_tokens, dtype=np.int64)
 
     manifest: dict[str, Any] = {
         "version": 1,
@@ -271,7 +230,14 @@ def _write_manifest(
             "tokens_per_example": round(total_tokens / total_examples, 1),
             "trained_tokens_per_example": round(total_trained / total_examples, 1),
             "trained_to_total_tokens_ratio": total_trained / total_tokens,
-            "length_stats": length_stats,
+        },
+        "length_stats": {
+            "min": int(n_tokens_arr.min()),
+            "max": int(n_tokens_arr.max()),
+            "mean": round(float(n_tokens_arr.mean()), 1),
+            "median": int(np.median(n_tokens_arr)),
+            "std": round(float(n_tokens_arr.std()), 1),
+            "p95": int(np.percentile(n_tokens_arr, 95)),
         },
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "input_dir": str(input_files[0].parent) if input_files else "",
@@ -435,7 +401,6 @@ def _shuffle_and_reshard(
             "shard_stem": shard_name,
             "n_examples": len(shard),
             "total_tokens": int(n_tokens_arr.sum()),
-            "sum_tokens_squared": int((n_tokens_arr**2).sum()),
             "total_trained_tokens": total_trained,
         }
         _write_stats_atomic(stats_path, stats)

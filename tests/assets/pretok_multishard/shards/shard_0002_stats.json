@@ -3,6 +3,5 @@
   "n_examples": 4,
   "n_dropped": 0,
   "total_tokens": 20,
-  "sum_tokens_squared": 106,
   "total_trained_tokens": 9
 }

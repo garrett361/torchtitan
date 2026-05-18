@@ -4,20 +4,20 @@ Reads Arrow shards produced by pretokenize_sft.py. Strategy dispatch happens
 at GranitePreTokenizedDataLoader construction time via manifest["strategy"].
 
 Class hierarchy:
-    PreTokenizedDataset           — abstract base: manifest loading, DP sharding,
-                                    unified packing loop, checkpointing
+    PreTokenizedDataset           — abstract base: manifest loading, cross-rank
+                                    LPT packing, checkpointing
     StandardPackingDataset        — format primitives for (input_ids, labels) shards
     BackboneSuffixDataset         — format primitives for backbone+suffix shards
     GranitePreTokenizedDataLoader — dataloader; dispatches to the right dataset
                                     class based on manifest["strategy"]
 
-Packing mode (greedy, buffer, cost_balanced) is a constructor parameter on
-PreTokenizedDataset, not a separate class hierarchy.
+Cross-rank LPT packing: all DP ranks jointly form dp_world_size batches per
+step from a shared data stream. Each rank materializes only its assigned batch.
+Selection mode (longest, buffer_shuffle) is a constructor parameter.
 """
 
 import bisect
 import json
-import math
 from abc import abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -49,9 +49,6 @@ def _load_shards(manifest: dict[str, Any], shards_dir: Path) -> Dataset:
     return concatenate_datasets(
         [load_from_disk(str(shards_dir / name)) for name in shard_names]
     )
-
-
-_SEQ_LEN_CUTOFFS_K = [16, 32, 64, 128, 256, 512]
 
 
 def _load_and_merge_manifests(
@@ -104,37 +101,7 @@ def _load_and_merge_manifests(
         m["stats"].get("total_trained_tokens", 0) for m in manifests
     )
 
-    # Merge length_stats via weighted averages (exact for means)
-    all_length_stats = [m["stats"].get("length_stats") for m in manifests]
-    merged_length_stats: dict[str, Any] | None = None
-    if all(ls is not None for ls in all_length_stats):
-        merged_length_stats = {}
-        for k in _SEQ_LEN_CUTOFFS_K:
-            sq_key = f"squared_tokens_per_example_{k}kmax"
-            mean_key = f"tokens_per_example_{k}kmax"
-            n_key = f"n_examples_{k}kmax"
-
-            total_n = sum(ls.get(n_key, 0) for ls in all_length_stats)
-            if total_n > 0:
-                merged_length_stats[sq_key] = round(
-                    sum(ls.get(n_key, 0) * ls.get(sq_key, 0) for ls in all_length_stats)
-                    / total_n,
-                    1,
-                )
-                merged_length_stats[mean_key] = round(
-                    sum(
-                        ls.get(n_key, 0) * ls.get(mean_key, 0)
-                        for ls in all_length_stats
-                    )
-                    / total_n,
-                    1,
-                )
-                merged_length_stats[n_key] = total_n
-            else:
-                merged_length_stats[sq_key] = None
-                merged_length_stats[mean_key] = None
-                merged_length_stats[n_key] = 0
-
+    n_tokens_arr = np.array(combined["n_tokens"], dtype=np.int64)
     merged_manifest: dict[str, Any] = {
         "version": ref["version"],
         "strategy": ref["strategy"],
@@ -143,7 +110,14 @@ def _load_and_merge_manifests(
             "total_examples": total_examples,
             "total_tokens": total_tokens,
             "total_trained_tokens": total_trained_tokens,
-            "length_stats": merged_length_stats,
+        },
+        "length_stats": {
+            "min": int(n_tokens_arr.min()),
+            "max": int(n_tokens_arr.max()),
+            "mean": round(float(n_tokens_arr.mean()), 1),
+            "median": int(np.median(n_tokens_arr)),
+            "std": round(float(n_tokens_arr.std()), 1),
+            "p95": int(np.percentile(n_tokens_arr, 95)),
         },
     }
 
@@ -161,10 +135,10 @@ def _load_and_merge_manifests(
 # Selection functions
 # ---------------------------------------------------------------------------
 
-SelectFn = Callable[["PreTokenizedDataset", int, dict], int]
+SelectFn = Callable[["PreTokenizedDataset", int], int]
 
 
-def _select_greedy(dataset: "PreTokenizedDataset", remaining: int, batch: dict) -> int:
+def _select_buffer_shuffle(dataset: "PreTokenizedDataset", remaining: int) -> int:
     """Random pick from items that fit (bisect on sorted buffer)."""
     max_idx = bisect.bisect_right(dataset._lengths, remaining) - 1
     if max_idx < 0:
@@ -172,44 +146,15 @@ def _select_greedy(dataset: "PreTokenizedDataset", remaining: int, batch: dict) 
     return int(dataset._batch_rng.integers(max_idx + 1))
 
 
-def _select_largest_fitting(
-    dataset: "PreTokenizedDataset", remaining: int, batch: dict
-) -> int:
+def _select_longest(dataset: "PreTokenizedDataset", remaining: int) -> int:
     """Binary search the sorted buffer for the longest item that fits."""
     idx = bisect.bisect_right(dataset._lengths, remaining) - 1
     return idx if idx >= 0 else -1
 
 
-def _select_cost_balanced(
-    dataset: "PreTokenizedDataset", remaining: int, batch: dict
-) -> int:
-    """Pick the item whose addition brings batch cost closest to target_cost.
-
-    Uses binary search on the sorted _lengths array: optimal length is
-    sqrt(target - current_cost), bisect to that point, check neighbors.
-    """
-    max_idx = bisect.bisect_right(dataset._lengths, remaining) - 1
-    if max_idx < 0:
-        return -1
-
-    current_cost = batch.get("cost", 0)
-    target = dataset._target_cost
-    ideal_len = math.isqrt(max(0, int(target - current_cost)))
-    ins = bisect.bisect_left(dataset._lengths, ideal_len, hi=max_idx + 1)
-
-    best_idx, best_gap = -1, float("inf")
-    for candidate in range(max(0, ins - 1), min(max_idx + 1, ins + 2)):
-        L = dataset._lengths[candidate]
-        gap = abs(current_cost + L * L - target)
-        if gap < best_gap:
-            best_gap, best_idx = gap, candidate
-    return best_idx
-
-
 _SELECT_FNS: dict[str, SelectFn] = {
-    "greedy": _select_greedy,
-    "buffer": _select_largest_fitting,
-    "cost_balanced": _select_cost_balanced,
+    "longest": _select_longest,
+    "buffer_shuffle": _select_buffer_shuffle,
 }
 
 
@@ -221,14 +166,20 @@ _SELECT_FNS: dict[str, SelectFn] = {
 class PreTokenizedDataset(IterableDataset, Stateful):
     """Abstract base for pre-tokenized SFT datasets.
 
-    Handles manifest loading, shard concatenation, DP sharding, the unified
-    packing loop, and checkpointing. Subclasses implement format-specific
-    primitives (_item_from_arrow, _new_batch, _place_item, _pad_and_flush).
+    Handles manifest loading, shard concatenation, cross-rank LPT packing,
+    and checkpointing. Subclasses implement format-specific primitives
+    (_item_from_arrow, _new_batch, _place_item, _pad_and_flush).
 
-    Packing mode is selected via the ``packing`` constructor parameter:
-    - "greedy": packs items in stream order without reordering.
-    - "buffer": lookahead buffer with largest-fitting selection.
-    - "cost_balanced": lookahead buffer minimizing attention cost variance.
+    Cross-rank packing: all DP ranks read from the same global data stream.
+    Each packing step forms dp_world_size batches simultaneously via LPT
+    (longest-processing-time) assignment: seed with oldest items, fill by
+    selecting items and assigning to the batch with lowest accumulated L² cost.
+    Each rank yields only its assigned batch. No cross-rank communication —
+    determinism is guaranteed by identical input order + identical logic.
+
+    Packing mode controls item selection during the fill phase:
+    - "longest": pick longest fitting item (deterministic, no RNG).
+    - "buffer_shuffle": pick random fitting item (uses deterministic RNG).
     """
 
     def __init__(
@@ -241,9 +192,8 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         cp_rank: int = 0,
         infinite: bool = False,
         tokenizer: BaseTokenizer | None = None,
-        packing: str = "buffer",
-        buffer_size: int = 64,
-        target_cost: float | None = None,
+        packing: str = "longest",
+        buffer_size: int = 512,
         _manifest: dict[str, Any] | None = None,
         _full_dataset: Dataset | None = None,
         _dataset_id: str | None = None,
@@ -252,8 +202,6 @@ class PreTokenizedDataset(IterableDataset, Stateful):
             raise ValueError(
                 f"Unknown packing mode: {packing!r}. Supported: {sorted(_SELECT_FNS)}"
             )
-        if packing == "cost_balanced" and target_cost is None:
-            raise ValueError("target_cost is required for cost_balanced packing")
 
         manifest_path = Path(manifest_path)
         manifest = _manifest if _manifest is not None else _load_manifest(manifest_path)
@@ -264,12 +212,13 @@ class PreTokenizedDataset(IterableDataset, Stateful):
             shards_dir = manifest_path.parent / "shards"
             full_dataset = _load_shards(manifest, shards_dir)
 
-        self._original_data: Dataset = cast(
-            Dataset,
-            split_dataset_by_node(full_dataset, dp_rank, dp_world_size),
-        )
+        # No DP split: all ranks see the same full dataset. Cross-rank LPT
+        # forms dp_world_size batches per step; each rank takes its slice.
+        self._original_data: Dataset = full_dataset
         self._data: Dataset = self._original_data
 
+        self._dp_rank = dp_rank
+        self._dp_world_size = dp_world_size
         self._eos_id: int = manifest["tokenizer"]["eos_token_id"]
         self._tokenizer = tokenizer
         self._cp_rank = cp_rank
@@ -280,7 +229,6 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         self._packing = packing
         self._select_fn: SelectFn = _SELECT_FNS[packing]
         self._buffer_size = buffer_size
-        self._target_cost = target_cost or 0.0
 
         self._sample_idx: int = 0
         self._epoch: int = 0
@@ -388,8 +336,8 @@ class PreTokenizedDataset(IterableDataset, Stateful):
 
     @property
     def num_examples(self) -> int:
-        """Total examples in this rank's shard (before packing)."""
-        return len(self._original_data)
+        """Examples this rank will consume (full dataset / dp_world_size)."""
+        return len(self._original_data) // self._dp_world_size
 
     def _prepare_iter(self) -> None:
         """Worker detection and data sharding."""
@@ -447,45 +395,86 @@ class PreTokenizedDataset(IterableDataset, Stateful):
 
         self._sample_idx += chunk_size
 
-    # --- Unified packing loop ---
+    # --- Cross-rank LPT packing loop ---
 
     def _iter_packed(self):
         self._data_exhausted = False
+        dp = self._dp_world_size
 
         while True:
             self._refill_buffer()
 
-            if not self._buffer:
+            # End-of-epoch: fewer items remain than dp_world_size, so we
+            # cannot seed one batch per rank. Drop the remainder.
+            epoch_remnant = len(self._buffer) < dp
+            if epoch_remnant:
                 if not self.infinite:
+                    if self._buffer:
+                        import warnings
+                        warnings.warn(
+                            f"Dataset '{self._dataset_id}': {len(self._buffer)} items "
+                            f"remaining at end of epoch but need {dp} to form a "
+                            f"step. Dropping.",
+                            stacklevel=2,
+                        )
                     break
                 self._advance_epoch()
-                continue
-
-            batch = self._new_batch()
-            # Always choose the oldest buffer entry to seed the batch (argmin)
-            seed_idx = min(range(len(self._ages)), key=self._ages.__getitem__)
-            first = self._buffer[seed_idx]
-            self._remove_at(seed_idx)
-            self._place_item(batch, first)
-            batch["cost"] = len(first.input_ids) ** 2
-            offset = len(first.input_ids)
-
-            while True:
-                remaining = self.seq_len - offset
-                if remaining <= 0:
+                self._refill_buffer()
+                if len(self._buffer) < dp:
                     break
-                idx = self._select_fn(self, remaining, batch)
+
+            # Seed dp batches with the dp oldest buffer items
+            oldest_indices = sorted(
+                range(len(self._ages)), key=self._ages.__getitem__
+            )[:dp]
+            seeds = [self._buffer[i] for i in oldest_indices]
+            # Safely remove indices by going from largest idx to smallest
+            for i in sorted(oldest_indices, reverse=True):
+                self._remove_at(i)
+
+            batches = [self._new_batch() for _ in range(dp)]
+            batch_remaining = [self.seq_len] * dp
+            # The batch cost is currently the sum of the squared seqlens of all items held in the
+            # batch, which is a rough proxy for the attention cost of the batch, which is the main
+            # source of computational cost variance across ranks.
+            batch_cost = [0] * dp
+
+            for r, seed in enumerate(seeds):
+                self._place_item(batches[r], seed)
+                seed_len = len(seed.input_ids)
+                batch_remaining[r] -= seed_len
+                batch_cost[r] += seed_len * seed_len
+
+            # Fill loop: pick items via selection fn, assign to cheapest batch
+            while True:
+                max_remaining = max(batch_remaining)
+                if max_remaining <= 0:
+                    break
+
+                idx = self._select_fn(self, max_remaining)
                 if idx == -1:
                     break
-                picked = self._buffer[idx]
+
+                item = self._buffer[idx]
+                item_len = len(item.input_ids)
+
+                # Assign to batch with lowest cost that can fit this item
+                best_rank = -1
+                best_cost = float("inf")
+                for r in range(dp):
+                    if batch_remaining[r] >= item_len and batch_cost[r] < best_cost:
+                        best_cost = batch_cost[r]
+                        best_rank = r
+
                 self._remove_at(idx)
-                self._place_item(batch, picked)
-                batch["cost"] += len(picked.input_ids) ** 2
-                offset += len(picked.input_ids)
+                self._place_item(batches[best_rank], item)
+                batch_remaining[best_rank] -= item_len
+                batch_cost[best_rank] += item_len * item_len
+
                 if not self._buffer:
                     self._refill_buffer()
 
-            yield self._pad_and_flush(batch)
+            yield self._pad_and_flush(batches[self._dp_rank])
 
     def __iter__(self):
         self._prepare_iter()
@@ -543,6 +532,7 @@ class StandardPackingDataset(PreTokenizedDataset):
 
     _item_type = _ChatItem
     _arrow_list_columns = ("input_ids", "labels")
+    _arrow_scalar_columns = ("n_tokens",)
 
     def _deserialize_buffer(self, data: list) -> list:
         return [
@@ -554,10 +544,11 @@ class StandardPackingDataset(PreTokenizedDataset):
         ]
 
     def _item_from_arrow(self, list_arrays, scalars, idx):
+        n_tokens = int(scalars["n_tokens"][idx])
+        if n_tokens > self.seq_len:
+            return None
         offsets, values = list_arrays["input_ids"]
         inp = values[offsets[idx]:offsets[idx + 1]]
-        if len(inp) > self.seq_len:
-            return None
         offsets, values = list_arrays["labels"]
         lbl = values[offsets[idx]:offsets[idx + 1]]
         if not self._logged_first_sample:
@@ -598,8 +589,6 @@ class StandardPackingDataset(PreTokenizedDataset):
             "n_trained_tokens": batch["n_trained"],
             "n_examples_packed": batch["n_examples"],
         }
-        if self._packing == "cost_balanced":
-            stats["batch_attention_cost"] = batch["cost"]
         return (
             {
                 "input": torch.from_numpy(batch["inputs"].astype(np.int64)),
@@ -658,12 +647,13 @@ class BackboneSuffixDataset(PreTokenizedDataset):
 
     def _new_batch(self) -> dict:
         return {
-            "inputs": [],
-            "labels": [],
-            "positions": [],
-            "conv_ids": [],
-            "suffix_ids": [],
-            "insertion_limits": [],
+            "inputs": np.full(self.seq_len, self._eos_id, dtype=np.int32),
+            "labels": np.full(self.seq_len, IGNORE_INDEX, dtype=np.int32),
+            "positions": np.zeros(self.seq_len, dtype=np.int32),
+            "conv_ids": np.zeros(self.seq_len, dtype=np.int32),
+            "suffix_ids": np.zeros(self.seq_len, dtype=np.int32),
+            "insertion_limits": np.full(self.seq_len, -1, dtype=np.int32),
+            "offset": 0,
             "n_total": 0,
             "n_trained": 0,
             "n_examples": 0,
@@ -677,76 +667,63 @@ class BackboneSuffixDataset(PreTokenizedDataset):
         positions = item.positions
         suffix_starts = item.suffix_starts
         ins_limits = item.insertion_limits
-        off = len(batch["inputs"])
+        off = batch["offset"]
         n = len(input_ids)
         backbone_len = suffix_starts[0] if suffix_starts else n
         conv_id = batch["conv_counter"]
 
-        batch["inputs"].extend(input_ids)
-        batch["labels"].extend(labels)
-        batch["positions"].extend(positions)
-        batch["conv_ids"].extend([conv_id] * n)
+        batch["inputs"][off:off + n] = input_ids
+        batch["labels"][off:off + n] = labels
+        batch["positions"][off:off + n] = positions
+        batch["conv_ids"][off:off + n] = conv_id
 
         # suffix_ids: 0 for backbone, unique counter for each suffix
-        local_suffix_ids = [0] * n
         suffix_counter = batch["suffix_counter"]
         for k in range(len(suffix_starts)):
             s_start = suffix_starts[k]
             s_end = suffix_starts[k + 1] if k + 1 < len(suffix_starts) else n
-            for j in range(s_start, s_end):
-                local_suffix_ids[j] = suffix_counter
+            batch["suffix_ids"][off + s_start:off + s_end] = suffix_counter
             suffix_counter += 1
-        batch["suffix_ids"].extend(local_suffix_ids)
         batch["suffix_counter"] = suffix_counter
 
         # insertion_limits: backbone gets off + backbone_len - 1,
         # each suffix gets off + its compressed limit value
-        local_ins_limits = [0] * n
         backbone_limit = off + backbone_len - 1
-        for j in range(backbone_len):
-            local_ins_limits[j] = backbone_limit
+        batch["insertion_limits"][off:off + backbone_len] = backbone_limit
         for k in range(len(suffix_starts)):
             s_start = suffix_starts[k]
             s_end = suffix_starts[k + 1] if k + 1 < len(suffix_starts) else n
-            limit_val = off + ins_limits[k]
-            for j in range(s_start, s_end):
-                local_ins_limits[j] = limit_val
-        batch["insertion_limits"].extend(local_ins_limits)
+            batch["insertion_limits"][off + s_start:off + s_end] = off + ins_limits[k]
 
+        batch["offset"] = off + n
         batch["n_total"] += n
-        batch["n_trained"] += sum(1 for lbl in labels if lbl != IGNORE_INDEX)
+        batch["n_trained"] += int(np.count_nonzero(batch["labels"][off:off + n] != IGNORE_INDEX))
         batch["n_examples"] += 1
         batch["conv_counter"] += 1
 
     def _pad_and_flush(
         self, batch: dict
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor, dict[str, int]]:
-        pad_len = self.seq_len - len(batch["inputs"])
+        off = batch["offset"]
+        pad_len = self.seq_len - off
         if pad_len > 0:
-            batch["inputs"].extend([self._eos_id] * pad_len)
-            batch["labels"].extend([IGNORE_INDEX] * pad_len)
-            batch["positions"].extend(range(pad_len))
-            batch["conv_ids"].extend([0] * pad_len)
-            batch["suffix_ids"].extend([0] * pad_len)
-            batch["insertion_limits"].extend([-1] * pad_len)
+            batch["positions"][off:] = np.arange(pad_len, dtype=np.int32)
         stats: dict[str, int] = {
             "n_total_tokens": batch["n_total"],
             "n_trained_tokens": batch["n_trained"],
             "n_examples_packed": batch["n_examples"],
         }
-        if self._packing == "cost_balanced":
-            stats["batch_attention_cost"] = batch["cost"]
         return (
             {
-                "input": torch.tensor(batch["inputs"], dtype=torch.long),
-                "positions": torch.tensor(batch["positions"], dtype=torch.long),
-                "conv_ids": torch.tensor(batch["conv_ids"], dtype=torch.long),
-                "suffix_ids": torch.tensor(batch["suffix_ids"], dtype=torch.long),
-                "insertion_limits": torch.tensor(
-                    batch["insertion_limits"], dtype=torch.long
+                "input": torch.from_numpy(batch["inputs"].astype(np.int64)),
+                "positions": torch.from_numpy(batch["positions"].astype(np.int64)),
+                "conv_ids": torch.from_numpy(batch["conv_ids"].astype(np.int64)),
+                "suffix_ids": torch.from_numpy(batch["suffix_ids"].astype(np.int64)),
+                "insertion_limits": torch.from_numpy(
+                    batch["insertion_limits"].astype(np.int64)
                 ),
             },
-            torch.tensor(batch["labels"], dtype=torch.long),
+            torch.from_numpy(batch["labels"].astype(np.int64)),
             stats,
         )
 
@@ -785,11 +762,10 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         infinite: bool = True
         """Loop the dataset indefinitely."""
 
-        packing: Literal["greedy", "buffer", "cost_balanced"] = "buffer"
-        """Packing algorithm. 'buffer' maintains a lookahead buffer and selects
-        largest-fitting examples (~99.9% efficiency at 128k seq_len). 'greedy'
-        packs in sequential order (simpler but ~86% efficiency at 128k).
-        'cost_balanced' targets uniform attention cost per sequence."""
+        packing: Literal["longest", "buffer_shuffle"] = "longest"
+        """Packing algorithm. 'longest' picks longest fitting item from buffer
+        (deterministic, ~99.9% efficiency at 128k seq_len). 'buffer_shuffle'
+        picks random fitting item (deterministic RNG across ranks)."""
 
         buffer_size: int = 512
         """Number of examples held in the lookahead buffer (per worker)."""
@@ -847,40 +823,6 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
                 f"Supported: {sorted(_DATASET_CLASSES)}"
             )
 
-        # Compute target_cost for cost_balanced packing
-        target_cost: float | None = None
-        if config.packing == "cost_balanced":
-            length_stats = manifest.get("stats", {}).get("length_stats")
-            if not length_stats:
-                raise ValueError(
-                    "cost_balanced packing requires 'length_stats' in manifest(s). "
-                    "Re-run pretokenize_sft.py to generate stats."
-                )
-            _CUTOFFS = [16384, 32768, 65536, 131072, 262144, 524288]
-            valid_cutoffs = [
-                c
-                for c in _CUTOFFS
-                if c <= seq_len
-                and f"tokens_per_example_{c // 1024}kmax" in length_stats
-            ]
-            if not valid_cutoffs:
-                raise ValueError(
-                    f"No valid cutoff ≤ seq_len={seq_len} with tokens_per_example "
-                    f"stats in manifest {config.dataset_path}"
-                )
-            cutoff = max(valid_cutoffs)
-            k = cutoff // 1024
-            mean_sq_len = length_stats[f"squared_tokens_per_example_{k}kmax"]
-            mean_len = length_stats[f"tokens_per_example_{k}kmax"]
-            # Expected items per sequence (seq_len / E[L]) × expected cost per item (E[L²])
-            target_cost = seq_len * mean_sq_len / mean_len
-            logger.info(
-                "Cost-balanced packing: target_cost=%.2e (T/seq²=%.3f, cutoff=%dk)",
-                target_cost,
-                target_cost / seq_len**2,
-                k,
-            )
-
         dataset = _DATASET_CLASSES[strategy](
             manifest_path=str(manifest_paths[0]),
             seq_len=seq_len,
@@ -891,7 +833,6 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
             tokenizer=tokenizer,
             packing=config.packing,
             buffer_size=config.buffer_size,
-            target_cost=target_cost,
             _manifest=manifest,
             _full_dataset=full_dataset,
             _dataset_id=dataset_id,

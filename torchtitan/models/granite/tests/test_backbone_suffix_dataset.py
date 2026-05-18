@@ -486,6 +486,9 @@ class TestBackboneSuffixDatasetStats(unittest.TestCase):
         ds = self._make_dataset([ex_a, ex_b], seq_len=seq_len)
         _, _, stats = next(iter(ds))
         self.assertEqual(stats["n_total_tokens"], 6 + 7)
+        trained_a = sum(1 for lbl in ex_a["labels"] if lbl != IGNORE_INDEX)
+        trained_b = sum(1 for lbl in ex_b["labels"] if lbl != IGNORE_INDEX)
+        self.assertEqual(stats["n_trained_tokens"], trained_a + trained_b)
         self.assertEqual(stats["n_examples_packed"], 2)
 
 
@@ -559,7 +562,7 @@ class TestBackboneSuffixGreedyPacking(unittest.TestCase):
 
         manifest_path = _make_backbone_suffix_shard(self._tmp, examples)
         return BackboneSuffixDataset(
-            manifest_path, seq_len=seq_len, infinite=False, packing="greedy"
+            manifest_path, seq_len=seq_len, infinite=False, packing="buffer_shuffle"
         )
 
     def test_greedy_produces_valid_output(self):
@@ -596,67 +599,6 @@ class TestBackboneSuffixGreedyPacking(unittest.TestCase):
         self.assertEqual(sorted(actual_first_tokens), expected_first_tokens)
 
 
-class TestBackboneSuffixCostBalanced(unittest.TestCase):
-    def setUp(self):
-        import tempfile
-        import shutil
-
-        self._tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self._tmp)
-
-    def test_cost_balanced_produces_stats(self):
-        """Cost-balanced packing with backbone_suffix includes batch_attention_cost."""
-        from torchtitan.models.granite.pretokenized_dataset import (
-            BackboneSuffixDataset,
-        )
-
-        seq_len = 32
-        examples = [
-            _example_no_suffix(),
-            _example_one_suffix(),
-            _example_two_suffixes(),
-            _example_no_suffix(),
-        ]
-        manifest_path = _make_backbone_suffix_shard(self._tmp, examples)
-        ds = BackboneSuffixDataset(
-            manifest_path,
-            seq_len=seq_len,
-            infinite=False,
-            packing="cost_balanced",
-            buffer_size=4,
-            target_cost=500.0,
-        )
-        batches = list(ds)
-        self.assertGreater(len(batches), 0)
-        for _, _, stats in batches:
-            self.assertIn("batch_attention_cost", stats)
-            self.assertIsInstance(stats["batch_attention_cost"], int)
-
-    def test_cost_balanced_valid_structure(self):
-        """Cost-balanced batches maintain correct backbone_suffix tensor structure."""
-        from torchtitan.models.granite.pretokenized_dataset import (
-            BackboneSuffixDataset,
-        )
-
-        seq_len = 32
-        examples = [_example_one_suffix(), _example_two_suffixes()]
-        manifest_path = _make_backbone_suffix_shard(self._tmp, examples)
-        ds = BackboneSuffixDataset(
-            manifest_path,
-            seq_len=seq_len,
-            infinite=False,
-            packing="cost_balanced",
-            buffer_size=4,
-            target_cost=500.0,
-        )
-        for batch_dict, labels, _ in ds:
-            self.assertEqual(batch_dict["input"].shape, (seq_len,))
-            self.assertEqual(batch_dict["conv_ids"].shape, (seq_len,))
-            self.assertEqual(batch_dict["suffix_ids"].shape, (seq_len,))
-            self.assertEqual(batch_dict["insertion_limits"].shape, (seq_len,))
-            self.assertEqual(labels.shape, (seq_len,))
-
-
 class TestBackboneSuffixEpochBoundary(unittest.TestCase):
     """Epoch boundary tests for BackboneSuffixDataset."""
 
@@ -671,7 +613,7 @@ class TestBackboneSuffixEpochBoundary(unittest.TestCase):
         from torchtitan.models.granite.pretokenized_dataset import BackboneSuffixDataset
 
         manifest_path = _make_backbone_suffix_shard(self._tmp, examples)
-        defaults = dict(infinite=False, packing="greedy", buffer_size=4)
+        defaults = dict(infinite=False, packing="buffer_shuffle", buffer_size=4)
         defaults.update(kwargs)
         return BackboneSuffixDataset(manifest_path, seq_len=seq_len, **defaults)
 
@@ -688,12 +630,12 @@ class TestBackboneSuffixEpochBoundary(unittest.TestCase):
     def test_checkpoint_resume(self):
         """Checkpoint round-trip produces identical remaining batches."""
         examples = [_example_no_suffix(), _example_one_suffix(), _example_two_suffixes()]
-        ds1 = self._make_dataset(examples, buffer_size=2, packing="buffer")
+        ds1 = self._make_dataset(examples, buffer_size=2, packing="longest")
         it1 = iter(ds1)
         next(it1)
         state = ds1.state_dict()
 
-        ds2 = self._make_dataset(examples, buffer_size=2, packing="buffer")
+        ds2 = self._make_dataset(examples, buffer_size=2, packing="longest")
         ds2.load_state_dict(state)
         remaining1 = list(it1)
         remaining2 = list(ds2)

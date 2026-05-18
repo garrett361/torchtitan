@@ -738,7 +738,7 @@ class TestShuffleAndReshard(unittest.TestCase):
         shard = full_ds.select(indices)
         shard.save_to_disk(str(shuffled_dir / "shard_0000"))
         stats = {"shard_stem": "shard_0000", "n_examples": len(shard),
-                 "total_tokens": 0, "sum_tokens_squared": 0, "total_trained_tokens": 0}
+                 "total_tokens": 0, "total_trained_tokens": 0}
         with open(shuffled_dir / "shard_0000_stats.json", "w") as f:
             json.dump(stats, f)
 
@@ -805,7 +805,6 @@ class TestShuffleAndReshard(unittest.TestCase):
 
         agg_examples = 0
         agg_tokens = 0
-        agg_tokens_squared = 0
         agg_trained = 0
 
         for shard_name in manifest["shards"]["completed"]:
@@ -819,7 +818,6 @@ class TestShuffleAndReshard(unittest.TestCase):
             actual_n_examples = len(ds)
             actual_n_tokens = [len(row) for row in ds["input_ids"]]
             actual_total_tokens = sum(actual_n_tokens)
-            actual_sum_sq = sum(n**2 for n in actual_n_tokens)
             actual_trained = sum(
                 sum(1 for lbl in row if lbl != -100) for row in ds["labels"]
             )
@@ -827,13 +825,11 @@ class TestShuffleAndReshard(unittest.TestCase):
             # Verify per-shard stats against ground truth
             self.assertEqual(stats["n_examples"], actual_n_examples)
             self.assertEqual(stats["total_tokens"], actual_total_tokens)
-            self.assertEqual(stats["sum_tokens_squared"], actual_sum_sq)
             self.assertEqual(stats["total_trained_tokens"], actual_trained)
             self.assertNotIn("n_dropped", stats)
 
             agg_examples += actual_n_examples
             agg_tokens += actual_total_tokens
-            agg_tokens_squared += actual_sum_sq
             agg_trained += actual_trained
 
         # Verify aggregates match manifest (shuffle preserves totals)

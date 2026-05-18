@@ -380,7 +380,7 @@ class TestStandardBufferPacking(unittest.TestCase):
             manifest_path,
             seq_len=seq_len,
             infinite=False,
-            packing="buffer",
+            packing="longest",
             buffer_size=buffer_size,
             **kwargs,
         )
@@ -427,7 +427,7 @@ class TestStandardBufferPacking(unittest.TestCase):
         ]
         manifest_path = _make_shard(self._tmp, examples)
         ds = StandardPackingDataset(
-            manifest_path, seq_len=seq_len, infinite=False, packing="buffer", buffer_size=8
+            manifest_path, seq_len=seq_len, infinite=False, packing="longest", buffer_size=8
         )
 
         expected_first_tokens = sorted(row["input_ids"][0] for row in ds._data)
@@ -486,21 +486,21 @@ class TestStandardBufferPacking(unittest.TestCase):
 
         # Reference: collect all batches in one pass.
         ds_ref = StandardPackingDataset(
-            manifest_path, seq_len=seq_len, infinite=False, packing="buffer", buffer_size=4
+            manifest_path, seq_len=seq_len, infinite=False, packing="longest", buffer_size=4
         )
         all_batches = list(ds_ref)
         self.assertGreater(len(all_batches), 1)
 
         # Checkpoint after first batch, restore, verify remaining match.
         ds_a = StandardPackingDataset(
-            manifest_path, seq_len=seq_len, infinite=False, packing="buffer", buffer_size=4
+            manifest_path, seq_len=seq_len, infinite=False, packing="longest", buffer_size=4
         )
         it_a = iter(ds_a)
         next(it_a)
         checkpoint = ds_a.state_dict()
 
         ds_b = StandardPackingDataset(
-            manifest_path, seq_len=seq_len, infinite=False, packing="buffer", buffer_size=4
+            manifest_path, seq_len=seq_len, infinite=False, packing="longest", buffer_size=4
         )
         ds_b.load_state_dict(checkpoint)
 
@@ -521,7 +521,7 @@ class TestStandardBufferPacking(unittest.TestCase):
         ]
         manifest_path = _make_shard(self._tmp, examples)
         ds = StandardPackingDataset(
-            manifest_path, seq_len=seq_len, infinite=True, packing="buffer", buffer_size=4
+            manifest_path, seq_len=seq_len, infinite=True, packing="longest", buffer_size=4
         )
 
         it = iter(ds)
@@ -581,7 +581,7 @@ class TestGranitePreTokenizedDataLoaderDispatch(unittest.TestCase):
         self.assertIsInstance(loader.dataset, StandardPackingDataset)
 
     def test_dispatch_buffer_packing(self):
-        """DataLoader with packing='buffer' instantiates StandardPackingDataset."""
+        """DataLoader with packing='longest' instantiates StandardPackingDataset."""
         examples = [([1, 2, _EOS_ID], [IGNORE_INDEX, _EOS_ID, IGNORE_INDEX])]
         manifest_path = _make_shard(self._tmp, examples, strategy="truncate_last")
 
@@ -592,7 +592,7 @@ class TestGranitePreTokenizedDataLoaderDispatch(unittest.TestCase):
             GranitePreTokenizedDataLoader.Config(
                 dataset_path=str(manifest_path),
                 infinite=False,
-                packing="buffer",
+                packing="longest",
                 buffer_size=32,
             ),
             dp_world_size=1,
@@ -602,7 +602,7 @@ class TestGranitePreTokenizedDataLoaderDispatch(unittest.TestCase):
             local_batch_size=1,
         )
         self.assertIsInstance(loader.dataset, StandardPackingDataset)
-        self.assertEqual(loader.dataset._packing, "buffer")
+        self.assertEqual(loader.dataset._packing, "longest")
 
     def test_dispatch_unknown_strategy_raises(self):
         """DataLoader raises ValueError for an unregistered strategy."""
@@ -643,7 +643,7 @@ class TestGreedyPacking(unittest.TestCase):
         ]
         manifest_path = _make_shard(self._tmp, examples)
         ds = StandardPackingDataset(
-            manifest_path, seq_len=seq_len, infinite=False, packing="greedy"
+            manifest_path, seq_len=seq_len, infinite=False, packing="buffer_shuffle"
         )
 
         expected_first_tokens = sorted(row["input_ids"][0] for row in ds._data)
@@ -668,7 +668,7 @@ class TestGreedyPacking(unittest.TestCase):
         ]
         manifest_path = _make_shard(self._tmp, examples)
         ds = StandardPackingDataset(
-            manifest_path, seq_len=seq_len, infinite=False, packing="greedy",
+            manifest_path, seq_len=seq_len, infinite=False, packing="buffer_shuffle",
         )
 
         batches = list(ds)
@@ -709,27 +709,6 @@ class TestLocalBatchSizeValidation(unittest.TestCase):
                 local_batch_size=2,
             )
 
-    def test_cost_balanced_missing_target_cost_raises(self):
-        """cost_balanced packing without length_stats in manifest raises ValueError."""
-        examples = [([1, 2, _EOS_ID], [IGNORE_INDEX, _EOS_ID, IGNORE_INDEX])]
-        manifest_path = _make_shard(self._tmp, examples)
-
-        from torchtitan.components.tokenizer import HuggingFaceTokenizer
-
-        tokenizer = HuggingFaceTokenizer(tokenizer_path="tests/assets/tokenizer")
-        with self.assertRaises(ValueError):
-            GranitePreTokenizedDataLoader(
-                GranitePreTokenizedDataLoader.Config(
-                    dataset_path=str(manifest_path),
-                    infinite=False,
-                    packing="cost_balanced",
-                ),
-                dp_world_size=1,
-                dp_rank=0,
-                tokenizer=tokenizer,
-                seq_len=16,
-                local_batch_size=1,
-            )
 
 
 class TestDatasetSmallerThanBuffer(unittest.TestCase):
@@ -749,7 +728,7 @@ class TestDatasetSmallerThanBuffer(unittest.TestCase):
         ]
         manifest_path = _make_shard(self._tmp, examples)
         ds = StandardPackingDataset(
-            manifest_path, seq_len=seq_len, infinite=False, packing="buffer", buffer_size=64
+            manifest_path, seq_len=seq_len, infinite=False, packing="longest", buffer_size=64
         )
         batches = list(ds)
         self.assertGreater(len(batches), 0)

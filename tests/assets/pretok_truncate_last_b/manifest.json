@@ -26,20 +26,6 @@
       "median": 6,
       "p95": 8,
       "max": 8
-    },
-    "length_stats": {
-      "squared_tokens_per_example_16kmax": 40.0,
-      "tokens_per_example_16kmax": 6.0,
-      "n_examples_16kmax": 6,
-      "squared_tokens_per_example_32kmax": 40.0,
-      "tokens_per_example_32kmax": 6.0,
-      "n_examples_32kmax": 6,
-      "squared_tokens_per_example_64kmax": 40.0,
-      "tokens_per_example_64kmax": 6.0,
-      "n_examples_64kmax": 6,
-      "squared_tokens_per_example_128kmax": 40.0,
-      "tokens_per_example_128kmax": 6.0,
-      "n_examples_128kmax": 6
     }
   },
   "created_at": "2026-01-01T00:00:00Z",

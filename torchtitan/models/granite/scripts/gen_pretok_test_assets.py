@@ -190,7 +190,6 @@ def _write_multishard_asset() -> None:
             "n_examples": len(examples),
             "n_dropped": 0,
             "total_tokens": int(n_tokens_arr.sum()),
-            "sum_tokens_squared": int((n_tokens_arr**2).sum()),
             "total_trained_tokens": sum(
                 sum(1 for lbl in labels if lbl != IGNORE_INDEX)
                 for _, labels in examples
