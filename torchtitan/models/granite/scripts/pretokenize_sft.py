@@ -496,6 +496,10 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
 
+    # Ensure we are re-tokenizing from scratch. Avoids potential issues like modifications to the
+    # chat template without modifying the chat template path, which do not cause cache invalidation.
+    disable_caching()
+
     input_dir = Path(args.input_dir)
     output_dir = Path(
         args.output_dir if args.output_dir else input_dir / f"pretok_{args.strategy}"
