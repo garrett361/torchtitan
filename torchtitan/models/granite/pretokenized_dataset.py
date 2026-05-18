@@ -277,6 +277,11 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         """Pad to seq_len and produce final (inputs_dict, labels, stats)."""
         ...
 
+    @abstractmethod
+    def _item_cost(self, item) -> int:
+        """Exact attention cost (mask entry count) for a single buffer item."""
+        ...
+
     # --- Shared infrastructure ---
 
     _item_type: type
@@ -434,16 +439,12 @@ class PreTokenizedDataset(IterableDataset, Stateful):
 
             batches = [self._new_batch() for _ in range(dp)]
             batch_remaining = [self.seq_len] * dp
-            # The batch cost is currently the sum of the squared seqlens of all items held in the
-            # batch, which is a rough proxy for the attention cost of the batch, which is the main
-            # source of computational cost variance across ranks.
             batch_cost = [0] * dp
 
             for r, seed in enumerate(seeds):
                 self._place_item(batches[r], seed)
-                seed_len = len(seed.input_ids)
-                batch_remaining[r] -= seed_len
-                batch_cost[r] += seed_len * seed_len
+                batch_remaining[r] -= len(seed.input_ids)
+                batch_cost[r] += self._item_cost(seed)
 
             # Fill loop: pick items via selection fn, assign to cheapest batch
             while True:
@@ -469,7 +470,7 @@ class PreTokenizedDataset(IterableDataset, Stateful):
                 self._remove_at(idx)
                 self._place_item(batches[best_rank], item)
                 batch_remaining[best_rank] -= item_len
-                batch_cost[best_rank] += item_len * item_len
+                batch_cost[best_rank] += self._item_cost(item)
 
                 if not self._buffer:
                     self._refill_buffer()
@@ -598,6 +599,9 @@ class StandardPackingDataset(PreTokenizedDataset):
             stats,
         )
 
+    def _item_cost(self, item: _ChatItem) -> int:
+        n = len(item.input_ids)
+        return n * (n + 1) // 2
 
 
 # ---------------------------------------------------------------------------
@@ -727,6 +731,23 @@ class BackboneSuffixDataset(PreTokenizedDataset):
             stats,
         )
 
+    def _item_cost(self, item: _BackboneSuffixItem) -> int:
+        n = len(item.input_ids)
+        if not item.suffix_starts:
+            return n * (n + 1) // 2
+
+        backbone_len = item.suffix_starts[0]
+        cost = backbone_len * (backbone_len + 1) // 2
+
+        num_suffixes = len(item.suffix_starts)
+        for k in range(num_suffixes):
+            s_start = item.suffix_starts[k]
+            s_end = item.suffix_starts[k + 1] if k + 1 < num_suffixes else n
+            s_len = s_end - s_start
+            cost += s_len * (s_len + 1) // 2
+            cost += s_len * (item.insertion_limits[k] + 1)
+
+        return cost
 
 
 # ---------------------------------------------------------------------------
