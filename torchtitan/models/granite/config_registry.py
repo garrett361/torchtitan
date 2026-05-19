@@ -224,7 +224,6 @@ def granite_debugmodel_float8_rowwise() -> Trainer.Config:
     return config
 
 
-
 def granite_4_1_8b_sft_pretokenized_float8_filteroutput() -> Trainer.Config:
     config = granite_4_1_8b_sft_pretokenized()
     config.model_converters = ModelConvertersContainer.Config(
@@ -273,6 +272,86 @@ def granite_4_1_8b_sft_pretokenized_fa4() -> Trainer.Config:
 def granite_4_1_8b_sft_pretokenized_fa4_float8_filteroutput() -> Trainer.Config:
     """SFT config for granite-4.1-8b with FA4 + tensorwise float8."""
     config = granite_4_1_8b_sft_pretokenized_fa4()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            Float8LinearConverter.Config(
+                enable_fsdp_float8_all_gather=True,
+                precompute_float8_dynamic_scale_for_fsdp=True,
+                filter_fqns=["output"],
+            ),
+        ],
+    )
+    return config
+
+
+def granite_4_1_3b_sft_pretokenized() -> Trainer.Config:
+    """SFT config for granite-4.1-3b using pre-tokenized Arrow shards.
+
+    Requires --hf-assets-path and --dataloader.dataset-path on CLI.
+    """
+    return Trainer.Config(
+        model_spec=model_registry("3B", attn_backend="flex"),
+        optimizer=OptimizersContainer.Config(lr=1e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=100,
+            decay_ratio=0.9,
+            decay_type="linear",
+            min_lr_factor=0.1,
+        ),
+        training=TrainingConfig(
+            local_batch_size=1,
+            seq_len=8192,
+            steps=1000,
+        ),
+        dataloader=GranitePreTokenizedDataLoader.Config(dataset_path=""),
+        metrics=MetricsProcessor.Config(log_freq=10),
+        checkpoint=CheckpointManager.Config(interval=500),
+        activation_checkpoint=ActivationCheckpointConfig(mode="selective"),
+    )
+
+
+def granite_4_1_3b_sft_pretokenized_float8_filteroutput() -> Trainer.Config:
+    config = granite_4_1_3b_sft_pretokenized()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            Float8LinearConverter.Config(
+                enable_fsdp_float8_all_gather=True,
+                precompute_float8_dynamic_scale_for_fsdp=True,
+                filter_fqns=["output"],
+            ),
+        ],
+    )
+    return config
+
+
+def granite_4_1_30b_sft_pretokenized() -> Trainer.Config:
+    """SFT config for granite-4.1-30b using pre-tokenized Arrow shards.
+
+    Requires --hf-assets-path and --dataloader.dataset-path on CLI.
+    """
+    return Trainer.Config(
+        model_spec=model_registry("30B", attn_backend="flex"),
+        optimizer=OptimizersContainer.Config(lr=1e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=100,
+            decay_ratio=0.9,
+            decay_type="linear",
+            min_lr_factor=0.1,
+        ),
+        training=TrainingConfig(
+            local_batch_size=1,
+            seq_len=8192,
+            steps=1000,
+        ),
+        dataloader=GranitePreTokenizedDataLoader.Config(dataset_path=""),
+        metrics=MetricsProcessor.Config(log_freq=10),
+        checkpoint=CheckpointManager.Config(interval=500),
+        activation_checkpoint=ActivationCheckpointConfig(mode="selective"),
+    )
+
+
+def granite_4_1_30b_sft_pretokenized_float8_filteroutput() -> Trainer.Config:
+    config = granite_4_1_30b_sft_pretokenized()
     config.model_converters = ModelConvertersContainer.Config(
         converters=[
             Float8LinearConverter.Config(

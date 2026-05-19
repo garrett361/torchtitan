@@ -12,6 +12,41 @@ from torchtitan.models.granite.model import GraniteModel, GraniteTransformerBloc
 from torchtitan.models.granite.state_dict_adapter import GraniteStateDictAdapter
 
 
+def _load_hf_state_dict(ckpt_path: str) -> dict[str, torch.Tensor]:
+    from safetensors.torch import load_file
+
+    shards = sorted(
+        glob.glob(f"{ckpt_path}/model*.safetensors")
+    ) or sorted(glob.glob(f"{ckpt_path}/*.safetensors"))
+    assert shards, f"No safetensors found in {ckpt_path}"
+    hf_sd = {}
+    for shard in shards:
+        hf_sd.update(load_file(shard, device="cpu"))
+    return hf_sd
+
+
+def _assert_roundtrip_state_dict(test_case, ckpt_path: str, config_key: str):
+    """Verify HF→TT→HF state dict round-trip is bitwise exact."""
+    config = granite_configs[config_key]()
+    adapter = GraniteStateDictAdapter(config, hf_assets_path=ckpt_path)
+    hf_sd = _load_hf_state_dict(ckpt_path)
+    tt_sd = adapter.from_hf(hf_sd)
+    roundtripped_hf_sd = adapter.to_hf(tt_sd)
+    del tt_sd
+
+    missing = set(hf_sd.keys()) - set(roundtripped_hf_sd.keys())
+    test_case.assertTrue(
+        missing == {"lm_head.weight"} or missing == set(),
+        f"Unexpected missing keys: {missing}",
+    )
+
+    for key in roundtripped_hf_sd:
+        test_case.assertTrue(
+            torch.equal(hf_sd[key], roundtripped_hf_sd[key]),
+            f"Mismatch at {key}",
+        )
+
+
 def _make_config(**overrides) -> GraniteModel.Config:
     """Start from the standard debugmodel config and apply overrides."""
     config = granite_configs["debugmodel"]()
@@ -38,11 +73,25 @@ class TestGraniteInstantiation(unittest.TestCase):
         model = GraniteModel(config)
         self.assertIsInstance(model, GraniteModel)
 
+    def test_3b_config_builds_on_meta(self):
+        config = granite_configs["3B"]()
+        with torch.device("meta"):
+            model = GraniteModel(config)
+        self.assertIsInstance(model, GraniteModel)
+        self.assertEqual(len(model.layers), 40)
+
     def test_8b_config_builds_on_meta(self):
         config = granite_configs["8B"]()
         with torch.device("meta"):
             model = GraniteModel(config)
         self.assertIsInstance(model, GraniteModel)
+
+    def test_30b_config_builds_on_meta(self):
+        config = granite_configs["30B"]()
+        with torch.device("meta"):
+            model = GraniteModel(config)
+        self.assertIsInstance(model, GraniteModel)
+        self.assertEqual(len(model.layers), 64)
 
 
 class TestGraniteForwardShape(unittest.TestCase):
@@ -168,6 +217,38 @@ class TestGraniteAttnScale(unittest.TestCase):
         expected = block_config.attention.attn_scale
         self.assertAlmostEqual(block.attention.scaling, expected, places=7)
 
+    def test_attn_scale_3b(self):
+        config = granite_configs["3B"]()
+        block_config = config.layers[0]
+        head_dim = config.dim // block_config.attention.n_heads
+        self.assertEqual(head_dim, 64)
+        self.assertAlmostEqual(
+            block_config.attention.attn_scale, 1.0 / 64, places=7
+        )
+
+    def test_attn_scale_30b(self):
+        config = granite_configs["30B"]()
+        block_config = config.layers[0]
+        head_dim = config.dim // block_config.attention.n_heads
+        self.assertEqual(head_dim, 128)
+        self.assertAlmostEqual(
+            block_config.attention.attn_scale, 1.0 / 128, places=7
+        )
+
+
+class TestGraniteConfigValues(unittest.TestCase):
+    def test_rope_theta_3b(self):
+        config = granite_configs["3B"]()
+        self.assertEqual(config.rope.theta, 10_000_000)
+
+    def test_rope_theta_8b(self):
+        config = granite_configs["8B"]()
+        self.assertEqual(config.rope.theta, 10_000_000)
+
+    def test_rope_theta_30b(self):
+        config = granite_configs["30B"]()
+        self.assertEqual(config.rope.theta, 50_000_000)
+
 
 class TestGraniteUpdateFromConfig(unittest.TestCase):
     def test_rope_max_seq_len_synced(self):
@@ -229,10 +310,10 @@ class TestGraniteRealCheckpoint(unittest.TestCase):
         from dotenv import load_dotenv
 
         load_dotenv()
-        self.ckpt_path = os.getenv("HF_ASSETS_PATH")
+        self.ckpt_path = os.getenv("HF_ASSETS_PATH_8B")
         if self.ckpt_path is None:
             raise EnvironmentError(
-                "HF_ASSETS_PATH not set. Add it to .env or export it before "
+                "HF_ASSETS_PATH_8B not set. Add it to .env or export it before "
                 "running real-checkpoint tests."
             )
 
@@ -245,7 +326,7 @@ class TestGraniteRealCheckpoint(unittest.TestCase):
         shards = sorted(glob.glob(f"{self.ckpt_path}/model*.safetensors")) or sorted(
             glob.glob(f"{self.ckpt_path}/*.safetensors")
         )
-        self.assertTrue(shards, "No safetensors found in HF_ASSETS_PATH")
+        self.assertTrue(shards, "No safetensors found in HF_ASSETS_PATH_8B")
         hf_sd = {}
         for shard in shards:
             hf_sd.update(load_file(shard, device="cpu"))
@@ -296,6 +377,175 @@ class TestGraniteRealCheckpoint(unittest.TestCase):
             tt_logits = tt_model(tokens).cpu()
 
         torch.testing.assert_close(tt_logits, hf_logits, atol=1e-4, rtol=0.0)
+
+    def test_to_hf_roundtrip_logits(self):
+        from transformers import AutoModelForCausalLM
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        tokens = torch.arange(1, 9, dtype=torch.long).unsqueeze(0).to(device)
+
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            self.ckpt_path, torch_dtype=torch.float32
+        )
+        hf_model.to(device).eval()
+        with torch.no_grad():
+            original_logits = hf_model(tokens).logits.cpu()
+        hf_sd = hf_model.state_dict()
+        del hf_model
+        if device == "cuda":
+            torch.cuda.empty_cache()
+
+        config = granite_configs["8B"]()
+        adapter = GraniteStateDictAdapter(config, hf_assets_path=self.ckpt_path)
+        tt_sd = adapter.from_hf(hf_sd)
+        del hf_sd
+        roundtripped_hf_sd = adapter.to_hf(tt_sd)
+        del tt_sd
+
+        hf_model2 = AutoModelForCausalLM.from_pretrained(
+            self.ckpt_path, torch_dtype=torch.float32, low_cpu_mem_usage=True
+        )
+        hf_model2.load_state_dict(roundtripped_hf_sd, strict=False)
+        del roundtripped_hf_sd
+        hf_model2.to(device).eval()
+        with torch.no_grad():
+            roundtripped_logits = hf_model2(tokens).logits.cpu()
+
+        torch.testing.assert_close(
+            roundtripped_logits, original_logits, atol=1e-4, rtol=0.0
+        )
+
+    def test_to_hf_roundtrip_state_dict(self):
+        _assert_roundtrip_state_dict(self, self.ckpt_path, "8B")
+
+
+class TestGranite3BRealCheckpoint(unittest.TestCase):
+    def setUp(self):
+        from dotenv import load_dotenv
+
+        load_dotenv()
+        self.ckpt_path = os.getenv("HF_ASSETS_PATH_3B")
+        if self.ckpt_path is None:
+            raise EnvironmentError(
+                "HF_ASSETS_PATH_3B not set. Add it to .env or export it before "
+                "running 3B real-checkpoint tests."
+            )
+
+    def test_hf_checkpoint_loads_finite_loss(self):
+        from safetensors.torch import load_file
+
+        config = granite_configs["3B"]()
+        adapter = GraniteStateDictAdapter(config, hf_assets_path=self.ckpt_path)
+
+        shards = sorted(glob.glob(f"{self.ckpt_path}/model*.safetensors")) or sorted(
+            glob.glob(f"{self.ckpt_path}/*.safetensors")
+        )
+        self.assertTrue(shards, "No safetensors found in HF_ASSETS_PATH_3B")
+        hf_sd = {}
+        for shard in shards:
+            hf_sd.update(load_file(shard, device="cpu"))
+
+        tt_sd = adapter.from_hf(hf_sd)
+
+        with torch.device("cpu"):
+            model = GraniteModel(config)
+        model.to_empty(device="cpu")
+        model.init_states()
+        model.load_state_dict(tt_sd, strict=True)
+        model.eval()
+
+        tokens = torch.randint(0, config.vocab_size, (1, 16))
+        with torch.no_grad():
+            out = model(tokens)
+        self.assertEqual(out.shape, (1, 16, config.vocab_size))
+        self.assertFalse(torch.any(torch.isnan(out)))
+        self.assertFalse(torch.any(torch.isinf(out)))
+
+    def test_logits_match_hf(self):
+        from transformers import AutoModelForCausalLM
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        tokens = torch.arange(1, 9, dtype=torch.long).unsqueeze(0).to(device)
+
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            self.ckpt_path, torch_dtype=torch.float32
+        )
+        hf_sd = hf_model.state_dict()
+        hf_model.to(device).eval()
+        with torch.no_grad():
+            hf_logits = hf_model(tokens).logits.cpu()
+        del hf_model
+        if device == "cuda":
+            torch.cuda.empty_cache()
+
+        config = granite_configs["3B"]()
+        adapter = GraniteStateDictAdapter(config, hf_assets_path=self.ckpt_path)
+        tt_sd = adapter.from_hf(hf_sd)
+
+        tt_model = GraniteModel(config)
+        tt_model.init_states()
+        tt_model.load_state_dict(tt_sd, strict=True)
+        tt_model.to(device=device).eval()
+        with torch.no_grad():
+            tt_logits = tt_model(tokens).cpu()
+
+        torch.testing.assert_close(tt_logits, hf_logits, atol=1e-4, rtol=0.0)
+
+    def test_to_hf_roundtrip_logits(self):
+        from transformers import AutoModelForCausalLM
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        tokens = torch.arange(1, 9, dtype=torch.long).unsqueeze(0).to(device)
+
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            self.ckpt_path, torch_dtype=torch.float32, low_cpu_mem_usage=True
+        )
+        hf_model.to(device).eval()
+        with torch.no_grad():
+            original_logits = hf_model(tokens).logits.cpu()
+        hf_sd = hf_model.state_dict()
+        del hf_model
+        if device == "cuda":
+            torch.cuda.empty_cache()
+
+        config = granite_configs["3B"]()
+        adapter = GraniteStateDictAdapter(config, hf_assets_path=self.ckpt_path)
+        tt_sd = adapter.from_hf(hf_sd)
+        del hf_sd
+        roundtripped_hf_sd = adapter.to_hf(tt_sd)
+        del tt_sd
+
+        hf_model2 = AutoModelForCausalLM.from_pretrained(
+            self.ckpt_path, torch_dtype=torch.float32, low_cpu_mem_usage=True
+        )
+        hf_model2.load_state_dict(roundtripped_hf_sd, strict=False)
+        del roundtripped_hf_sd
+        hf_model2.to(device).eval()
+        with torch.no_grad():
+            roundtripped_logits = hf_model2(tokens).logits.cpu()
+
+        torch.testing.assert_close(
+            roundtripped_logits, original_logits, atol=1e-4, rtol=0.0
+        )
+
+    def test_to_hf_roundtrip_state_dict(self):
+        _assert_roundtrip_state_dict(self, self.ckpt_path, "3B")
+
+
+class TestGranite30BRealCheckpoint(unittest.TestCase):
+    def setUp(self):
+        from dotenv import load_dotenv
+
+        load_dotenv()
+        self.ckpt_path = os.getenv("HF_ASSETS_PATH_30B")
+        if self.ckpt_path is None:
+            raise EnvironmentError(
+                "HF_ASSETS_PATH_30B not set. Add it to .env or export it before "
+                "running 30B real-checkpoint tests."
+            )
+
+    def test_to_hf_roundtrip_state_dict(self):
+        _assert_roundtrip_state_dict(self, self.ckpt_path, "30B")
 
 
 class TestGraniteRoPEBuffer(unittest.TestCase):
@@ -381,10 +631,10 @@ class TestGraniteRoPEAgreement(unittest.TestCase):
         from dotenv import load_dotenv
 
         load_dotenv()
-        self.ckpt_path = os.getenv("HF_ASSETS_PATH")
+        self.ckpt_path = os.getenv("HF_ASSETS_PATH_8B")
         if self.ckpt_path is None:
             raise EnvironmentError(
-                "HF_ASSETS_PATH not set. Add it to .env or export it before "
+                "HF_ASSETS_PATH_8B not set. Add it to .env or export it before "
                 "running RoPE agreement tests."
             )
 
