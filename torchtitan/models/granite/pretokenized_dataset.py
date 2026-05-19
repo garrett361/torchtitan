@@ -19,7 +19,6 @@ Selection mode (longest, buffer_shuffle) is a constructor parameter.
 import bisect
 import json
 from abc import abstractmethod
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, cast
@@ -135,7 +134,7 @@ def _load_and_merge_manifests(
 # Selection functions
 # ---------------------------------------------------------------------------
 
-SelectFn = Callable[["PreTokenizedDataset", int], int]
+_PACKING_MODES = {"longest", "buffer_shuffle", "attn_balanced"}
 
 
 def _select_buffer_shuffle(dataset: "PreTokenizedDataset", remaining: int) -> int:
@@ -152,10 +151,34 @@ def _select_longest(dataset: "PreTokenizedDataset", remaining: int) -> int:
     return idx if idx >= 0 else -1
 
 
-_SELECT_FNS: dict[str, SelectFn] = {
-    "longest": _select_longest,
-    "buffer_shuffle": _select_buffer_shuffle,
-}
+def _select_attn_balanced(
+    dataset: "PreTokenizedDataset", remaining: int, deficit: int
+) -> tuple[int, int]:
+    """Select buffer item to equalize attention cost across DP ranks.
+
+    The caller identifies the rank with the lowest accumulated attention cost
+    and computes its deficit: max_rank_cost - this_rank_cost. We pick the item
+    whose attention cost is closest to that deficit, bringing the cheapest rank
+    toward parity with the most expensive one.
+
+    Returns (idx, cost) or (-1, 0) if nothing fits.
+    """
+    max_idx = bisect.bisect_right(dataset._lengths, remaining) - 1
+    if max_idx < 0:
+        return -1, 0
+
+    best_idx = -1
+    best_cost = 0
+    best_distance = float("inf")
+    for i in range(max_idx + 1):
+        cost = dataset._costs[i]
+        distance = abs(cost - deficit)
+        if distance < best_distance:
+            best_distance = distance
+            best_idx = i
+            best_cost = cost
+
+    return best_idx, best_cost
 
 
 # ---------------------------------------------------------------------------
@@ -171,15 +194,17 @@ class PreTokenizedDataset(IterableDataset, Stateful):
     (_item_from_arrow, _new_batch, _place_item, _pad_and_flush).
 
     Cross-rank packing: all DP ranks read from the same global data stream.
-    Each packing step forms dp_world_size batches simultaneously via LPT
-    (longest-processing-time) assignment: seed with oldest items, fill by
-    selecting items and assigning to the batch with lowest accumulated L² cost.
-    Each rank yields only its assigned batch. No cross-rank communication —
-    determinism is guaranteed by identical input order + identical logic.
+    Each packing step forms dp_world_size batches simultaneously: seed with
+    oldest items, fill by selecting items and assigning to batches using exact
+    attention cost for balancing. Each rank yields only its assigned batch.
+    No cross-rank communication — determinism is guaranteed by identical input
+    order + identical logic.
 
-    Packing mode controls item selection during the fill phase:
-    - "longest": pick longest fitting item (deterministic, no RNG).
-    - "buffer_shuffle": pick random fitting item (uses deterministic RNG).
+    Packing modes:
+    - "longest": pick longest fitting item, assign to cheapest rank.
+    - "buffer_shuffle": pick random fitting item, assign to cheapest rank.
+    - "attn_balanced": pick cheapest rank, select item to close attention
+      cost gap with the most expensive rank.
     """
 
     def __init__(
@@ -198,9 +223,9 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         _full_dataset: Dataset | None = None,
         _dataset_id: str | None = None,
     ) -> None:
-        if packing not in _SELECT_FNS:
+        if packing not in _PACKING_MODES:
             raise ValueError(
-                f"Unknown packing mode: {packing!r}. Supported: {sorted(_SELECT_FNS)}"
+                f"Unknown packing mode: {packing!r}. Supported: {sorted(_PACKING_MODES)}"
             )
 
         manifest_path = Path(manifest_path)
@@ -227,7 +252,6 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         self.infinite = infinite
 
         self._packing = packing
-        self._select_fn: SelectFn = _SELECT_FNS[packing]
         self._buffer_size = buffer_size
 
         self._sample_idx: int = 0
@@ -239,6 +263,7 @@ class PreTokenizedDataset(IterableDataset, Stateful):
 
         self._buffer: list = []
         self._lengths: list[int] = []
+        self._costs: list[int] = []
         self._ages: list[int] = []
         self._age_counter: int = 0
         self._batch_rng = np.random.default_rng(42)
@@ -300,12 +325,14 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         idx = bisect.bisect_right(self._lengths, item_len)
         self._buffer.insert(idx, item)
         self._lengths.insert(idx, item_len)
+        self._costs.insert(idx, self._item_cost(item))
         self._ages.insert(idx, self._age_counter)
         self._age_counter += 1
 
     def _remove_at(self, idx: int) -> None:
         del self._buffer[idx]
         del self._lengths[idx]
+        del self._costs[idx]
         del self._ages[idx]
 
     def _log_first_sample(self, input_ids: list[int], label_ids: list[int]) -> None:
@@ -446,36 +473,97 @@ class PreTokenizedDataset(IterableDataset, Stateful):
                 batch_remaining[r] -= len(seed.input_ids)
                 batch_cost[r] += self._item_cost(seed)
 
-            # Fill loop: pick items via selection fn, assign to cheapest batch
-            while True:
-                max_remaining = max(batch_remaining)
-                if max_remaining <= 0:
-                    break
-
-                idx = self._select_fn(self, max_remaining)
-                if idx == -1:
-                    break
-
-                item = self._buffer[idx]
-                item_len = len(item.input_ids)
-
-                # Assign to batch with lowest cost that can fit this item
-                best_rank = -1
-                best_cost = float("inf")
-                for r in range(dp):
-                    if batch_remaining[r] >= item_len and batch_cost[r] < best_cost:
-                        best_cost = batch_cost[r]
-                        best_rank = r
-
-                self._remove_at(idx)
-                self._place_item(batches[best_rank], item)
-                batch_remaining[best_rank] -= item_len
-                batch_cost[best_rank] += self._item_cost(item)
-
-                if not self._buffer:
-                    self._refill_buffer()
+            if self._packing == "attn_balanced":
+                self._fill_attn_balanced(batches, batch_remaining, batch_cost, dp)
+            else:
+                self._fill_default(batches, batch_remaining, batch_cost, dp)
 
             yield self._pad_and_flush(batches[self._dp_rank])
+
+    def _fill_default(
+        self,
+        batches: list[dict],
+        batch_remaining: list[int],
+        batch_cost: list[int],
+        dp: int,
+    ) -> None:
+        """Fill loop for longest/buffer_shuffle: pick item, assign to cheapest rank."""
+        select = (
+            _select_longest if self._packing == "longest"
+            else _select_buffer_shuffle
+        )
+        while True:
+            max_remaining = max(batch_remaining)
+            if max_remaining <= 0:
+                break
+
+            idx = select(self, max_remaining)
+            if idx == -1:
+                break
+
+            item = self._buffer[idx]
+            item_len = len(item.input_ids)
+            item_cost = self._costs[idx]
+
+            best_rank = -1
+            best_cost = float("inf")
+            for r in range(dp):
+                if batch_remaining[r] >= item_len and batch_cost[r] < best_cost:
+                    best_cost = batch_cost[r]
+                    best_rank = r
+
+            self._remove_at(idx)
+            self._place_item(batches[best_rank], item)
+            batch_remaining[best_rank] -= item_len
+            batch_cost[best_rank] += item_cost
+
+            if not self._buffer:
+                self._refill_buffer()
+
+    def _fill_attn_balanced(
+        self,
+        batches: list[dict],
+        batch_remaining: list[int],
+        batch_cost: list[int],
+        dp: int,
+    ) -> None:
+        """Fill loop for attn_balanced: pick cheapest rank, select item to close gap."""
+        while True:
+            if not self._buffer:
+                self._refill_buffer()
+                if not self._buffer:
+                    break
+
+            best_rank = -1
+            best_cost_val = float("inf")
+            for r in range(dp):
+                if batch_remaining[r] > 0 and batch_cost[r] < best_cost_val:
+                    best_cost_val = batch_cost[r]
+                    best_rank = r
+            if best_rank == -1:
+                break
+
+            remaining = batch_remaining[best_rank]
+            deficit = max(batch_cost) - batch_cost[best_rank]
+
+            if deficit == 0:
+                # Ranks are tied — random pick avoids degenerate selection
+                idx = _select_buffer_shuffle(self, remaining)
+                if idx == -1:
+                    batch_remaining[best_rank] = 0
+                    continue
+                item_cost = self._costs[idx]
+            else:
+                idx, item_cost = _select_attn_balanced(self, remaining, deficit)
+                if idx == -1:
+                    batch_remaining[best_rank] = 0
+                    continue
+
+            item = self._buffer[idx]
+            self._remove_at(idx)
+            self._place_item(batches[best_rank], item)
+            batch_remaining[best_rank] -= len(item.input_ids)
+            batch_cost[best_rank] += item_cost
 
     def __iter__(self):
         self._prepare_iter()
@@ -512,6 +600,7 @@ class PreTokenizedDataset(IterableDataset, Stateful):
             self._buffer = [self._buffer[i] for i in order]
             self._lengths = [self._lengths[i] for i in order]
             self._ages = [self._ages[i] for i in order]
+            self._costs = [self._item_cost(item) for item in self._buffer]
 
 
 # ---------------------------------------------------------------------------
@@ -783,10 +872,12 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         infinite: bool = True
         """Loop the dataset indefinitely."""
 
-        packing: Literal["longest", "buffer_shuffle"] = "longest"
+        packing: Literal["longest", "buffer_shuffle", "attn_balanced"] = "buffer_shuffle"
         """Packing algorithm. 'longest' picks longest fitting item from buffer
         (deterministic, ~99.9% efficiency at 128k seq_len). 'buffer_shuffle'
-        picks random fitting item (deterministic RNG across ranks)."""
+        picks random fitting item (deterministic RNG across ranks).
+        'attn_balanced' targets cross-rank attention cost balance by selecting
+        items that close the gap between cheapest and most expensive rank."""
 
         buffer_size: int = 512
         """Number of examples held in the lookahead buffer (per worker)."""

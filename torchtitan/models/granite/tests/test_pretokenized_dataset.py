@@ -614,5 +614,309 @@ class TestCrossRankLPT(unittest.TestCase):
             self.assertTrue(b1[0]["input"].equal(b2[0]["input"]))
 
 
+class TestItemCost(unittest.TestCase):
+    """Tests for _item_cost: exact attention cost computation."""
+
+    def test_standard_triangular(self):
+        """StandardPackingDataset._item_cost returns n*(n+1)//2."""
+        import numpy as np
+
+        from torchtitan.models.granite.pretokenized_dataset import _ChatItem
+
+        ds = _build_dataset(packing="longest")
+        for n, expected in [(1, 1), (4, 10), (8, 36), (16, 136)]:
+            item = _ChatItem(
+                np.arange(n, dtype=np.int32), np.zeros(n, dtype=np.int32)
+            )
+            self.assertEqual(ds._item_cost(item), expected)
+
+    def test_backbone_suffix_no_suffixes(self):
+        """With no suffixes, BackboneSuffixDataset._item_cost equals triangular."""
+        from torchtitan.models.granite.pretokenized_dataset import (
+            BackboneSuffixDataset,
+            _BackboneSuffixItem,
+        )
+
+        ds = _build_backbone_suffix_dataset()
+        item = _BackboneSuffixItem([0] * 6, [0] * 6, list(range(6)), [], [])
+        self.assertEqual(ds._item_cost(item), 21)
+
+    def test_backbone_suffix_known_structure(self):
+        """Verify cost for B=4, one suffix of length 3, ins_limit=2.
+
+        backbone self: 4*5//2 = 10
+        suffix self:   3*4//2 = 6
+        suffix→backbone: 3*(2+1) = 9
+        total: 25
+        """
+        from torchtitan.models.granite.pretokenized_dataset import (
+            BackboneSuffixDataset,
+            _BackboneSuffixItem,
+        )
+
+        ds = _build_backbone_suffix_dataset()
+        item = _BackboneSuffixItem(
+            [0] * 7, [0] * 7, list(range(7)),
+            suffix_starts=[4], insertion_limits=[2],
+        )
+        self.assertEqual(ds._item_cost(item), 25)
+
+    def test_backbone_suffix_multiple_suffixes(self):
+        """Verify cost with B=3, two suffixes S1=2 (ins=1), S2=2 (ins=2).
+
+        backbone self: 3*4//2 = 6
+        S1 self: 2*3//2 = 3, S1→backbone: 2*(1+1) = 4
+        S2 self: 2*3//2 = 3, S2→backbone: 2*(2+1) = 6
+        total: 22
+        """
+        from torchtitan.models.granite.pretokenized_dataset import (
+            BackboneSuffixDataset,
+            _BackboneSuffixItem,
+        )
+
+        ds = _build_backbone_suffix_dataset()
+        item = _BackboneSuffixItem(
+            [0] * 7, [0] * 7, list(range(7)),
+            suffix_starts=[3, 5], insertion_limits=[1, 2],
+        )
+        self.assertEqual(ds._item_cost(item), 22)
+
+
+class TestSelectAttnBalanced(unittest.TestCase):
+    """Tests for _select_attn_balanced selection contract."""
+
+    def _make_ds_with_buffer(self, lengths):
+        import numpy as np
+
+        from torchtitan.models.granite.pretokenized_dataset import _ChatItem
+
+        ds = _build_dataset(packing="attn_balanced", buffer_size=len(lengths))
+        ds._buffer = []
+        ds._lengths = []
+        ds._costs = []
+        ds._ages = []
+        ds._age_counter = 0
+        for length in lengths:
+            item = _ChatItem(
+                np.arange(length, dtype=np.int32),
+                np.zeros(length, dtype=np.int32),
+            )
+            ds._insert_item(item)
+        return ds
+
+    def test_returns_neg1_when_nothing_fits(self):
+        from torchtitan.models.granite.pretokenized_dataset import (
+            _select_attn_balanced,
+        )
+
+        ds = self._make_ds_with_buffer([3, 5, 8])
+        idx, cost = _select_attn_balanced(ds, remaining=0, deficit=100)
+        self.assertEqual(idx, -1)
+
+    def test_selects_closest_to_deficit(self):
+        """Picks item whose cost is closest to the deficit."""
+        from torchtitan.models.granite.pretokenized_dataset import (
+            _select_attn_balanced,
+        )
+
+        ds = self._make_ds_with_buffer([3, 5, 8])
+        # costs: 3→6, 5→15, 8→36
+        # deficit=14 → closest is 15 (length 5)
+        idx, cost = _select_attn_balanced(ds, remaining=10, deficit=14)
+        self.assertEqual(cost, 15)
+
+    def test_respects_remaining_constraint(self):
+        """Items exceeding remaining are excluded even if cost matches better."""
+        from torchtitan.models.granite.pretokenized_dataset import (
+            _select_attn_balanced,
+        )
+
+        ds = self._make_ds_with_buffer([3, 8])
+        # costs: 3→6, 8→36
+        # deficit=35 prefers cost=36 (len=8), but remaining=4 excludes it
+        idx, cost = _select_attn_balanced(ds, remaining=4, deficit=35)
+        self.assertEqual(cost, 6)
+
+    def test_exact_match(self):
+        """When an item's cost exactly matches deficit, picks it."""
+        from torchtitan.models.granite.pretokenized_dataset import (
+            _select_attn_balanced,
+        )
+
+        ds = self._make_ds_with_buffer([3, 5, 8])
+        # cost of len=5 is 15
+        idx, cost = _select_attn_balanced(ds, remaining=10, deficit=15)
+        self.assertEqual(cost, 15)
+
+
+class TestAttnBalancedPacking(unittest.TestCase):
+    """Integration tests for attn_balanced packing mode."""
+
+    def _build_for_rank(self, dp_rank, dp_world_size=2, **kwargs):
+        with open(MANIFEST_PATH) as f:
+            manifest = json.load(f)
+        defaults = dict(
+            manifest_path=MANIFEST_PATH,
+            seq_len=16,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            infinite=False,
+            _manifest=manifest,
+            packing="attn_balanced",
+            buffer_size=6,
+        )
+        defaults.update(kwargs)
+        return StandardPackingDataset(**defaults)
+
+    def test_all_items_consumed_across_ranks(self):
+        """Items are not duplicated; at most dp-1 dropped as remainder."""
+        from torchtitan.models.granite.pretokenized_dataset import (
+            _load_manifest,
+            _load_shards,
+        )
+
+        dp = 2
+        ds0 = self._build_for_rank(dp_rank=0, dp_world_size=dp)
+        ds1 = self._build_for_rank(dp_rank=1, dp_world_size=dp)
+
+        def extract_packed_examples(ds):
+            examples = []
+            for inp, lbl, stats in ds:
+                n = stats["n_total_tokens"]
+                positions = inp["positions"][:n].tolist()
+                tokens = inp["input"][:n].tolist()
+                start = 0
+                for i in range(1, len(positions)):
+                    if positions[i] != positions[i - 1] + 1:
+                        examples.append(tuple(tokens[start:i]))
+                        start = i
+                examples.append(tuple(tokens[start:]))
+            return examples
+
+        examples_0 = extract_packed_examples(ds0)
+        examples_1 = extract_packed_examples(ds1)
+        all_examples = sorted(examples_0 + examples_1)
+
+        full_manifest = _load_manifest(MANIFEST_PATH)
+        shards_dir = MANIFEST_PATH.parent / "shards"
+        full_ds = _load_shards(full_manifest, shards_dir)
+        expected_examples = sorted(
+            tuple(full_ds[i]["input_ids"]) for i in range(len(full_ds))
+        )
+
+        # No duplicates
+        self.assertEqual(len(all_examples), len(set(all_examples)))
+        # All emitted items come from the source dataset
+        for ex in all_examples:
+            self.assertIn(ex, expected_examples)
+        # At most dp-1 items dropped as remainder at epoch end
+        dropped = len(expected_examples) - len(all_examples)
+        self.assertLessEqual(dropped, dp - 1)
+        self.assertGreaterEqual(dropped, 0)
+
+    def test_cross_rank_determinism(self):
+        """Independent instantiations produce identical assignment decisions."""
+        ds0 = self._build_for_rank(dp_rank=0, dp_world_size=2)
+        ds1 = self._build_for_rank(dp_rank=1, dp_world_size=2)
+
+        batches_0 = [(inp["input"].clone(), lbl.clone()) for inp, lbl, _ in ds0]
+        batches_1 = [(inp["input"].clone(), lbl.clone()) for inp, lbl, _ in ds1]
+
+        self.assertEqual(len(batches_0), len(batches_1))
+        self.assertGreater(len(batches_0), 0)
+
+        # Ranks should get different slices
+        any_different = any(
+            not b0[0].equal(b1[0]) for b0, b1 in zip(batches_0, batches_1)
+        )
+        self.assertTrue(any_different, "Ranks should get different batch slices")
+
+    def test_rank_stall_does_not_starve_others(self):
+        """When one rank fills early, others continue packing."""
+        # With seq_len=16 and items of sizes 4-8, one rank can fill to near
+        # capacity. The other rank should still receive items.
+        ds0 = self._build_for_rank(dp_rank=0, dp_world_size=2)
+        ds1 = self._build_for_rank(dp_rank=1, dp_world_size=2)
+
+        batches_0 = list(ds0)
+        batches_1 = list(ds1)
+
+        # Both ranks should produce non-empty batches with reasonable packing
+        for inp, lbl, stats in batches_0 + batches_1:
+            self.assertGreater(stats["n_total_tokens"], 0)
+
+    def test_dp1_produces_valid_output(self):
+        """dp_world_size=1 works (deficit always 0, random fallback)."""
+        ds = self._build_for_rank(dp_rank=0, dp_world_size=1)
+        batches = list(ds)
+        self.assertGreater(len(batches), 0)
+        for inp, lbl, stats in batches:
+            self.assertEqual(inp["input"].shape[0], 16)
+            self.assertGreater(stats["n_total_tokens"], 0)
+
+    def test_checkpoint_resume(self):
+        """Resume from checkpoint produces identical sequence."""
+        ds1 = self._build_for_rank(dp_rank=0, dp_world_size=2, infinite=True)
+        it1 = iter(ds1)
+        next(it1)
+        next(it1)
+
+        state = ds1.state_dict()
+
+        ds2 = self._build_for_rank(dp_rank=0, dp_world_size=2, infinite=True)
+        ds2.load_state_dict(state)
+
+        remaining1 = [next(it1) for _ in range(3)]
+        remaining2 = [b for b, _ in zip(ds2, range(3))]
+
+        for b1, b2 in zip(remaining1, remaining2):
+            self.assertTrue(b1[0]["input"].equal(b2[0]["input"]))
+
+
+def _build_backbone_suffix_dataset(seq_len=16, buffer_size=6):
+    """Helper to build a BackboneSuffixDataset for _item_cost tests."""
+    import json
+    import tempfile
+
+    import numpy as np
+    from datasets import Dataset
+
+    from torchtitan.models.granite.pretokenized_dataset import BackboneSuffixDataset
+
+    manifest = {
+        "strategy": "backbone_suffix",
+        "tokenizer": {"eos_token_id": 0},
+        "shards": {"completed": []},
+        "stats": {"total_examples": 0},
+    }
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+    json.dump(manifest, tmp)
+    tmp.close()
+
+    empty_ds = Dataset.from_dict({
+        "input_ids": [[]],
+        "labels": [[]],
+        "positions": [[]],
+        "suffix_starts": [[]],
+        "insertion_limits": [[]],
+        "n_tokens": [0],
+    })
+
+    try:
+        return BackboneSuffixDataset(
+            manifest_path=tmp.name,
+            seq_len=seq_len,
+            dp_rank=0,
+            dp_world_size=1,
+            infinite=False,
+            _manifest=manifest,
+            _full_dataset=empty_ds,
+            packing="attn_balanced",
+            buffer_size=buffer_size,
+        )
+    finally:
+        os.unlink(tmp.name)
+
+
 if __name__ == "__main__":
     unittest.main()
