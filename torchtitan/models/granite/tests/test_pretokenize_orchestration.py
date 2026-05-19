@@ -333,5 +333,54 @@ class TestCompletedStemsSkipsExisting(unittest.TestCase):
             self.assertEqual(_completed_stems(shards_dir), set())
 
 
+class TestTotalTrainedTokensStats(unittest.TestCase):
+    def test_total_trained_tokens_matches_label_count(self):
+        """Verify total_trained_tokens stat counts non-IGNORE_INDEX labels correctly.
+
+        This exercises the pc.list_flatten path that replaced the overflow-prone
+        combine_chunks().flatten() call.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_dir = tmp_path / "input"
+            input_dir.mkdir()
+            output_dir = tmp_path / "output"
+            output_dir.mkdir()
+
+            samples = [_valid_sample() for _ in range(5)]
+            jsonl_path = input_dir / "data.jsonl"
+            _write_jsonl(jsonl_path, samples)
+
+            strategy = TruncateLastStrategy(
+                _TEST_TOKENIZER_PATH,
+                failures_path=str(output_dir / "failures.jsonl"),
+            )
+
+            _process_file(
+                jsonl_path,
+                output_dir,
+                strategy,
+                shard_stem="data",
+                input_dir=input_dir,
+                num_cpus=1,
+                batch_size=10,
+                rank=0,
+            )
+
+            shards_dir = output_dir / "shards"
+            stats_path = shards_dir / "data_stats.json"
+            self.assertTrue(stats_path.exists())
+
+            with open(stats_path) as f:
+                stats = json.load(f)
+
+            ds = load_from_disk(str(shards_dir / "data"))
+            expected_trained = sum(
+                sum(1 for lbl in row if lbl != -100) for row in ds["labels"]
+            )
+            self.assertEqual(stats["total_trained_tokens"], expected_trained)
+            self.assertGreater(expected_trained, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

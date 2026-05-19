@@ -226,7 +226,7 @@ def _tokenize_file(
     n_examples = len(ds)
     n_tokens_arr = np.array(ds["n_tokens"], dtype=np.int64)
     total_tokens = int(n_tokens_arr.sum())
-    labels_flat = ds.data.column("labels").combine_chunks().flatten()
+    labels_flat = pc.list_flatten(ds.data.column("labels"))
     total_trained = int(pc.sum(pc.not_equal(labels_flat, -100)).as_py())
 
     stats: dict[str, Any] = {
