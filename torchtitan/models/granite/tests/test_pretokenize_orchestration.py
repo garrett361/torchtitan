@@ -10,6 +10,7 @@ from pathlib import Path
 from datasets import load_from_disk
 
 from torchtitan.models.granite.scripts.pretokenize_sft import (
+    _RUN_CONFIG_FILENAME,
     _completed_stems,
     _process_file,
     _shard_stem,
@@ -185,14 +186,23 @@ class TestNestedDirStructureEndToEnd(unittest.TestCase):
             # Output dir is nested inside input dir (realistic scenario)
             output_dir = input_dir / "pretok_test"
             output_dir.mkdir()
-            # failures.jsonl should be excluded from discovery
             _write_jsonl(output_dir / "failures.jsonl", [{"error": "test"}])
 
-            # File discovery with output_dir exclusion
+            # Sibling pretok dir from a prior run (has _RUN_CONFIG_FILENAME marker)
+            prior_dir = input_dir / "pretok_prior"
+            prior_dir.mkdir()
+            _write_jsonl(prior_dir / "failures.jsonl", [{"error": "old"}])
+            (prior_dir / _RUN_CONFIG_FILENAME).write_text("{}")
+
+            # File discovery excludes current output_dir AND prior pretok dirs
+            pretok_dirs = {
+                p.parent for p in input_dir.rglob(_RUN_CONFIG_FILENAME)
+            }
+            pretok_dirs.add(output_dir)
             input_files = sorted(
                 f
                 for f in input_dir.rglob("*.jsonl")
-                if not f.is_relative_to(output_dir)
+                if not any(f.is_relative_to(d) for d in pretok_dirs)
             )
 
             self.assertEqual(len(input_files), 2)
