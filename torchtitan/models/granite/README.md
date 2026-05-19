@@ -16,6 +16,7 @@ The naive `truncate_history_thinking=True` strategy. Schematically, with these s
 # Post chat-template with truncate_history_thinking=True.
 # This is what the model sees.
 [usr_0, ast_0, usr_1, ast_1, usr_2, reas_2, ast_2]
+                                    |--- loss ---|
 ```
 Historical thinking traces are removed.
 
@@ -38,6 +39,7 @@ Uses `truncate_history_thinking=False` and all assistant turns that have `reason
 # Post chat-template with truncate_history_thinking=False
 # This is what the model sees.
 [usr_0, reas_0, ast_0, usr_1, reas_1, ast_1, usr_2, reas_2, ast_2]
+        |--- loss ---|        |--- loss ---|       |--- loss ---|
 ```
 
 **Loss masking rules:**
@@ -52,6 +54,30 @@ Uses `truncate_history_thinking=False` and all assistant turns that have `reason
 **Trade-offs vs other strategies:**
 - vs `truncate_last`: sequences are longer (thinking not stripped from history), more assistant turns contribute training signal, but fewer examples fit per packed sequence
 - vs `backbone_suffix`: simpler (no flex attention needed), but historical thinking occupies regular sequence positions and competes with training content for seq_len budget
+
+### TruncateEveryTurnStrategy
+
+Decomposes an N-assistant-turn conversation into N independent examples — one per assistant turn. Each is the conversation truncated to that turn with `truncate_history_thinking=True`. Labels only on the final turn of each example. Each example represents what the model would see at inference time, assuming `truncate_history_thinking=True`. Also serves as a simple baseline for BackboneSuffixStrategy: identical per-turn training signal, no flex attention, at the cost of redundant context tokens across examples.
+
+```
+# Raw convo:
+[usr_0, reas_0, ast_0, usr_1, reas_1, ast_1, usr_2, reas_2, ast_2]
+
+# Produces 3 independent examples:
+
+# Example 0:  [usr_0, reas_0, ast_0]
+                      |--- loss ---|
+
+# Example 1:  [usr_0, ast_0, usr_1, reas_1, ast_1]
+                                    |--- loss ---|
+
+# Example 2:  [usr_0, ast_0, usr_1, ast_1, usr_2, reas_2, ast_2]
+                                                  |--- loss ---|
+```
+
+Note how examples 1 and 2 repeat the backbone context that BackboneSuffixStrategy shares in a single packed sequence.
+
+**Trailing non-assistant turns** handled identically to `TruncateLastStrategy`.
 
 ### BackboneSuffixStrategy
 
@@ -82,6 +108,7 @@ A naive way to include all of this data is to break an `n`-turn conversation int
 # Packed convo:
 [usr_0, ast_0, usr_1, ast_1, usr_2, reas_2, ast_2, reas_0, ast_0, reas_1, ast_1]
  | ----------        Backbone        ---------- |  | ------    Suffix  ------ |
+                                    |------------------ loss ------------------|
 ```
 Using attention masks, we can process the above in a single forward pass (avoiding multiple, redundant passes over shared context) while preserving strict equality with the naive `n`-example strategy for the `ast_x` logit computations (up to numerics). The initial series of `usr/ast` turns is the "backbone" and the following reasoning/ast pairs are the "suffix". Note that the backbone matches the naive `truncate_history_thinking=True` processing of the full sequence. (Tool calling is also handled, but not explained in this schematic.)
 
@@ -108,31 +135,37 @@ python -m torchtitan.models.granite.scripts.pretokenize_sft \
     --tokenizer-path /path/to/tokenizer/ \
     --strategy truncate_last
 
-# Multi-node (each node processes a disjoint subset of shards)
+# Multi-node (each node processes a disjoint subset of files)
 python -m ... --rank 0 --world-size 4
 ```
 
-Resumable and idempotent. Each JSONL file becomes one Arrow shard under
-`output_dir/shards/`. The last rank to finish writes `manifest.json`.
+**Two-phase pipeline:**
+
+1. **Tokenization** — each rank processes its statically assigned files (`input_files[rank::world_size]`). Each JSONL file becomes one Arrow shard. Crash-safe: errors write stats files so the barrier always resolves.
+2. **Global shuffle** — all ranks deterministically re-shard into fixed-size `shard_XXXX` Arrow files for uniform I/O. Atomic swap prevents partial output.
+
+Resumable and idempotent — presence of `*_stats.json` marks a file as done. Recursive discovery (`rglob("*.jsonl")`) supports nested input directories; output paths are flattened with `__` separators (e.g. `sub_a/train.jsonl` → `sub_a__train`). Prior pretok output directories (identified by `run_config.json`) are automatically excluded from discovery.
+
+#### `split_jsonl.sh` — pre-processing utility
+
+Splits large JSONL files into ~1 GiB chunks at line boundaries. More files means better multi-rank parallelism during tokenization.
 
 ### Online: `GranitePreTokenizedDataLoader`
 
-Reads `manifest.json` and packs examples into fixed-length sequences.
+Reads `manifest.json` and packs examples into fixed-length sequences using cross-rank LPT (Longest Processing Time) packing. All DP ranks jointly form `dp_world_size` batches per step from a shared global data stream, using Arrow-native batch reads for throughput.
 
 | Config field | Default | Description |
 |---|---|---|
-| `manifest_path` | (required) | Path to `manifest.json` |
-| `packing` | `"buffer"` | `"buffer"` (~99.9% efficiency at 128k) or `"greedy"` (~86%) |
-| `buffer_size` | `64` | Lookahead buffer per worker (buffer packing only) |
+| `dataset_path` | (required) | Directory (or comma-separated dirs) containing `manifest.json` |
+| `packing` | `"buffer_shuffle"` | `"longest"`, `"buffer_shuffle"`, or `"attn_balanced"` |
+| `buffer_size` | `512` | Lookahead buffer size (per worker) |
 | `infinite` | `True` | Loop dataset indefinitely |
-| `shuffle_in_memory` | `True` | Avoid filesystem contention on shuffle |
+| `snapshot_every_n_steps` | `1024` | StatefulDataLoader snapshot frequency for checkpointing |
 
-Buffer packing maintains a sorted lookahead buffer and fills each sequence with the
-largest-fitting example (FIFO anchor + best-fit remainder). Greedy packing appends
-examples sequentially until the sequence is full.
-
-Supports multi-worker DataLoader (`num_workers > 0`) — each worker gets a disjoint
-slice of the DP-sharded data via `worker_info`.
+**Packing modes:**
+- `longest`: deterministic; always picks the longest fitting item from the buffer
+- `buffer_shuffle`: picks a random fitting item (deterministic RNG across ranks, default)
+- `attn_balanced`: selects items to minimize cross-rank attention cost imbalance (best perf)
 
 ## Chat Template Behavior Notes
 
