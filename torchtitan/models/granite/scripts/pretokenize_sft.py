@@ -32,7 +32,7 @@ from typing import Any
 
 import numpy as np
 import pyarrow.compute as pc
-from datasets import concatenate_datasets, disable_caching, load_dataset, load_from_disk
+from datasets import Dataset, concatenate_datasets, disable_caching, load_from_disk
 from filelock import FileLock
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
@@ -54,14 +54,19 @@ _STRATEGIES: dict[str, type[TokenizationStrategy]] = {
 }
 
 
+def _shard_stem(input_file: Path, input_dir: Path) -> str:
+    """Derive a unique shard stem from the file's path relative to input_dir.
+
+    Replaces '/' with '__' so nested files get flat, collision-safe shard names.
+    Example: input_dir/a/b/train.jsonl → 'a__b__train'
+    """
+    rel = input_file.relative_to(input_dir).with_suffix("")
+    return str(rel).replace("/", "__")
+
+
 def _sha256_file(path: str) -> str:
     with open(path, "rb") as f:
         return hashlib.file_digest(f, "sha256").hexdigest()
-
-
-def _count_lines(path: str) -> int:
-    with open(path, "rb") as f:
-        return sum(1 for _ in f)
 
 
 _RUN_CONFIG_FILENAME = "run_config.json"
@@ -73,17 +78,15 @@ def _save_run_config(
     strategy: str,
     chat_template_kwargs: dict[str, Any],
 ) -> None:
-    with open(output_dir / _RUN_CONFIG_FILENAME, "w") as f:
-        json.dump(
-            {
-                "strategy": strategy,
-                "chat_template_kwargs": chat_template_kwargs,
-                "input_dir": str(input_dir),
-                "output_dir": str(output_dir),
-            },
-            f,
-            indent=2,
-        )
+    _write_json_atomic(
+        output_dir / _RUN_CONFIG_FILENAME,
+        {
+            "strategy": strategy,
+            "chat_template_kwargs": chat_template_kwargs,
+            "input_dir": str(input_dir),
+            "output_dir": str(output_dir),
+        },
+    )
 
 
 def _load_run_config(output_dir: Path) -> dict[str, Any]:
@@ -101,12 +104,18 @@ def _completed_stems(shards_dir: Path) -> set[str]:
     return {p.stem.removesuffix("_stats") for p in shards_dir.glob("*_stats.json")}
 
 
-def _write_stats_atomic(stats_path: Path, stats: dict[str, Any]) -> None:
-    # Atomic via tmp+rename: prevents other ranks from reading partial JSON during polls.
-    tmp = stats_path.with_suffix(".tmp")
+def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+    """Write JSON via tmp+rename so concurrent readers never see a partial file."""
+    tmp = path.with_suffix(".tmp")
     with open(tmp, "w") as f:
-        json.dump(stats, f, indent=2)
-    tmp.rename(stats_path)
+        json.dump(data, f, indent=2)
+    tmp.rename(path)
+
+
+def _tokenize_batch(
+    batch: dict[str, list], *, strategy: TokenizationStrategy
+) -> dict[str, list]:
+    return strategy({"messages": [json.loads(m) for m in batch["messages_json"]]})
 
 
 def _process_file(
@@ -114,6 +123,8 @@ def _process_file(
     output_dir: Path,
     strategy: TokenizationStrategy,
     *,
+    shard_stem: str,
+    input_dir: Path,
     num_cpus: int,
     batch_size: int,
     rank: int,
@@ -122,23 +133,93 @@ def _process_file(
     shards_dir = output_dir / "shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
 
-    stem = input_file.stem
-    final_path = shards_dir / stem
-    stats_path = shards_dir / f"{stem}_stats.json"
+    final_path = shards_dir / shard_stem
+    stats_path = shards_dir / f"{shard_stem}_stats.json"
 
-    n_lines = _count_lines(str(input_file))
+    try:
+        _tokenize_file(
+            input_file,
+            final_path,
+            stats_path,
+            strategy,
+            input_dir=input_dir,
+            shard_stem=shard_stem,
+            num_cpus=num_cpus,
+            batch_size=batch_size,
+            rank=rank,
+        )
+    except Exception as e:
+        logger.error(
+            "[rank %d] %s: crashed: %s", rank, input_file.name, e, exc_info=True
+        )
+        stats: dict[str, Any] = {
+            "input_file": str(input_file.relative_to(input_dir)),
+            "shard_stem": shard_stem,
+            "n_examples": 0,
+            "n_dropped": 0,
+            "total_tokens": 0,
+            "total_trained_tokens": 0,
+            "elapsed_seconds": 0.0,
+            "examples_per_second": 0.0,
+            "skipped": True,
+            "error": f"{type(e).__name__}: {e}",
+        }
+        _write_json_atomic(stats_path, stats)
+
+
+def _tokenize_file(
+    input_file: Path,
+    final_path: Path,
+    stats_path: Path,
+    strategy: TokenizationStrategy,
+    *,
+    input_dir: Path,
+    shard_stem: str,
+    num_cpus: int,
+    batch_size: int,
+    rank: int,
+) -> None:
+    messages_json: list[str] = []
+    with open(input_file) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            messages_json.append(json.dumps(json.loads(line)["messages"]))
+    n_lines = len(messages_json)
     logger.info("[rank %d] %s: %d input lines", rank, input_file.name, n_lines)
 
     t0 = time.monotonic()
-    ds = load_dataset("json", data_files=str(input_file), split="train")
+    ds = Dataset.from_dict({"messages_json": messages_json})
     ds = ds.map(
-        strategy,
+        _tokenize_batch,
+        fn_kwargs={"strategy": strategy},
         batched=True,
         batch_size=batch_size,
         num_proc=num_cpus,
         remove_columns=ds.column_names,
         desc=f"[rank {rank}] {input_file.name}",
     )
+
+    if len(ds) == 0:
+        elapsed = time.monotonic() - t0
+        logger.warning(
+            "[rank %d] %s: all %d samples dropped, skipping shard",
+            rank, input_file.name, n_lines,
+        )
+        stats: dict[str, Any] = {
+            "input_file": str(input_file.relative_to(input_dir)),
+            "shard_stem": shard_stem,
+            "n_examples": 0,
+            "n_dropped": n_lines,
+            "total_tokens": 0,
+            "total_trained_tokens": 0,
+            "elapsed_seconds": round(elapsed, 2),
+            "examples_per_second": 0.0,
+            "skipped": True,
+        }
+        _write_json_atomic(stats_path, stats)
+        return
+
     ds.save_to_disk(str(final_path))
     elapsed = time.monotonic() - t0
 
@@ -149,8 +230,8 @@ def _process_file(
     total_trained = int(pc.sum(pc.not_equal(labels_flat, -100)).as_py())
 
     stats: dict[str, Any] = {
-        "input_file": input_file.name,
-        "shard_stem": stem,
+        "input_file": str(input_file.relative_to(input_dir)),
+        "shard_stem": shard_stem,
         "n_examples": n_examples,
         "n_dropped": n_lines - n_examples,
         "total_tokens": total_tokens,
@@ -158,7 +239,7 @@ def _process_file(
         "elapsed_seconds": round(elapsed, 2),
         "examples_per_second": round(n_examples / max(elapsed, 1e-6), 1),
     }
-    _write_stats_atomic(stats_path, stats)
+    _write_json_atomic(stats_path, stats)
 
     logger.info(
         "[rank %d] %s done: %d examples, %d tokens, %.1f ex/s",
@@ -172,6 +253,7 @@ def _process_file(
 
 def _write_manifest(
     output_dir: Path,
+    input_dir: Path,
     input_files: list[Path],
     strategy_name: str,
     tokenizer_path: str,
@@ -181,9 +263,14 @@ def _write_manifest(
     tokenizer = HuggingFaceTokenizer(tokenizer_path=tokenizer_path)
     shards_dir = output_dir / "shards"
     all_stats: list[dict[str, Any]] = []
+    skipped_files: list[str] = []
     for p in sorted(shards_dir.glob("*_stats.json")):
         with open(p) as f:
-            all_stats.append(json.load(f))
+            s = json.load(f)
+        if s.get("skipped", False):
+            skipped_files.append(s["input_file"])
+            continue
+        all_stats.append(s)
 
     total_examples = sum(s["n_examples"] for s in all_stats)
     total_dropped = sum(s["n_dropped"] for s in all_stats)
@@ -206,7 +293,37 @@ def _write_manifest(
     for shard_name in completed_shards:
         shard_ds = load_from_disk(str(shards_dir / shard_name))
         all_n_tokens.extend(shard_ds["n_tokens"])
-    n_tokens_arr = np.array(all_n_tokens, dtype=np.int64)
+
+    if total_examples > 0:
+        n_tokens_arr = np.array(all_n_tokens, dtype=np.int64)
+        stats_block: dict[str, Any] = {
+            "total_examples": total_examples,
+            "examples_dropped": total_dropped,
+            "total_tokens": total_tokens,
+            "total_trained_tokens": total_trained,
+            "tokens_per_example": round(total_tokens / total_examples, 1),
+            "trained_tokens_per_example": round(total_trained / total_examples, 1),
+            "trained_to_total_tokens_ratio": total_trained / total_tokens,
+        }
+        length_stats_block: dict[str, Any] = {
+            "min": int(n_tokens_arr.min()),
+            "max": int(n_tokens_arr.max()),
+            "mean": round(float(n_tokens_arr.mean()), 1),
+            "median": int(np.median(n_tokens_arr)),
+            "std": round(float(n_tokens_arr.std()), 1),
+            "p95": int(np.percentile(n_tokens_arr, 95)),
+        }
+    else:
+        stats_block = {
+            "total_examples": 0,
+            "examples_dropped": total_dropped,
+            "total_tokens": 0,
+            "total_trained_tokens": 0,
+            "tokens_per_example": 0.0,
+            "trained_tokens_per_example": 0.0,
+            "trained_to_total_tokens_ratio": 0.0,
+        }
+        length_stats_block = {}
 
     manifest: dict[str, Any] = {
         "version": 1,
@@ -222,25 +339,11 @@ def _write_manifest(
             "completed": completed_shards,
             "total_expected": len(input_files),
         },
-        "stats": {
-            "total_examples": total_examples,
-            "examples_dropped": total_dropped,
-            "total_tokens": total_tokens,
-            "total_trained_tokens": total_trained,
-            "tokens_per_example": round(total_tokens / total_examples, 1),
-            "trained_tokens_per_example": round(total_trained / total_examples, 1),
-            "trained_to_total_tokens_ratio": total_trained / total_tokens,
-        },
-        "length_stats": {
-            "min": int(n_tokens_arr.min()),
-            "max": int(n_tokens_arr.max()),
-            "mean": round(float(n_tokens_arr.mean()), 1),
-            "median": int(np.median(n_tokens_arr)),
-            "std": round(float(n_tokens_arr.std()), 1),
-            "p95": int(np.percentile(n_tokens_arr, 95)),
-        },
+        "skipped_files": skipped_files,
+        "stats": stats_block,
+        "length_stats": length_stats_block,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "input_dir": str(input_files[0].parent) if input_files else "",
+        "input_dir": str(input_dir),
         "input_files": [str(f) for f in sorted(input_files)],
     }
 
@@ -360,6 +463,10 @@ def _shuffle_and_reshard(
     shard_names = sorted(manifest["shards"]["completed"])
     num_shards = len(shard_names)
 
+    if num_shards == 0:
+        logger.info("[rank %d] No shards to shuffle, skipping Phase 2", rank)
+        return
+
     logger.info(
         "[rank %d] Loading %d shards for global shuffle (seed=%d)...",
         rank, num_shards, shuffle_seed,
@@ -388,27 +495,43 @@ def _shuffle_and_reshard(
         if stats_path.exists():
             continue
 
-        start = i * examples_per_shard
-        end = (start + examples_per_shard) if i < num_shards - 1 else total_examples
-        indices = permutation[start:end].tolist()
-        shard = full_dataset.select(indices).flatten_indices()
-        shard.save_to_disk(str(shuffled_dir / shard_name))
+        try:
+            start = i * examples_per_shard
+            end = (
+                (start + examples_per_shard) if i < num_shards - 1 else total_examples
+            )
+            indices = permutation[start:end].tolist()
+            shard = full_dataset.select(indices).flatten_indices()
+            shard.save_to_disk(str(shuffled_dir / shard_name))
 
-        n_tokens_arr = np.array(shard["n_tokens"], dtype=np.int64)
-        labels_flat = shard.data.column("labels").combine_chunks().flatten()
-        total_trained = int(pc.sum(pc.not_equal(labels_flat, -100)).as_py())
-        stats: dict[str, Any] = {
-            "shard_stem": shard_name,
-            "n_examples": len(shard),
-            "total_tokens": int(n_tokens_arr.sum()),
-            "total_trained_tokens": total_trained,
-        }
-        _write_stats_atomic(stats_path, stats)
+            n_tokens_arr = np.array(shard["n_tokens"], dtype=np.int64)
+            labels_flat = shard.data.column("labels").combine_chunks().flatten()
+            total_trained = int(pc.sum(pc.not_equal(labels_flat, -100)).as_py())
+            stats: dict[str, Any] = {
+                "shard_stem": shard_name,
+                "n_examples": len(shard),
+                "total_tokens": int(n_tokens_arr.sum()),
+                "total_trained_tokens": total_trained,
+            }
+            _write_json_atomic(stats_path, stats)
 
-        logger.info(
-            "[rank %d] Wrote shuffled shard %d/%d: %s (%d examples)",
-            rank, i + 1, num_shards, shard_name, len(shard),
-        )
+            logger.info(
+                "[rank %d] Wrote shuffled shard %d/%d: %s (%d examples)",
+                rank, i + 1, num_shards, shard_name, len(shard),
+            )
+        except Exception as e:
+            logger.error(
+                "[rank %d] shuffle shard %s crashed: %s",
+                rank, shard_name, e, exc_info=True,
+            )
+            error_stats: dict[str, Any] = {
+                "shard_stem": shard_name,
+                "n_examples": 0,
+                "total_tokens": 0,
+                "total_trained_tokens": 0,
+                "error": f"{type(e).__name__}: {e}",
+            }
+            _write_json_atomic(stats_path, error_stats)
 
     elapsed = time.monotonic() - t0
     logger.info("[rank %d] Shuffle write complete in %.1fs", rank, elapsed)
@@ -421,6 +544,20 @@ def _shuffle_and_reshard(
             if (shuffled_dir / f"shard_{i:04d}_stats.json").exists()
         )
         if done == num_shards:
+            # Check for errors before committing the swap.
+            all_errors: list[str] = []
+            for i in range(num_shards):
+                sp = shuffled_dir / f"shard_{i:04d}_stats.json"
+                with open(sp) as f:
+                    s = json.load(f)
+                if "error" in s:
+                    all_errors.append(f"shard_{i:04d}: {s['error']}")
+            if all_errors:
+                raise RuntimeError(
+                    f"Shuffle failed — {len(all_errors)} shard(s) crashed:\n"
+                    + "\n".join(all_errors)
+                )
+
             with FileLock(str(shuffle_meta_path) + ".lock"):
                 if not shuffle_meta_path.exists():
                     shards_dir.rename(backup_dir)
@@ -435,8 +572,6 @@ def _shuffle_and_reshard(
                         output_dir, shards_dir, shuffle_meta_path, shuffle_seed, num_shards
                     )
                     shutil.rmtree(backup_dir)
-            # Unconditional: both the swap winner and lock-losers exit here —
-            # lock-losers skip the inner `if` since meta was already written.
             break
         logger.info(
             "[rank %d] shuffle: %d/%d shards done, waiting...", rank, done, num_shards
@@ -508,9 +643,26 @@ def main() -> None:
 
     num_cpus: int = args.num_cpus or (multiprocessing.cpu_count() // 2)
 
-    input_files = sorted(input_dir.glob("*.jsonl"))
+    input_files = sorted(
+        f for f in input_dir.rglob("*.jsonl") if not f.is_relative_to(output_dir)
+    )
     if not input_files:
-        raise ValueError(f"No .jsonl files found in {input_dir}")
+        raise ValueError(f"No .jsonl files found in {input_dir} (searched recursively)")
+
+    # Validate shard stem uniqueness before any work begins (all ranks).
+    seen_stems: dict[str, Path] = {}
+    for f in input_files:
+        stem = _shard_stem(f, input_dir)
+        if stem in seen_stems:
+            raise ValueError(
+                f"Shard stem collision: {f} and {seen_stems[stem]} both map to '{stem}'"
+            )
+        if len(stem) > 200:
+            raise ValueError(
+                f"Shard stem too long ({len(stem)} chars) for {f}. "
+                "Flatten your directory structure or shorten filenames."
+            )
+        seen_stems[stem] = f
 
     strategy = _STRATEGIES[args.strategy](
         args.tokenizer_path,
@@ -518,51 +670,60 @@ def main() -> None:
     )
 
     run_config_path = output_dir / _RUN_CONFIG_FILENAME
-    if run_config_path.exists():
-        run_config = _load_run_config(output_dir)
-        if run_config["strategy"] != args.strategy:
-            raise ValueError(
-                f"Resume mismatch: existing shards used strategy {run_config['strategy']!r} "
-                f"but current invocation specifies {args.strategy!r}."
+    with FileLock(str(run_config_path) + ".lock"):
+        if not run_config_path.exists() and args.rank == 0:
+            _save_run_config(
+                input_dir,
+                output_dir,
+                args.strategy,
+                strategy.chat_template_kwargs,
             )
-        if run_config["chat_template_kwargs"] != strategy.chat_template_kwargs:
-            raise ValueError(
-                f"Resume mismatch: existing shards used chat_template_kwargs "
-                f"{run_config['chat_template_kwargs']} but current invocation has "
-                f"{strategy.chat_template_kwargs}."
-            )
-    elif args.rank == 0:
-        _save_run_config(
-            input_dir,
-            output_dir,
-            args.strategy,
-            strategy.chat_template_kwargs,
+
+    # All ranks validate config consistency (wait for rank 0 to write on fresh runs).
+    while not run_config_path.exists():
+        time.sleep(1)
+    run_config = _load_run_config(output_dir)
+    if run_config["strategy"] != args.strategy:
+        raise ValueError(
+            f"Resume mismatch: existing shards used strategy {run_config['strategy']!r} "
+            f"but current invocation specifies {args.strategy!r}."
+        )
+    if run_config["chat_template_kwargs"] != strategy.chat_template_kwargs:
+        raise ValueError(
+            f"Resume mismatch: existing shards used chat_template_kwargs "
+            f"{run_config['chat_template_kwargs']} but current invocation has "
+            f"{strategy.chat_template_kwargs}."
         )
 
     shards_dir = output_dir / "shards"
+    my_files = input_files[args.rank :: args.world_size]
+
     completed = _completed_stems(shards_dir)
-    remaining = [f for f in input_files if f.stem not in completed]
-    if completed:
+    num_skipped = sum(1 for f in my_files if _shard_stem(f, input_dir) in completed)
+    if num_skipped:
         logger.info(
-            "Resuming: %d/%d files done, %d remaining",
-            len(completed),
-            len(input_files),
-            len(remaining),
+            "Resuming: skipping %d/%d already-completed files",
+            num_skipped,
+            len(my_files),
         )
 
-    my_files = remaining[args.rank :: args.world_size]
     logger.info(
         "[rank %d/%d] processing %d files",
         args.rank,
         args.world_size,
-        len(my_files),
+        len(my_files) - num_skipped,
     )
 
     for input_file in my_files:
+        shard_stem = _shard_stem(input_file, input_dir)
+        if shard_stem in completed:
+            continue
         _process_file(
             input_file,
             output_dir,
             strategy,
+            shard_stem=shard_stem,
+            input_dir=input_dir,
             num_cpus=num_cpus,
             batch_size=args.batch_size,
             rank=args.rank,
@@ -575,6 +736,7 @@ def main() -> None:
         if len(completed) == len(input_files):
             _write_manifest(
                 output_dir,
+                input_dir,
                 input_files,
                 args.strategy,
                 args.tokenizer_path,
