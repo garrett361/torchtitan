@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from collections.abc import Callable
 from functools import partial
 
@@ -39,6 +40,7 @@ _NORM_INIT = {"weight": nn.init.ones_}
 # Weight-tied tok_embeddings must use skip_param_init: output.weight is
 # initialized in init_states and tok_embeddings.weight is re-tied to it.
 _EMBEDDING_SKIP_INIT = {"weight": skip_param_init}
+_EMBEDDING_INIT = {"weight": partial(nn.init.trunc_normal_, std=0.02)}
 
 
 def _output_linear_init(dim: int) -> dict[str, Callable]:
@@ -100,6 +102,27 @@ def _build_granite_layers(
             )
         )
     return layers
+
+
+def _make_untied(
+    tied_builder: Callable[[str], GraniteModel.Config],
+) -> Callable[[str], GraniteModel.Config]:
+    """Wrap a tied-model config builder to produce an untied variant."""
+
+    def builder(attn_backend: str = "sdpa") -> GraniteModel.Config:
+        config = tied_builder(attn_backend=attn_backend)
+        return dataclasses.replace(
+            config,
+            enable_weight_tying=False,
+            layers=list(config.layers),
+            tok_embeddings=Embedding.Config(
+                num_embeddings=config.vocab_size,
+                embedding_dim=config.dim,
+                param_init=_EMBEDDING_INIT,
+            ),
+        )
+
+    return builder
 
 
 def _debugmodel(attn_backend: str = "sdpa") -> GraniteModel.Config:
@@ -318,6 +341,10 @@ granite_configs = {
     "3B": _3b,
     "8B": _8b,
     "30B": _30b,
+    "debugmodel_untied": _make_untied(_debugmodel),
+    "3B_untied": _make_untied(_3b),
+    "8B_untied": _make_untied(_8b),
+    "30B_untied": _make_untied(_30b),
 }
 
 

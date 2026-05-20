@@ -305,6 +305,128 @@ class TestGraniteStateDictAdapter(unittest.TestCase):
         )
 
 
+class TestGraniteUntied(unittest.TestCase):
+    """Tests for untied weight model variants."""
+
+    def test_debugmodel_untied_builds(self):
+        config = granite_configs["debugmodel_untied"]()
+        model = GraniteModel(config)
+        self.assertIsInstance(model, GraniteModel)
+        self.assertFalse(model.enable_weight_tying)
+
+    def test_weights_are_independent(self):
+        config = granite_configs["debugmodel_untied"]()
+        model = GraniteModel(config)
+        model.init_states()
+        self.assertIsNot(
+            model.tok_embeddings.weight,
+            model.output.weight,
+            "Untied: tok_embeddings.weight and output.weight must be different tensors",
+        )
+
+    def test_forward_shape(self):
+        config = granite_configs["debugmodel_untied"]()
+        model = GraniteModel(config)
+        model.init_states()
+        B, S = 2, 64
+        tokens = torch.randint(0, config.vocab_size, (B, S))
+        out = model(tokens)
+        self.assertEqual(out.shape, (B, S, config.vocab_size))
+
+    def test_untied_checkpoint_produces_identical_logits_to_tied(self):
+        """Simulate the conversion script workflow: tied model → HF export → add
+        lm_head.weight (what untie_hf_weights.py does) → load into untied model."""
+        tied_config = granite_configs["debugmodel"]()
+        untied_config = granite_configs["debugmodel_untied"]()
+
+        tied_model = GraniteModel(tied_config)
+        tied_model.init_states()
+
+        # Export tied model to HF format (drops lm_head.weight)
+        tied_adapter = GraniteStateDictAdapter(tied_config, hf_assets_path=None)
+        hf_sd = tied_adapter.to_hf(tied_model.state_dict())
+        # Simulate untie_hf_weights.py: copy embed_tokens as independent lm_head
+        hf_sd["lm_head.weight"] = hf_sd["model.embed_tokens.weight"].clone()
+
+        untied_adapter = GraniteStateDictAdapter(untied_config, hf_assets_path=None)
+        untied_sd = untied_adapter.from_hf(hf_sd)
+
+        untied_model = GraniteModel(untied_config)
+        untied_model.init_states()
+        untied_model.load_state_dict(untied_sd, strict=True)
+
+        tokens = torch.randint(0, tied_config.vocab_size, (1, 16))
+        with torch.no_grad():
+            tied_logits = tied_model(tokens)
+            untied_logits = untied_model(tokens)
+        torch.testing.assert_close(tied_logits, untied_logits, atol=0.0, rtol=0.0)
+
+    def test_state_dict_roundtrip_exports_both_weights(self):
+        config = granite_configs["debugmodel_untied"]()
+        model = GraniteModel(config)
+        model.init_states()
+        adapter = GraniteStateDictAdapter(config, hf_assets_path=None)
+
+        original_sd = {k: v.clone() for k, v in model.state_dict().items()}
+        hf_sd = adapter.to_hf(original_sd)
+
+        self.assertIn("model.embed_tokens.weight", hf_sd)
+        self.assertIn("lm_head.weight", hf_sd)
+
+        recovered_sd = adapter.from_hf(hf_sd)
+        self.assertEqual(set(original_sd.keys()), set(recovered_sd.keys()))
+        for key in original_sd:
+            self.assertTrue(
+                torch.equal(original_sd[key], recovered_sd[key]),
+                f"Round-trip mismatch for {key!r}",
+            )
+
+    def test_tp_validation_passes_for_untied(self):
+        config = granite_configs["debugmodel_untied"]()
+        config.update_from_config(trainer_config=_trainer_config_mock(tp=2))
+
+    def test_pp_validation_passes_for_untied(self):
+        config = granite_configs["debugmodel_untied"]()
+        config.update_from_config(trainer_config=_trainer_config_mock(pp=2))
+
+    def test_untied_to_hf_logits_match_hf_model(self):
+        from transformers import GraniteConfig, GraniteForCausalLM
+
+        tt_config = granite_configs["debugmodel_untied"]()
+        tt_model = GraniteModel(tt_config)
+        tt_model.init_states()
+
+        adapter = GraniteStateDictAdapter(tt_config, hf_assets_path=None)
+        hf_sd = adapter.to_hf(tt_model.state_dict())
+
+        hf_config = GraniteConfig(
+            vocab_size=tt_config.vocab_size,
+            hidden_size=tt_config.dim,
+            intermediate_size=512,
+            num_hidden_layers=len(tt_config.layers),
+            num_attention_heads=tt_config.layers[0].attention.n_heads,
+            num_key_value_heads=tt_config.layers[0].attention.n_heads,
+            tie_word_embeddings=False,
+            embedding_multiplier=tt_config.embedding_multiplier,
+            logits_scaling=tt_config.logits_scaling,
+            residual_multiplier=tt_config.layers[0].residual_multiplier,
+            attention_multiplier=tt_config.layers[0].attention.attn_scale,
+            max_position_embeddings=tt_config.rope.max_seq_len,
+            rope_theta=tt_config.rope.theta,
+        )
+        hf_model = GraniteForCausalLM(hf_config)
+        hf_model.load_state_dict(hf_sd, strict=True)
+        hf_model.eval()
+        tt_model.eval()
+
+        tokens = torch.randint(0, tt_config.vocab_size, (1, 16))
+        with torch.no_grad():
+            tt_logits = tt_model(tokens)
+            hf_logits = hf_model(tokens).logits
+
+        torch.testing.assert_close(tt_logits, hf_logits, atol=1e-4, rtol=0.0)
+
+
 class TestGraniteRealCheckpoint(unittest.TestCase):
     def setUp(self):
         from dotenv import load_dotenv

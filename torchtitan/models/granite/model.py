@@ -60,8 +60,9 @@ class GraniteModel(Decoder):
     - logits_scaling: scales the final logit projection output
     - attn_scale (1/head_dim): set per-block via GQAttention.Config, not a model-level field
 
-    Weight tying (tok_embeddings.weight == output.weight) is always enabled.
-    Pipeline Parallel is not supported due to weight tying.
+    Supports both tied (tok_embeddings.weight == output.weight) and untied modes.
+    When tied, tok_embeddings uses skip_param_init and shares output.weight.
+    Pipeline Parallel is not supported with weight tying.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -114,9 +115,9 @@ class GraniteModel(Decoder):
                         "silently breaking the weight identity and producing wrong gradients."
                     )
 
-            if parallelism.pipeline_parallel_degree > 1:
+            if parallelism.pipeline_parallel_degree > 1 and self.enable_weight_tying:
                 raise NotImplementedError(
-                    "GraniteModel always uses weight tying, which is not compatible "
+                    "GraniteModel with weight tying is not compatible "
                     "with Pipeline Parallel."
                 )
 
@@ -133,16 +134,12 @@ class GraniteModel(Decoder):
             )
 
     def __init__(self, config: Config):
-        if not config.enable_weight_tying:
-            raise ValueError(
-                "GraniteModel requires enable_weight_tying=True: tok_embeddings uses "
-                "skip_param_init and relies on output.weight for initialization."
-            )
         super().__init__(config)
         self.embedding_multiplier = config.embedding_multiplier
         self.logits_scaling = config.logits_scaling
         self.enable_weight_tying = config.enable_weight_tying
-        self.tok_embeddings.weight = self.output.weight
+        if self.enable_weight_tying:
+            self.tok_embeddings.weight = self.output.weight
 
     def init_states(
         self,

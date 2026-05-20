@@ -362,3 +362,84 @@ def granite_4_1_30b_sft_pretokenized_float8_filteroutput() -> Trainer.Config:
         ],
     )
     return config
+
+
+# --- Untied variants (independent embedding and lm_head) ---
+
+
+def granite_sft_debugmodel_untied() -> Trainer.Config:
+    config = granite_sft_debugmodel()
+    config.model_spec = model_registry("debugmodel_untied", attn_backend="flex")
+    return config
+
+
+def granite_sft_pretokenized_debugmodel_untied() -> Trainer.Config:
+    config = granite_sft_pretokenized_debugmodel()
+    config.model_spec = model_registry("debugmodel_untied", attn_backend="flex")
+    return config
+
+
+def granite_4_1_8b_sft_untied() -> Trainer.Config:
+    config = granite_4_1_8b_sft()
+    config.model_spec = model_registry("8B_untied", attn_backend="flex")
+    return config
+
+
+def granite_4_1_8b_sft_pretokenized_untied() -> Trainer.Config:
+    config = granite_4_1_8b_sft_pretokenized()
+    config.model_spec = model_registry("8B_untied", attn_backend="flex")
+    return config
+
+
+def granite_4_1_8b_sft_pretokenized_float8_filteroutput_untied() -> Trainer.Config:
+    config = granite_4_1_8b_sft_pretokenized_float8_filteroutput()
+    config.model_spec = model_registry("8B_untied", attn_backend="flex")
+    return config
+
+
+def granite_4_1_8b_sft_pretokenized_float8_filteroutput_autokn_untied() -> Trainer.Config:
+    config = granite_4_1_8b_sft_pretokenized_float8_filteroutput_autokn()
+    config.model_spec = model_registry("8B_untied", attn_backend="flex")
+    return config
+
+
+def granite_4_1_8b_sft_pretokenized_float8_rowwise_untied() -> Trainer.Config:
+    config = granite_4_1_8b_sft_pretokenized_float8_rowwise()
+    config.model_spec = model_registry("8B_untied", attn_backend="flex")
+    return config
+
+
+def granite_4_1_8b_sft_pretokenized_fa4_untied() -> Trainer.Config:
+    config = granite_4_1_8b_sft_pretokenized_fa4()
+    config.model_spec = model_registry("8B_untied", attn_backend="fa4")
+    return config
+
+
+def granite_4_1_8b_sft_pretokenized_fa4_float8_filteroutput_untied() -> Trainer.Config:
+    config = granite_4_1_8b_sft_pretokenized_fa4_float8_filteroutput()
+    config.model_spec = model_registry("8B_untied", attn_backend="fa4")
+    return config
+
+
+def granite_4_1_3b_sft_pretokenized_untied() -> Trainer.Config:
+    config = granite_4_1_3b_sft_pretokenized()
+    config.model_spec = model_registry("3B_untied", attn_backend="flex")
+    return config
+
+
+def granite_4_1_3b_sft_pretokenized_float8_filteroutput_untied() -> Trainer.Config:
+    config = granite_4_1_3b_sft_pretokenized_float8_filteroutput()
+    config.model_spec = model_registry("3B_untied", attn_backend="flex")
+    return config
+
+
+def granite_4_1_30b_sft_pretokenized_untied() -> Trainer.Config:
+    config = granite_4_1_30b_sft_pretokenized()
+    config.model_spec = model_registry("30B_untied", attn_backend="flex")
+    return config
+
+
+def granite_4_1_30b_sft_pretokenized_float8_filteroutput_untied() -> Trainer.Config:
+    config = granite_4_1_30b_sft_pretokenized_float8_filteroutput()
+    config.model_spec = model_registry("30B_untied", attn_backend="flex")
+    return config
