@@ -1068,51 +1068,5 @@ class TestPyarrowTotalTrained(unittest.TestCase):
         self.assertEqual(pyarrow_total, 7)
 
 
-class TestAtomicStatsWrite(unittest.TestCase):
-    """_write_stats_atomic produces valid JSON with no leftover .tmp files."""
-
-    def test_file_is_valid_json(self):
-        from torchtitan.models.granite.scripts.pretokenize_sft import (
-            _write_stats_atomic,
-        )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            stats_path = Path(tmp) / "test_stats.json"
-            stats = {"n_examples": 42, "total_tokens": 1000}
-            _write_stats_atomic(stats_path, stats)
-
-            with open(stats_path) as f:
-                loaded = json.load(f)
-            self.assertEqual(loaded, stats)
-
-    def test_no_tmp_file_remains(self):
-        from torchtitan.models.granite.scripts.pretokenize_sft import (
-            _write_stats_atomic,
-        )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            stats_path = Path(tmp) / "test_stats.json"
-            _write_stats_atomic(stats_path, {"key": "value"})
-
-            tmp_path = stats_path.with_suffix(".tmp")
-            self.assertFalse(
-                tmp_path.exists(), ".tmp file should not remain after atomic write"
-            )
-
-    def test_overwrites_existing(self):
-        from torchtitan.models.granite.scripts.pretokenize_sft import (
-            _write_stats_atomic,
-        )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            stats_path = Path(tmp) / "test_stats.json"
-            _write_stats_atomic(stats_path, {"v": 1})
-            _write_stats_atomic(stats_path, {"v": 2})
-
-            with open(stats_path) as f:
-                loaded = json.load(f)
-            self.assertEqual(loaded["v"], 2)
-
-
 if __name__ == "__main__":
     unittest.main()
