@@ -253,6 +253,67 @@ class TestChatTemplate(unittest.TestCase):
             "Response tokens after </think> must be identical regardless of preceding \\n",
         )
 
+    # --- truncate_history_thinking=False behavior ---
+
+    def test_no_reasoning_form_preserved_when_thinking_not_truncated(self):
+        """With truncate_history_thinking=False, no-reasoning turns still render <think></think>{content}."""
+        rendered = self._tokenizer.apply_chat_template(
+            self._MESSAGES, truncate_history_thinking=False
+        )
+        self.assertIn("<think></think>Second response.", rendered)
+        self.assertNotIn("<think></think>\nSecond response.", rendered)
+
+    def test_generation_prompt_ends_with_think_newline(self):
+        """Generation prompt ends with <think>\\n — what the model receives at inference."""
+        rendered = self._tokenizer.apply_chat_template(
+            self._MESSAGES[:5],
+            add_generation_prompt=True,
+            truncate_history_thinking=False,
+        )
+        self.assertTrue(
+            rendered.endswith("<think>\n"),
+            f"Expected generation prompt to end with '<think>\\n', got: ...{rendered[-30:]!r}",
+        )
+
+    def test_no_reasoning_inference_context_diverges(self):
+        """Generation prompt has \\n where full render has </think> — the fixup target.
+
+        At inference the model receives <think>\\n from the generation prompt.
+        In the full render (template normalization), the same position has </think>
+        (from <think></think>{content}). This token-level divergence is what
+        _fix_empty_thinking corrects for FullThinkingStrategy.
+        """
+        msgs = [
+            {"role": "user", "content": "Q"},
+            {"role": "assistant", "content": "A"},
+        ]
+        prefix = self._tokenizer.apply_chat_template(
+            msgs[:1],
+            add_generation_prompt=True,
+            truncate_history_thinking=False,
+        )
+        backbone = self._tokenizer.apply_chat_template(
+            msgs, truncate_history_thinking=False
+        )
+        prefix_tokens = self._tokenizer.encode(prefix, add_bos=True, add_eos=False)
+        backbone_tokens = self._tokenizer.encode(backbone, add_bos=True, add_eos=False)
+
+        newline_id = self._tokenizer.encode("\n", add_bos=False, add_eos=False)[0]
+        think_id = self._tokenizer.token_to_id("<think>")
+        end_think_id = self._tokenizer.token_to_id("</think>")
+
+        # Prefix and backbone share tokens up to the divergence point
+        self.assertEqual(
+            backbone_tokens[: len(prefix_tokens) - 1],
+            prefix_tokens[:-1],
+        )
+        # Both have <think> immediately before the divergence
+        self.assertEqual(prefix_tokens[-2], think_id)
+        self.assertEqual(backbone_tokens[len(prefix_tokens) - 2], think_id)
+        # Divergence: prefix has \n, backbone has </think>
+        self.assertEqual(prefix_tokens[-1], newline_id)
+        self.assertEqual(backbone_tokens[len(prefix_tokens) - 1], end_think_id)
+
 
 class TestGraniteSFTDataFormat(unittest.TestCase):
     """Structural checks on the raw GLM-5.1 Reasoning dataset.
