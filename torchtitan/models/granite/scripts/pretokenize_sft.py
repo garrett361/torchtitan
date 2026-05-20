@@ -32,7 +32,15 @@ from typing import Any
 
 import numpy as np
 import pyarrow.compute as pc
-from datasets import Dataset, concatenate_datasets, disable_caching, load_from_disk
+import pyarrow as pa
+from datasets import (
+    Dataset,
+    Features,
+    concatenate_datasets,
+    disable_caching,
+    load_from_disk,
+)
+
 from filelock import FileLock
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
@@ -203,6 +211,7 @@ def _tokenize_file(
 
     t0 = time.monotonic()
     ds = Dataset.from_dict({"messages_json": messages_json})
+    features = Features.from_arrow_schema(pa.schema(strategy.column_schema))
     ds = ds.map(
         _tokenize_batch,
         fn_kwargs={"strategy": strategy},
@@ -210,6 +219,7 @@ def _tokenize_file(
         batch_size=batch_size,
         num_proc=num_cpus,
         remove_columns=ds.column_names,
+        features=features,
         desc=f"[rank {rank}] {input_file.name}",
     )
 
