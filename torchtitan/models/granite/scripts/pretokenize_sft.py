@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import multiprocessing
+import os
 import shutil
 import time
 from pathlib import Path
@@ -609,6 +610,23 @@ def _shuffle_and_reshard(
         time.sleep(30)
 
 
+def _assign_files_by_cost(
+    input_files: list[Path], world_size: int
+) -> list[list[Path]]:
+    """Assign files to ranks via greedy bin-packing on file size."""
+    # resolve() dereferences symlinks — without it we'd get the symlink's own size (~bytes)
+    sized = sorted(
+        ((os.path.getsize(f.resolve()), f) for f in input_files), key=lambda x: x[0], reverse=True
+    )
+    bins: list[list[Path]] = [[] for _ in range(world_size)]
+    costs = [0] * world_size
+    for size, f in sized:
+        lightest = min(range(world_size), key=lambda r: costs[r])
+        bins[lightest].append(f)
+        costs[lightest] += size
+    return bins
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Pre-tokenize SFT JSONL data.",
@@ -730,7 +748,7 @@ def main() -> None:
         )
 
     shards_dir = output_dir / "shards"
-    my_files = input_files[args.rank :: args.world_size]
+    my_files = _assign_files_by_cost(input_files, args.world_size)[args.rank]
 
     completed = _completed_stems(shards_dir)
     num_skipped = sum(1 for f in my_files if _shard_stem(f, input_dir) in completed)
