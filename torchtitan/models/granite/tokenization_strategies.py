@@ -163,6 +163,29 @@ class BackboneSuffixStrategy(TokenizationStrategy):
                 for m in effective[group_start:group_end]
             )
             if not has_reasoning:
+                for turn_idx in range(group_start, group_end):
+                    if effective[turn_idx]["role"] != "assistant":
+                        continue
+                    prefix_for_turn = self.tokenizer.apply_chat_template(
+                        effective[:turn_idx],
+                        add_generation_prompt=True,
+                        **self.chat_template_kwargs,
+                    )
+                    prefix_for_turn_tokens = self.tokenizer.encode(
+                        prefix_for_turn, add_bos=True, add_eos=False
+                    )
+                    label_start = len(prefix_for_turn_tokens) - 1
+
+                    end_render_text = self.tokenizer.apply_chat_template(
+                        effective[: turn_idx + 1], **self.chat_template_kwargs
+                    ).rstrip("\n")
+                    end_render_tokens = self.tokenizer.encode(
+                        end_render_text, add_bos=True, add_eos=False
+                    )
+                    label_end = len(end_render_tokens) - 2
+
+                    end = min(label_end + 1, len(backbone_input_ids))
+                    backbone_labels[label_start:end] = full_tokens[label_start + 1 : end + 1]
                 continue
 
             # Compute insertion_limit: render up to first assistant in group with gen prompt
