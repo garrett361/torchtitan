@@ -17,6 +17,7 @@ from torchtitan.models.granite.scripts.pretokenize_sft import (
     _write_json_atomic,
 )
 from torchtitan.models.granite.tokenization_strategies import (
+    BackboneSuffixStrategy,
     TruncateEveryTurnStrategy,
     TruncateLastStrategy,
 )
@@ -577,6 +578,77 @@ class TestProcessFileDropStats(unittest.TestCase):
             with open(output_dir / "shards" / "data_stats.json") as f:
                 stats = json.load(f)
             self.assertEqual(stats["n_dropped"], len(lines))
+
+
+class TestBackboneSuffixMixedBatchSchema(unittest.TestCase):
+    """Regression: empty suffix_starts in early batches must not cause a
+    PyArrow schema inference failure when later batches contain non-empty lists.
+    Datasets predominantly composed of single-turn conversations (no suffix
+    groups) with rare multi-turn samples trigger this when num_proc > 1.
+    """
+
+    def test_single_turn_then_multi_turn_with_reasoning(self):
+        """When all samples in a worker's first batch are single-turn,
+        suffix_starts and insertion_limits are empty lists. Without explicit
+        features= in Dataset.map(), HF Datasets infers these as list<null>.
+        A later batch containing multi-turn samples with reasoning produces
+        non-empty int lists, triggering 'Couldn't cast array of type int64
+        to null'. This test reproduces that ordering: 8 single-turn samples
+        (filling the first batches at batch_size=4) followed by 2 multi-turn
+        samples with reasoning_content that generate suffix groups.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_dir = tmp_path / "input"
+            input_dir.mkdir()
+            output_dir = tmp_path / "output"
+            output_dir.mkdir()
+
+            single_turn = {
+                "messages": [
+                    {"role": "user", "content": "What is 2+2?"},
+                    {"role": "assistant", "content": "4"},
+                ]
+            }
+            multi_turn_with_reasoning = {
+                "messages": [
+                    {"role": "user", "content": "Solve step by step: 17*23"},
+                    {
+                        "role": "assistant",
+                        "reasoning_content": "17*23 = 17*20 + 17*3 = 340 + 51 = 391",
+                        "content": "391",
+                    },
+                    {"role": "user", "content": "Now multiply by 2"},
+                    {
+                        "role": "assistant",
+                        "reasoning_content": "391*2 = 782",
+                        "content": "782",
+                    },
+                ]
+            }
+            # Many single-turn samples first so batch_size=4 sees only empty
+            # suffix_starts in the first batch, then a multi-turn sample later.
+            rows = [single_turn] * 8 + [multi_turn_with_reasoning] * 2
+            _write_jsonl(input_dir / "mixed.jsonl", rows)
+
+            _process_file(
+                input_dir / "mixed.jsonl",
+                output_dir,
+                BackboneSuffixStrategy,
+                _TEST_TOKENIZER_PATH,
+                shard_stem="mixed",
+                input_dir=input_dir,
+                num_cpus=2,
+                batch_size=4,
+                rank=0,
+            )
+
+            ds = load_from_disk(str(output_dir / "shards" / "mixed"))
+            self.assertEqual(len(ds), 10)
+            n_with_suffix = sum(
+                1 for row in ds if len(row["suffix_starts"]) > 0
+            )
+            self.assertGreater(n_with_suffix, 0)
 
 
 if __name__ == "__main__":
