@@ -16,7 +16,14 @@ from torchtitan.models.granite.scripts.pretokenize_sft import (
     _shard_stem,
     _write_json_atomic,
 )
-from torchtitan.models.granite.tokenization_strategies import TruncateLastStrategy
+from torchtitan.models.granite.tokenization_strategies import (
+    TruncateEveryTurnStrategy,
+    TruncateLastStrategy,
+)
+
+import os
+
+_HF_ASSETS_PATH = os.environ.get("HF_ASSETS_PATH")
 
 _REPO_ROOT = Path(__file__).parents[4]
 _TEST_TOKENIZER_PATH = str(_REPO_ROOT / "tests" / "assets" / "tokenizer")
@@ -58,14 +65,11 @@ class TestProcessFileCrashWritesStats(unittest.TestCase):
             with open(jsonl_path, "w") as f:
                 f.write(json.dumps({"no_messages_key": []}) + "\n")
 
-            strategy = TruncateLastStrategy(
-                _TEST_TOKENIZER_PATH, failures_path=str(output_dir / "failures.jsonl")
-            )
-
             _process_file(
                 jsonl_path,
                 output_dir,
-                strategy,
+                TruncateLastStrategy,
+                _TEST_TOKENIZER_PATH,
                 shard_stem="bad",
                 input_dir=input_dir,
                 num_cpus=1,
@@ -104,14 +108,11 @@ class TestProcessFileBlankLines(unittest.TestCase):
                 f.write(json.dumps(_valid_sample()) + "\n")
                 f.write("\n")
 
-            strategy = TruncateLastStrategy(
-                _TEST_TOKENIZER_PATH, failures_path=str(output_dir / "failures.jsonl")
-            )
-
             _process_file(
                 jsonl_path,
                 output_dir,
-                strategy,
+                TruncateLastStrategy,
+                _TEST_TOKENIZER_PATH,
                 shard_stem="data",
                 input_dir=input_dir,
                 num_cpus=1,
@@ -139,14 +140,11 @@ class TestProcessFileAllDropped(unittest.TestCase):
             jsonl_path = input_dir / "invalid.jsonl"
             _write_jsonl(jsonl_path, [_invalid_sample_no_assistant()] * 3)
 
-            strategy = TruncateLastStrategy(
-                _TEST_TOKENIZER_PATH, failures_path=str(output_dir / "failures.jsonl")
-            )
-
             _process_file(
                 jsonl_path,
                 output_dir,
-                strategy,
+                TruncateLastStrategy,
+                _TEST_TOKENIZER_PATH,
                 shard_stem="invalid",
                 input_dir=input_dir,
                 num_cpus=1,
@@ -217,16 +215,12 @@ class TestNestedDirStructureEndToEnd(unittest.TestCase):
             self.assertEqual(len(stems), len(set(stems)))
 
             # Process all files
-            strategy = TruncateLastStrategy(
-                _TEST_TOKENIZER_PATH,
-                failures_path=str(output_dir / "failures.jsonl"),
-            )
-
             for f in input_files:
                 _process_file(
                     f,
                     output_dir,
-                    strategy,
+                    TruncateLastStrategy,
+                    _TEST_TOKENIZER_PATH,
                     shard_stem=_shard_stem(f, input_dir),
                     input_dir=input_dir,
                     num_cpus=1,
@@ -351,15 +345,11 @@ class TestTotalTrainedTokensStats(unittest.TestCase):
             jsonl_path = input_dir / "data.jsonl"
             _write_jsonl(jsonl_path, samples)
 
-            strategy = TruncateLastStrategy(
-                _TEST_TOKENIZER_PATH,
-                failures_path=str(output_dir / "failures.jsonl"),
-            )
-
             _process_file(
                 jsonl_path,
                 output_dir,
-                strategy,
+                TruncateLastStrategy,
+                _TEST_TOKENIZER_PATH,
                 shard_stem="data",
                 input_dir=input_dir,
                 num_cpus=1,
@@ -380,6 +370,213 @@ class TestTotalTrainedTokensStats(unittest.TestCase):
             )
             self.assertEqual(stats["total_trained_tokens"], expected_trained)
             self.assertGreater(expected_trained, 0)
+
+
+class TestProcessFileDropStats(unittest.TestCase):
+    """Verify n_dropped is computed from actual failures, not n_lines - n_examples."""
+
+    def test_n_dropped_counts_actual_failures(self):
+        """Mix of valid + invalid → n_dropped equals invalid count."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_dir = tmp_path / "input"
+            input_dir.mkdir()
+            output_dir = tmp_path / "output"
+            output_dir.mkdir()
+
+            valid = _valid_sample()
+            invalid = _invalid_sample_no_assistant()
+            _write_jsonl(input_dir / "mixed.jsonl", [valid, invalid, valid, invalid])
+
+            _process_file(
+                input_dir / "mixed.jsonl",
+                output_dir,
+                TruncateLastStrategy,
+                _TEST_TOKENIZER_PATH,
+                shard_stem="mixed",
+                input_dir=input_dir,
+                num_cpus=1,
+                batch_size=10,
+                rank=0,
+            )
+
+            with open(output_dir / "shards" / "mixed_stats.json") as f:
+                stats = json.load(f)
+            self.assertEqual(stats["n_dropped"], 2)
+            self.assertEqual(stats["n_examples"], 2)
+            self.assertEqual(stats["n_input_conversations"], 4)
+
+    def test_n_dropped_zero_when_all_valid(self):
+        """All valid inputs → n_dropped == 0, no failures file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_dir = tmp_path / "input"
+            input_dir.mkdir()
+            output_dir = tmp_path / "output"
+            output_dir.mkdir()
+
+            _write_jsonl(input_dir / "good.jsonl", [_valid_sample()] * 3)
+
+            _process_file(
+                input_dir / "good.jsonl",
+                output_dir,
+                TruncateLastStrategy,
+                _TEST_TOKENIZER_PATH,
+                shard_stem="good",
+                input_dir=input_dir,
+                num_cpus=1,
+                batch_size=10,
+                rank=0,
+            )
+
+            with open(output_dir / "shards" / "good_stats.json") as f:
+                stats = json.load(f)
+            self.assertEqual(stats["n_dropped"], 0)
+            self.assertEqual(stats["n_examples"], 3)
+            failures_path = output_dir / "shards" / "good_failures.jsonl"
+            self.assertFalse(failures_path.exists())
+
+    @unittest.skipUnless(_HF_ASSETS_PATH, "HF_ASSETS_PATH not set")
+    def test_expanding_strategy_n_dropped_not_negative(self):
+        """TruncateEveryTurnStrategy expands → n_dropped >= 0, n_examples > n_input."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_dir = tmp_path / "input"
+            input_dir.mkdir()
+            output_dir = tmp_path / "output"
+            output_dir.mkdir()
+
+            multi_turn = {
+                "messages": [
+                    {"role": "user", "content": "Q"},
+                    {"role": "assistant", "content": "A", "reasoning_content": "R"},
+                    {"role": "user", "content": "Q2"},
+                    {"role": "assistant", "content": "A2", "reasoning_content": "R2"},
+                    {"role": "user", "content": "Q3"},
+                    {"role": "assistant", "content": "A3", "reasoning_content": "R3"},
+                ]
+            }
+            _write_jsonl(input_dir / "expand.jsonl", [multi_turn] * 2)
+
+            _process_file(
+                input_dir / "expand.jsonl",
+                output_dir,
+                TruncateEveryTurnStrategy,
+                _HF_ASSETS_PATH,
+                shard_stem="expand",
+                input_dir=input_dir,
+                num_cpus=1,
+                batch_size=10,
+                rank=0,
+            )
+
+            with open(output_dir / "shards" / "expand_stats.json") as f:
+                stats = json.load(f)
+            self.assertEqual(stats["n_dropped"], 0)
+            self.assertEqual(stats["n_input_conversations"], 2)
+            # 2 conversations × 3 assistant turns each = 6 examples
+            self.assertEqual(stats["n_examples"], 6)
+            self.assertGreater(stats["n_examples"], stats["n_input_conversations"])
+
+    def test_n_input_conversations_equals_input_lines(self):
+        """n_input_conversations matches non-blank JSONL line count."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_dir = tmp_path / "input"
+            input_dir.mkdir()
+            output_dir = tmp_path / "output"
+            output_dir.mkdir()
+
+            jsonl_path = input_dir / "data.jsonl"
+            with open(jsonl_path, "w") as f:
+                f.write(json.dumps(_valid_sample()) + "\n")
+                f.write("\n")  # blank line
+                f.write(json.dumps(_valid_sample()) + "\n")
+                f.write("   \n")  # whitespace-only line
+                f.write(json.dumps(_valid_sample()) + "\n")
+
+            _process_file(
+                jsonl_path,
+                output_dir,
+                TruncateLastStrategy,
+                _TEST_TOKENIZER_PATH,
+                shard_stem="data",
+                input_dir=input_dir,
+                num_cpus=1,
+                batch_size=10,
+                rank=0,
+            )
+
+            with open(output_dir / "shards" / "data_stats.json") as f:
+                stats = json.load(f)
+            # 3 non-blank lines
+            self.assertEqual(stats["n_input_conversations"], 3)
+
+    def test_all_dropped_n_dropped_equals_n_lines(self):
+        """All invalid inputs → n_dropped == n_lines, shard skipped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_dir = tmp_path / "input"
+            input_dir.mkdir()
+            output_dir = tmp_path / "output"
+            output_dir.mkdir()
+
+            _write_jsonl(
+                input_dir / "bad.jsonl", [_invalid_sample_no_assistant()] * 3
+            )
+
+            _process_file(
+                input_dir / "bad.jsonl",
+                output_dir,
+                TruncateLastStrategy,
+                _TEST_TOKENIZER_PATH,
+                shard_stem="bad",
+                input_dir=input_dir,
+                num_cpus=1,
+                batch_size=10,
+                rank=0,
+            )
+
+            with open(output_dir / "shards" / "bad_stats.json") as f:
+                stats = json.load(f)
+            self.assertTrue(stats["skipped"])
+            self.assertEqual(stats["n_dropped"], 3)
+            self.assertEqual(stats["n_input_conversations"], 3)
+
+    def test_per_shard_failures_file_created(self):
+        """Failures file is per-shard and its line count matches n_dropped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_dir = tmp_path / "input"
+            input_dir.mkdir()
+            output_dir = tmp_path / "output"
+            output_dir.mkdir()
+
+            valid = _valid_sample()
+            invalid = _invalid_sample_no_assistant()
+            _write_jsonl(input_dir / "data.jsonl", [valid, invalid, invalid, valid])
+
+            _process_file(
+                input_dir / "data.jsonl",
+                output_dir,
+                TruncateLastStrategy,
+                _TEST_TOKENIZER_PATH,
+                shard_stem="data",
+                input_dir=input_dir,
+                num_cpus=1,
+                batch_size=10,
+                rank=0,
+            )
+
+            failures_path = output_dir / "shards" / "data_failures.jsonl"
+            self.assertTrue(failures_path.exists())
+            with open(failures_path) as f:
+                lines = f.readlines()
+            self.assertEqual(len(lines), 2)
+
+            with open(output_dir / "shards" / "data_stats.json") as f:
+                stats = json.load(f)
+            self.assertEqual(stats["n_dropped"], len(lines))
 
 
 if __name__ == "__main__":

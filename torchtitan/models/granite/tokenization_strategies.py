@@ -31,6 +31,61 @@ def _validate_messages(messages: list[dict]) -> None:
         raise ValueError("system message must be the first message if present")
 
 
+def _tokenize_all_turns(
+    messages: list[dict],
+    tokenizer: HuggingFaceTokenizer,
+    chat_template_kwargs: dict[str, Any],
+) -> dict[str, list[int] | int]:
+    """Tokenize a conversation labeling every assistant turn.
+
+    Every turn trains the model to predict <|im_end|> (= EOS) after its content.
+    For intermediate turns, loss ends there (the <|im_end|> position is masked
+    since predicting the next-turn header is irrelevant). For the last turn,
+    <|im_end|> is the final prediction target — it's outside input_ids.
+    """
+    _validate_messages(messages)
+    last_asst_idx = max(
+        i for i, m in enumerate(messages) if m["role"] == "assistant"
+    )
+    effective = messages[: last_asst_idx + 1]
+    full_text = tokenizer.apply_chat_template(
+        effective, **chat_template_kwargs
+    ).rstrip("\n")
+    full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
+    if full_tokens[-1] != tokenizer.eos_id:
+        full_tokens.append(tokenizer.eos_id)
+
+    input_ids = full_tokens[:-1]
+    label_ids = [IGNORE_INDEX] * len(input_ids)
+
+    for i, msg in enumerate(effective):
+        if msg["role"] != "assistant":
+            continue
+
+        prefix_text = tokenizer.apply_chat_template(
+            effective[:i],
+            add_generation_prompt=True,
+            **chat_template_kwargs,
+        )
+        prefix_tokens = tokenizer.encode(prefix_text, add_bos=True, add_eos=False)
+        start = len(prefix_tokens) - 1
+
+        if i == last_asst_idx:
+            label_ids[start:] = full_tokens[start + 1 :]
+        else:
+            up_to_text = tokenizer.apply_chat_template(
+                effective[: i + 1], **chat_template_kwargs
+            ).rstrip("\n")
+            up_to_tokens = tokenizer.encode(
+                up_to_text, add_bos=True, add_eos=False
+            )
+            end = len(up_to_tokens) - 2
+            end = min(end + 1, len(input_ids))
+            label_ids[start:end] = full_tokens[start + 1 : end + 1]
+
+    return {"input_ids": input_ids, "labels": label_ids, "n_tokens": len(input_ids)}
+
+
 def _append_failures(path: str, failures: list[dict]) -> None:
     """Append failure records to a JSONL file, safe for concurrent writers."""
     with FileLock(path + ".lock"), open(path, "a") as f:
@@ -42,7 +97,7 @@ class TokenizationStrategy(ABC):
     def __init__(self, tokenizer_path: str, *, failures_path: str | None = None) -> None:
         self._tokenizer_path = tokenizer_path
         self._tokenizer: HuggingFaceTokenizer | None = None
-        self._failures_path = failures_path
+        self.failures_path = failures_path
 
     @property
     def tokenizer(self) -> HuggingFaceTokenizer:
@@ -69,10 +124,10 @@ class TokenizationStrategy(ABC):
                     results[key].append(result[key])
             except Exception as e:
                 logger.warning("Dropping sample: %s", e)
-                if self._failures_path:
+                if self.failures_path:
                     failures.append({"messages": messages, "error": str(e)})
         if failures:
-            _append_failures(self._failures_path, failures)
+            _append_failures(self.failures_path, failures)
         return results
 
     @property
@@ -142,9 +197,10 @@ class BackboneSuffixStrategy(TokenizationStrategy):
         backbone_positions = list(range(len(backbone_input_ids)))
 
         # --- Identify suffix groups ---
-        # A suffix group is a maximal run of (assistant|tool)+ between two user messages.
-        # Find user message indices in effective messages.
+        # A suffix group is a maximal run of (assistant|tool)+ between boundaries.
+        # Boundaries are user messages + last_asst_idx (backbone-labeled separately).
         user_indices = [i for i, m in enumerate(effective) if m["role"] == "user"]
+        group_boundaries = user_indices + [last_asst_idx]
 
         suffix_starts: list[int] = []
         insertion_limits: list[int] = []
@@ -152,9 +208,9 @@ class BackboneSuffixStrategy(TokenizationStrategy):
         all_suffix_labels: list[int] = []
         all_suffix_positions: list[int] = []
 
-        for ui_idx in range(len(user_indices) - 1):
-            group_start = user_indices[ui_idx] + 1  # first message after this user
-            group_end = user_indices[ui_idx + 1]  # exclusive: next user message
+        for bi in range(len(group_boundaries) - 1):
+            group_start = group_boundaries[bi] + 1
+            group_end = group_boundaries[bi + 1]
 
             # Check if any assistant turn in this group has reasoning
             has_reasoning = any(
@@ -519,17 +575,32 @@ class TruncateEveryTurnStrategy(TokenizationStrategy):
                 asst_indices = [
                     i for i, m in enumerate(effective) if m["role"] == "assistant"
                 ]
-                for asst_idx in asst_indices:
-                    truncated = effective[: asst_idx + 1]
-                    result = self._tokenize_one(truncated)
+
+                # Only split when historical turns have reasoning to truncate.
+                # Otherwise a single pass labeling all turns is equivalent.
+                has_historical_reasoning = any(
+                    effective[i].get("reasoning_content", "").strip()
+                    for i in asst_indices[:-1]
+                )
+
+                if has_historical_reasoning:
+                    for asst_idx in asst_indices:
+                        truncated = effective[: asst_idx + 1]
+                        result = self._tokenize_one(truncated)
+                        for key in results:
+                            results[key].append(result[key])
+                else:
+                    result = _tokenize_all_turns(
+                        effective, self.tokenizer, self.chat_template_kwargs
+                    )
                     for key in results:
                         results[key].append(result[key])
             except Exception as e:
                 logger.warning("Dropping sample: %s", e)
-                if self._failures_path:
+                if self.failures_path:
                     failures.append({"messages": messages, "error": str(e)})
         if failures:
-            _append_failures(self._failures_path, failures)
+            _append_failures(self.failures_path, failures)
         return results
 
     @property

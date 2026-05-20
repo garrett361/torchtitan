@@ -112,6 +112,14 @@ def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     tmp.rename(path)
 
 
+def _count_lines(path: Path) -> int:
+    """Count lines in a file, returning 0 if it doesn't exist."""
+    if not path.exists():
+        return 0
+    with open(path) as f:
+        return sum(1 for _ in f)
+
+
 def _tokenize_batch(
     batch: dict[str, list], *, strategy: TokenizationStrategy
 ) -> dict[str, list]:
@@ -121,7 +129,8 @@ def _tokenize_batch(
 def _process_file(
     input_file: Path,
     output_dir: Path,
-    strategy: TokenizationStrategy,
+    strategy_cls: type[TokenizationStrategy],
+    tokenizer_path: str,
     *,
     shard_stem: str,
     input_dir: Path,
@@ -135,6 +144,8 @@ def _process_file(
 
     final_path = shards_dir / shard_stem
     stats_path = shards_dir / f"{shard_stem}_stats.json"
+    failures_path = shards_dir / f"{shard_stem}_failures.jsonl"
+    strategy = strategy_cls(tokenizer_path, failures_path=str(failures_path))
 
     try:
         _tokenize_file(
@@ -142,6 +153,7 @@ def _process_file(
             final_path,
             stats_path,
             strategy,
+            failures_path=failures_path,
             input_dir=input_dir,
             shard_stem=shard_stem,
             num_cpus=num_cpus,
@@ -173,6 +185,7 @@ def _tokenize_file(
     stats_path: Path,
     strategy: TokenizationStrategy,
     *,
+    failures_path: Path,
     input_dir: Path,
     shard_stem: str,
     num_cpus: int,
@@ -200,6 +213,8 @@ def _tokenize_file(
         desc=f"[rank {rank}] {input_file.name}",
     )
 
+    n_dropped = _count_lines(failures_path)
+
     if len(ds) == 0:
         elapsed = time.monotonic() - t0
         logger.warning(
@@ -209,8 +224,9 @@ def _tokenize_file(
         stats: dict[str, Any] = {
             "input_file": str(input_file.relative_to(input_dir)),
             "shard_stem": shard_stem,
+            "n_input_conversations": n_lines,
             "n_examples": 0,
-            "n_dropped": n_lines,
+            "n_dropped": n_dropped,
             "total_tokens": 0,
             "total_trained_tokens": 0,
             "elapsed_seconds": round(elapsed, 2),
@@ -232,8 +248,9 @@ def _tokenize_file(
     stats: dict[str, Any] = {
         "input_file": str(input_file.relative_to(input_dir)),
         "shard_stem": shard_stem,
+        "n_input_conversations": n_lines,
         "n_examples": n_examples,
-        "n_dropped": n_lines - n_examples,
+        "n_dropped": n_dropped,
         "total_tokens": total_tokens,
         "total_trained_tokens": total_trained,
         "elapsed_seconds": round(elapsed, 2),
@@ -272,6 +289,7 @@ def _write_manifest(
             continue
         all_stats.append(s)
 
+    total_input_conversations = sum(s["n_input_conversations"] for s in all_stats)
     total_examples = sum(s["n_examples"] for s in all_stats)
     total_dropped = sum(s["n_dropped"] for s in all_stats)
     total_tokens = sum(s["total_tokens"] for s in all_stats)
@@ -297,6 +315,7 @@ def _write_manifest(
     if total_examples > 0:
         n_tokens_arr = np.array(all_n_tokens, dtype=np.int64)
         stats_block: dict[str, Any] = {
+            "total_input_conversations": total_input_conversations,
             "total_examples": total_examples,
             "examples_dropped": total_dropped,
             "total_tokens": total_tokens,
@@ -315,6 +334,7 @@ def _write_manifest(
         }
     else:
         stats_block = {
+            "total_input_conversations": total_input_conversations,
             "total_examples": 0,
             "examples_dropped": total_dropped,
             "total_tokens": 0,
@@ -670,10 +690,8 @@ def main() -> None:
             )
         seen_stems[stem] = f
 
-    strategy = _STRATEGIES[args.strategy](
-        args.tokenizer_path,
-        failures_path=str(output_dir / "failures.jsonl"),
-    )
+    strategy_cls = _STRATEGIES[args.strategy]
+    strategy_for_config = strategy_cls(args.tokenizer_path)
 
     run_config_path = output_dir / _RUN_CONFIG_FILENAME
     with FileLock(str(run_config_path) + ".lock"):
@@ -682,7 +700,7 @@ def main() -> None:
                 input_dir,
                 output_dir,
                 args.strategy,
-                strategy.chat_template_kwargs,
+                strategy_for_config.chat_template_kwargs,
             )
 
     # All ranks validate config consistency (wait for rank 0 to write on fresh runs).
@@ -694,11 +712,11 @@ def main() -> None:
             f"Resume mismatch: existing shards used strategy {run_config['strategy']!r} "
             f"but current invocation specifies {args.strategy!r}."
         )
-    if run_config["chat_template_kwargs"] != strategy.chat_template_kwargs:
+    if run_config["chat_template_kwargs"] != strategy_for_config.chat_template_kwargs:
         raise ValueError(
             f"Resume mismatch: existing shards used chat_template_kwargs "
             f"{run_config['chat_template_kwargs']} but current invocation has "
-            f"{strategy.chat_template_kwargs}."
+            f"{strategy_for_config.chat_template_kwargs}."
         )
 
     shards_dir = output_dir / "shards"
@@ -727,7 +745,8 @@ def main() -> None:
         _process_file(
             input_file,
             output_dir,
-            strategy,
+            strategy_cls,
+            args.tokenizer_path,
             shard_stem=shard_stem,
             input_dir=input_dir,
             num_cpus=num_cpus,
@@ -746,7 +765,7 @@ def main() -> None:
                 input_files,
                 args.strategy,
                 args.tokenizer_path,
-                strategy.chat_template_kwargs,
+                strategy_for_config.chat_template_kwargs,
             )
             break
         logger.info(

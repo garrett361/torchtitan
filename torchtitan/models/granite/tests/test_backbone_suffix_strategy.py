@@ -172,8 +172,8 @@ class TestBackboneSuffixEquivalence(unittest.TestCase):
         self.assertEqual(bs_result["input_ids"], tl_result["input_ids"])
         self.assertEqual(bs_result["labels"], tl_result["labels"])
 
-    def test_single_user_tool_chain_no_suffixes(self):
-        """Tool chain with single user: no truncation fires → no suffixes."""
+    def test_single_user_tool_chain_has_suffix(self):
+        """Tool chain with single user and reasoning produces a suffix for intermediate turns."""
         msgs = [
             {"role": "user", "content": "Search for X."},
             {"role": "assistant", "content": "Calling search.", "reasoning_content": "Need to search."},
@@ -181,12 +181,9 @@ class TestBackboneSuffixEquivalence(unittest.TestCase):
             {"role": "assistant", "content": "X is at Y.", "reasoning_content": "Got result."},
         ]
         bs_result = self.strategy._tokenize_one(msgs)
-        tl_result = self.truncate_strategy._tokenize_one(msgs)
 
-        self.assertEqual(bs_result["suffix_starts"], [])
-        self.assertEqual(bs_result["insertion_limits"], [])
-        self.assertEqual(bs_result["input_ids"], tl_result["input_ids"])
-        self.assertEqual(bs_result["labels"], tl_result["labels"])
+        self.assertGreater(len(bs_result["suffix_starts"]), 0)
+        self.assertGreater(len(bs_result["insertion_limits"]), 0)
 
     def test_backbone_matches_truncate_last(self):
         """Backbone portion (input_ids before first suffix) matches TruncateLastStrategy exactly.
@@ -1079,6 +1076,50 @@ class TestBackboneSuffixVsTruncateEveryTurnEquivalence(unittest.TestCase):
             {"role": "assistant", "content": "A1", "reasoning_content": "R1"},
         ]
         self._assert_same_trained_tokens(msgs, "system message")
+
+    def test_tool_chain_no_trailing_user(self):
+        """Unclosed group: no user message after the tool chain."""
+        msgs = [
+            {"role": "user", "content": "Search for X"},
+            {"role": "assistant", "content": "call_tool", "reasoning_content": "Need search"},
+            {"role": "tool", "content": "result of search"},
+            {"role": "assistant", "content": "Here's what I found", "reasoning_content": "Got it"},
+        ]
+        self._assert_same_trained_tokens(msgs, "tool chain no trailing user")
+
+    def test_multi_step_agent_no_trailing_user(self):
+        """Multiple tool rounds with no trailing user message."""
+        msgs = [
+            {"role": "user", "content": "Fix the bug"},
+            {"role": "assistant", "content": "read file", "reasoning_content": "R0"},
+            {"role": "tool", "content": "file content"},
+            {"role": "assistant", "content": "edit file", "reasoning_content": "R1"},
+            {"role": "tool", "content": "ok"},
+            {"role": "assistant", "content": "Done", "reasoning_content": "R2"},
+        ]
+        self._assert_same_trained_tokens(msgs, "multi-step agent no trailing user")
+
+    def test_single_user_no_reasoning_tool_chain(self):
+        """No-reasoning tool chain with no trailing user."""
+        msgs = [
+            {"role": "user", "content": "What's 2+2?"},
+            {"role": "assistant", "content": "calc(2+2)"},
+            {"role": "tool", "content": "4"},
+            {"role": "assistant", "content": "The answer is 4"},
+        ]
+        self._assert_same_trained_tokens(msgs, "no-reasoning tool chain no trailing user")
+
+    def test_mixed_reasoning_no_trailing_user(self):
+        """Some turns have reasoning, some don't, no trailing user."""
+        msgs = [
+            {"role": "user", "content": "Help me"},
+            {"role": "assistant", "content": "step1"},
+            {"role": "tool", "content": "result1"},
+            {"role": "assistant", "content": "step2", "reasoning_content": "thinking"},
+            {"role": "tool", "content": "result2"},
+            {"role": "assistant", "content": "final answer", "reasoning_content": "done"},
+        ]
+        self._assert_same_trained_tokens(msgs, "mixed reasoning no trailing user")
 
 
 if __name__ == "__main__":

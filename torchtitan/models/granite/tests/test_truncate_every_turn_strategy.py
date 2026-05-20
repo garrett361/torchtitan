@@ -302,7 +302,8 @@ class TestTruncateEveryTurnEdgeCases(unittest.TestCase):
     def _call(self, messages_list):
         return self.strategy({"messages": messages_list})
 
-    def test_no_reasoning_still_produces_example(self):
+    def test_no_reasoning_no_split(self):
+        """No historical reasoning → single example (no redundant split)."""
         msgs = [
             {"role": "user", "content": "Q"},
             {"role": "assistant", "content": "A"},
@@ -310,10 +311,9 @@ class TestTruncateEveryTurnEdgeCases(unittest.TestCase):
             {"role": "assistant", "content": "A2"},
         ]
         result = self._call([msgs])
-        self.assertEqual(len(result["input_ids"]), 2)
-        for i in range(2):
-            trained = [lbl for lbl in result["labels"][i] if lbl != IGNORE_INDEX]
-            self.assertGreater(len(trained), 0)
+        self.assertEqual(len(result["input_ids"]), 1)
+        trained = [lbl for lbl in result["labels"][0] if lbl != IGNORE_INDEX]
+        self.assertGreater(len(trained), 0)
 
     def test_trailing_user_messages_dropped(self):
         msgs = [
@@ -335,6 +335,117 @@ class TestTruncateEveryTurnEdgeCases(unittest.TestCase):
         ]
         result = self._call([bad_msgs, good_msgs])
         self.assertEqual(len(result["input_ids"]), 1)
+
+
+@unittest.skipUnless(_HF_ASSETS_PATH, "HF_ASSETS_PATH not set")
+class TestTruncateEveryTurnSkipSplit(unittest.TestCase):
+    """Verify that splitting is skipped when no historical turn has reasoning."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.strategy = TruncateEveryTurnStrategy(_HF_ASSETS_PATH)
+        cls.truncate_last = TruncateLastStrategy(_HF_ASSETS_PATH)
+
+    def _call(self, messages_list):
+        return self.strategy({"messages": messages_list})
+
+    def test_no_historical_reasoning_single_example(self):
+        """Multi-turn where only the final turn has reasoning → 1 example."""
+        msgs = [
+            {"role": "user", "content": "Q"},
+            {"role": "assistant", "content": "A"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2"},
+            {"role": "user", "content": "Q3"},
+            {"role": "assistant", "content": "A3", "reasoning_content": "R3"},
+        ]
+        result = self._call([msgs])
+        self.assertEqual(len(result["input_ids"]), 1)
+
+    def test_historical_reasoning_triggers_split(self):
+        """At least one historical turn has reasoning → N examples."""
+        msgs = [
+            {"role": "user", "content": "Q"},
+            {"role": "assistant", "content": "A", "reasoning_content": "R"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2", "reasoning_content": "R2"},
+            {"role": "user", "content": "Q3"},
+            {"role": "assistant", "content": "A3", "reasoning_content": "R3"},
+        ]
+        result = self._call([msgs])
+        self.assertEqual(len(result["input_ids"]), 3)
+
+    def test_only_middle_historical_has_reasoning(self):
+        """3-turn where only the 2nd (historical) turn has reasoning → split."""
+        msgs = [
+            {"role": "user", "content": "Q"},
+            {"role": "assistant", "content": "A"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2", "reasoning_content": "R2"},
+            {"role": "user", "content": "Q3"},
+            {"role": "assistant", "content": "A3", "reasoning_content": "R3"},
+        ]
+        result = self._call([msgs])
+        self.assertEqual(len(result["input_ids"]), 3)
+
+    def test_whitespace_only_reasoning_not_historical(self):
+        """Whitespace-only reasoning_content treated as no-reasoning → no split."""
+        msgs = [
+            {"role": "user", "content": "Q"},
+            {"role": "assistant", "content": "A", "reasoning_content": "   \n  "},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2", "reasoning_content": "R2"},
+        ]
+        result = self._call([msgs])
+        self.assertEqual(len(result["input_ids"]), 1)
+
+    def test_no_split_labels_all_turns(self):
+        """When no historical reasoning, all assistant turns are labeled."""
+        msgs = [
+            {"role": "user", "content": "Q"},
+            {"role": "assistant", "content": "A"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2", "reasoning_content": "R2"},
+        ]
+        every_result = self._call([msgs])
+        self.assertEqual(len(every_result["input_ids"]), 1)
+        labels = every_result["labels"][0]
+        last_result = self.truncate_last._tokenize_one(msgs)
+        last_trained = sum(1 for l in last_result["labels"] if l != IGNORE_INDEX)
+        all_trained = sum(1 for l in labels if l != IGNORE_INDEX)
+        self.assertGreater(
+            all_trained, last_trained,
+            "All-turns labeling must produce more trained tokens than last-turn-only",
+        )
+
+    def test_single_turn_always_single_example(self):
+        """Single-turn (N=1) always produces 1 example."""
+        for rc in ("R", "", None):
+            with self.subTest(reasoning_content=rc):
+                msg = {"role": "assistant", "content": "A"}
+                if rc is not None:
+                    msg["reasoning_content"] = rc
+                msgs = [{"role": "user", "content": "Q"}, msg]
+                result = self._call([msgs])
+                self.assertEqual(len(result["input_ids"]), 1)
+
+    def test_mixed_batch_split_and_nosplit(self):
+        """Batch with one conversation needing split, one not → correct count."""
+        needs_split = [
+            {"role": "user", "content": "Q"},
+            {"role": "assistant", "content": "A", "reasoning_content": "R"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2", "reasoning_content": "R2"},
+        ]
+        no_split = [
+            {"role": "user", "content": "Q"},
+            {"role": "assistant", "content": "A"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2", "reasoning_content": "R2"},
+        ]
+        result = self._call([needs_split, no_split])
+        # needs_split: 2 examples, no_split: 1 example
+        self.assertEqual(len(result["input_ids"]), 3)
 
 
 if __name__ == "__main__":
