@@ -2,6 +2,8 @@ import json
 import logging
 from abc import ABC, abstractmethod
 
+from collections.abc import Callable
+
 from filelock import FileLock
 from typing import Any
 
@@ -31,10 +33,28 @@ def _validate_messages(messages: list[dict]) -> None:
         raise ValueError("system message must be the first message if present")
 
 
+def _fix_empty_thinking(text: str) -> str:
+    """Correct no-reasoning rendering for truncate_history_thinking=False.
+
+    When thinking is preserved in context (not truncated), historical no-reasoning
+    turns should appear as they were generated: the model received <think>\\n from
+    the generation prompt and produced </think>\\n, giving <think>\\n</think>\\n in
+    context. The template normalizes these to <think></think> (adjacent, no newlines).
+    This fixup restores the inference-time form.
+
+    Not needed for truncate_history_thinking=True: in that mode the orchestrator
+    strips thinking using the same template, so <think></think> IS what the model
+    sees at inference.
+    """
+    return text.replace("<think></think>", "<think>\n</think>\n")
+
+
 def _tokenize_all_turns(
     messages: list[dict],
     tokenizer: HuggingFaceTokenizer,
     chat_template_kwargs: dict[str, Any],
+    *,
+    fixup_fn: Callable[[str], str] | None = None,
 ) -> dict[str, list[int] | int]:
     """Tokenize a conversation labeling every assistant turn.
 
@@ -51,6 +71,8 @@ def _tokenize_all_turns(
     full_text = tokenizer.apply_chat_template(
         effective, **chat_template_kwargs
     ).rstrip("\n")
+    if fixup_fn:
+        full_text = fixup_fn(full_text)
     full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
     if full_tokens[-1] != tokenizer.eos_id:
         full_tokens.append(tokenizer.eos_id)
@@ -67,6 +89,8 @@ def _tokenize_all_turns(
             add_generation_prompt=True,
             **chat_template_kwargs,
         )
+        if fixup_fn:
+            prefix_text = fixup_fn(prefix_text)
         prefix_tokens = tokenizer.encode(prefix_text, add_bos=True, add_eos=False)
         start = len(prefix_tokens) - 1
 
@@ -76,6 +100,8 @@ def _tokenize_all_turns(
             up_to_text = tokenizer.apply_chat_template(
                 effective[: i + 1], **chat_template_kwargs
             ).rstrip("\n")
+            if fixup_fn:
+                up_to_text = fixup_fn(up_to_text)
             up_to_tokens = tokenizer.encode(
                 up_to_text, add_bos=True, add_eos=False
             )
@@ -440,25 +466,19 @@ class FullThinkingStrategy(TruncateLastStrategy):
     """Pre-tokenizes multi-turn SFT data with full thinking context.
 
     Uses truncate_history_thinking=False: thinking traces from every assistant turn
-    are preserved in the token sequence. Assistant turns WITH reasoning_content are
-    unmasked in the loss (reasoning + response + </think> + <|im_end|>). Assistant
-    turns WITHOUT reasoning_content are masked (present as context only).
+    are preserved in the token sequence. All assistant turns are loss-unmasked —
+    the model trains on every token it would generate at inference.
 
     Use case: agentic training where the model should learn to produce tool calls,
     reasoning, and final responses — matching what it sees during multi-turn inference
     with truncate_history_thinking=False.
 
-    No-reasoning turn handling:
-        A turn is considered "has reasoning" if its reasoning_content field is
-        non-empty (matching BackboneSuffixStrategy's detection; real training data
-        uses this field exclusively with no embedded <think> tags in content).
-        Turns without reasoning are loss-masked. The template renders them as
-        <think></think>{response} — a token sequence that never occurs at
-        inference time (the model always receives <think>\\n from the generation
-        prompt, not adjacent <think></think>). Unmasking these would train
-        prediction under a context the model never sees during generation. These
-        turns still contribute as context for subsequent unmasked turns. The model
-        learns </think> production from reasoning turns where it IS unmasked.
+    Context fidelity:
+        The chat template renders no-reasoning turns as <think></think>{content},
+        but at inference the model receives <think>\\n from the generation prompt
+        and produces </think>\\n{content}. The _fix_empty_thinking fixup corrects
+        this before tokenization so that training context is token-for-token
+        identical to inference context.
 
     Data provenance note:
         Training data may have been collected under truncate_history_thinking=True
@@ -472,55 +492,10 @@ class FullThinkingStrategy(TruncateLastStrategy):
     _CHAT_TEMPLATE_KWARGS: dict[str, Any] = {"truncate_history_thinking": False}
 
     def _tokenize_one(self, messages: list[dict]) -> dict[str, list[int] | int]:
-        _validate_messages(messages)
-        last_asst_idx = max(
-            i for i, m in enumerate(messages) if m["role"] == "assistant"
+        return _tokenize_all_turns(
+            messages, self.tokenizer, self.chat_template_kwargs,
+            fixup_fn=_fix_empty_thinking,
         )
-        effective = messages[: last_asst_idx + 1]
-
-        full_text = self.tokenizer.apply_chat_template(
-            effective, **self.chat_template_kwargs
-        ).rstrip("\n")
-        full_tokens = self.tokenizer.encode(full_text, add_bos=True, add_eos=False)
-        if full_tokens[-1] != self.tokenizer.eos_id:
-            full_tokens.append(self.tokenizer.eos_id)
-
-        input_ids = full_tokens[:-1]
-        label_ids = [IGNORE_INDEX] * len(input_ids)
-
-        for i, msg in enumerate(effective):
-            if msg["role"] != "assistant":
-                continue
-
-            if not msg.get("reasoning_content", "").strip():
-                logger.debug(
-                    "Assistant turn at index %d has no reasoning_content; "
-                    "keeping loss-masked.",
-                    i,
-                )
-                continue
-
-            prefix_text = self.tokenizer.apply_chat_template(
-                effective[:i], add_generation_prompt=True, **self.chat_template_kwargs
-            )
-            prefix_tokens = self.tokenizer.encode(
-                prefix_text, add_bos=True, add_eos=False
-            )
-            start = len(prefix_tokens) - 1
-
-            if i == last_asst_idx:
-                label_ids[start:] = full_tokens[start + 1 :]
-            else:
-                up_to_text = self.tokenizer.apply_chat_template(
-                    effective[: i + 1], **self.chat_template_kwargs
-                )
-                up_to_tokens = self.tokenizer.encode(
-                    up_to_text, add_bos=True, add_eos=False
-                )
-                end = len(up_to_tokens) - 1
-                label_ids[start:end] = full_tokens[start + 1 : end + 1]
-
-        return {"input_ids": input_ids, "labels": label_ids, "n_tokens": len(input_ids)}
 
 
 class TruncateEveryTurnStrategy(TokenizationStrategy):

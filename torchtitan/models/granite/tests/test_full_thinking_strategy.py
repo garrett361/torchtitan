@@ -94,8 +94,8 @@ class TestFullThinkingStrategy(unittest.TestCase):
             f"Expected 2 unmasked regions (one per reasoning turn), got {len(unmasked_regions)}",
         )
 
-    def test_no_reasoning_turn_masked(self):
-        """Assistant turn without reasoning_content stays loss-masked."""
+    def test_no_reasoning_turn_labeled(self):
+        """Assistant turn without reasoning_content is still loss-unmasked."""
         msgs = [
             {"role": "user", "content": "Q1"},
             {"role": "assistant", "content": "A1"},  # no reasoning
@@ -105,43 +105,6 @@ class TestFullThinkingStrategy(unittest.TestCase):
         result = self._tokenize(msgs)
         labels = result["labels"]
 
-        # Only one unmasked region (the last turn with reasoning)
-        unmasked_regions = []
-        in_region = False
-        start = None
-        for i, lbl in enumerate(labels):
-            if lbl != IGNORE_INDEX and not in_region:
-                in_region = True
-                start = i
-            elif lbl == IGNORE_INDEX and in_region:
-                in_region = False
-                unmasked_regions.append((start, i))
-        if in_region:
-            unmasked_regions.append((start, len(labels)))
-
-        self.assertEqual(
-            len(unmasked_regions),
-            1,
-            f"Expected 1 unmasked region (only reasoning turn), got {len(unmasked_regions)}",
-        )
-
-    def test_mixed_reasoning_and_no_reasoning(self):
-        """Only reasoning turns are unmasked; no-reasoning turns are masked."""
-        msgs = [
-            {"role": "user", "content": "Q1"},
-            {"role": "assistant", "content": "A1", "reasoning_content": "R1"},
-            {"role": "user", "content": "Q2"},
-            {"role": "assistant", "content": "A2"},  # no reasoning
-            {"role": "user", "content": "Q3"},
-            {"role": "assistant", "content": "A3", "reasoning_content": "R3"},
-        ]
-        result = self._tokenize(msgs)
-        labels = result["labels"]
-
-        unmasked_count = sum(1 for lbl in labels if lbl != IGNORE_INDEX)
-        self.assertGreater(unmasked_count, 0)
-
-        # Count contiguous unmasked regions
         unmasked_regions = []
         in_region = False
         start = None
@@ -158,7 +121,42 @@ class TestFullThinkingStrategy(unittest.TestCase):
         self.assertEqual(
             len(unmasked_regions),
             2,
-            "Expected 2 unmasked regions (turns 1 and 3 have reasoning)",
+            f"Expected 2 unmasked regions (both assistant turns), got {len(unmasked_regions)}",
+        )
+
+    def test_mixed_reasoning_and_no_reasoning(self):
+        """All assistant turns are unmasked regardless of reasoning_content."""
+        msgs = [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1", "reasoning_content": "R1"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2"},  # no reasoning
+            {"role": "user", "content": "Q3"},
+            {"role": "assistant", "content": "A3", "reasoning_content": "R3"},
+        ]
+        result = self._tokenize(msgs)
+        labels = result["labels"]
+
+        unmasked_count = sum(1 for lbl in labels if lbl != IGNORE_INDEX)
+        self.assertGreater(unmasked_count, 0)
+
+        unmasked_regions = []
+        in_region = False
+        start = None
+        for i, lbl in enumerate(labels):
+            if lbl != IGNORE_INDEX and not in_region:
+                in_region = True
+                start = i
+            elif lbl == IGNORE_INDEX and in_region:
+                in_region = False
+                unmasked_regions.append((start, i))
+        if in_region:
+            unmasked_regions.append((start, len(labels)))
+
+        self.assertEqual(
+            len(unmasked_regions),
+            3,
+            "Expected 3 unmasked regions (all assistant turns labeled)",
         )
 
     def test_preserves_historical_thinking(self):
@@ -283,10 +281,138 @@ class TestFullThinkingStrategy(unittest.TestCase):
                 break
 
         self.assertIsNotNone(first_region_end)
-        # The label just before the mask resumes should have predicted
-        # something related to turn ending (newline after im_end)
-        last_unmasked_label = labels[first_region_end - 1]
-        self.assertNotEqual(last_unmasked_label, IGNORE_INDEX)
+        # Last label in intermediate region predicts <|im_end|>
+        self.assertEqual(labels[first_region_end - 1], self.im_end_id)
+
+
+@unittest.skipUnless(_HF_ASSETS_PATH, "HF_ASSETS_PATH not set")
+class TestFullThinkingInferenceFidelity(unittest.TestCase):
+    """Verify FullThinkingStrategy produces token sequences matching inference context."""
+
+    @classmethod
+    def setUpClass(cls):
+        from torchtitan.models.granite.tokenization_strategies import (
+            FullThinkingStrategy,
+        )
+
+        cls.strategy = FullThinkingStrategy(_HF_ASSETS_PATH)
+        cls.tok = HuggingFaceTokenizer(tokenizer_path=_HF_ASSETS_PATH)
+        cls.think_id = cls.tok.token_to_id("<think>")
+        cls.end_think_id = cls.tok.token_to_id("</think>")
+        cls.im_end_id = cls.tok.token_to_id("<|im_end|>")
+        cls.newline_id = cls.tok.encode("\n", add_bos=False, add_eos=False)[0]
+
+    def _tokenize(self, messages):
+        return self.strategy._tokenize_one(messages)
+
+    def test_no_reasoning_context_matches_inference(self):
+        """No-reasoning turn has <think> \\n </think> \\n in input_ids (not adjacent)."""
+        msgs = [
+            {"role": "user", "content": "Q"},
+            {"role": "assistant", "content": "A"},
+        ]
+        result = self._tokenize(msgs)
+        ids = result["input_ids"]
+
+        think_pos = ids.index(self.think_id)
+        self.assertEqual(ids[think_pos + 1], self.newline_id)
+        self.assertEqual(ids[think_pos + 2], self.end_think_id)
+        self.assertEqual(ids[think_pos + 3], self.newline_id)
+
+    def test_reasoning_context_unchanged(self):
+        """Reasoning turn still has <think> \\n ... </think> \\n structure."""
+        msgs = [
+            {"role": "user", "content": "Q"},
+            {"role": "assistant", "content": "A", "reasoning_content": "Because math."},
+        ]
+        result = self._tokenize(msgs)
+        ids = result["input_ids"]
+
+        think_pos = ids.index(self.think_id)
+        # \n after <think> is always separate (special token forces boundary)
+        self.assertEqual(ids[think_pos + 1], self.newline_id)
+        end_think_pos = ids.index(self.end_think_id, think_pos)
+        # \n after </think> is always separate (special token forces boundary)
+        self.assertEqual(ids[end_think_pos + 1], self.newline_id)
+        # Reasoning content exists between <think>\n and </think>
+        self.assertGreater(end_think_pos, think_pos + 2)
+
+    def test_labels_cover_all_generated_tokens(self):
+        """Labels span from first generated token through predicting <|im_end|>."""
+        msgs = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there"},
+        ]
+        result = self._tokenize(msgs)
+        ids = result["input_ids"]
+        labels = result["labels"]
+
+        # Generation starts after <think>\n (the generation prompt suffix)
+        think_pos = ids.index(self.think_id)
+        gen_start = think_pos + 1  # \n position — first generated token is at +2
+        # But labels use next-token prediction: label at pos P predicts token at P+1
+        # So first labeled position is think_pos + 1 (predicts </think> or reasoning)
+        first_labeled = next(i for i, l in enumerate(labels) if l != IGNORE_INDEX)
+        self.assertEqual(first_labeled, gen_start)
+
+        # Last label should be <|im_end|> (EOS prediction)
+        last_labeled = max(i for i, l in enumerate(labels) if l != IGNORE_INDEX)
+        self.assertEqual(labels[last_labeled], self.im_end_id)
+
+    def test_full_passage_token_equivalence(self):
+        """input_ids match a manually constructed inference-time sequence."""
+        msgs = [
+            {"role": "user", "content": "Search"},
+            {"role": "assistant", "content": "Calling tool."},
+            {"role": "tool", "content": "Result here."},
+            {"role": "assistant", "content": "Done.", "reasoning_content": "Got it."},
+        ]
+        result = self._tokenize(msgs)
+        ids = result["input_ids"]
+
+        # Construct expected text: template + literal fixup (not importing the impl)
+        raw_text = self.tok.apply_chat_template(
+            msgs, truncate_history_thinking=False
+        ).rstrip("\n")
+        # The template renders no-reasoning turns as <think></think>{content}.
+        # Inference context is <think>\n</think>\n{content}. Apply literally:
+        fixed_text = raw_text.replace("<think></think>", "<think>\n</think>\n")
+        expected_tokens = self.tok.encode(fixed_text, add_bos=True, add_eos=False)
+        if expected_tokens[-1] != self.tok.eos_id:
+            expected_tokens.append(self.tok.eos_id)
+        expected_ids = expected_tokens[:-1]
+
+        self.assertEqual(ids, expected_ids)
+
+    def test_intermediate_last_label_is_eos(self):
+        """For every assistant turn, the last label in its region is <|im_end|>."""
+        msgs = [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1", "reasoning_content": "R1"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2", "reasoning_content": "R2"},
+        ]
+        result = self._tokenize(msgs)
+        labels = result["labels"]
+
+        # Find unmasked regions
+        regions = []
+        in_region = False
+        start = None
+        for i, lbl in enumerate(labels):
+            if lbl != IGNORE_INDEX and not in_region:
+                in_region = True
+                start = i
+            elif lbl == IGNORE_INDEX and in_region:
+                in_region = False
+                regions.append((start, i))
+        if in_region:
+            regions.append((start, len(labels)))
+
+        self.assertEqual(len(regions), 2)
+        # Last label in each region should be <|im_end|>
+        for reg_start, reg_end in regions:
+            self.assertEqual(labels[reg_end - 1], self.im_end_id)
 
 
 @unittest.skipUnless(_HF_ASSETS_PATH, "HF_ASSETS_PATH not set")
