@@ -314,6 +314,35 @@ class TestChatTemplate(unittest.TestCase):
         self.assertEqual(prefix_tokens[-1], newline_id)
         self.assertEqual(backbone_tokens[len(prefix_tokens) - 1], end_think_id)
 
+    def test_special_tokens_are_atomic_in_offset_table(self):
+        """Special tokens produce exactly one entry in the Rust encoder's offset table.
+
+        The offset-based _tokenize_one relies on bisect over character offsets. If
+        <think>, </think>, <|im_start|>, or <|im_end|> were split into multiple
+        sub-tokens, char_to_token_idx would return the wrong index.
+        """
+        for token in ("<think>", "</think>", "<|im_start|>", "<|im_end|>"):
+            token_id = self._tokenizer.tokenizer.token_to_id(token)
+            self.assertIsNotNone(token_id, f"{token} must be a registered token")
+
+            text = f"hello{token}world"
+            encoding = self._tokenizer.tokenizer.encode(text)
+            token_ids = encoding.ids
+            offsets = encoding.offsets
+
+            positions = [i for i, tid in enumerate(token_ids) if tid == token_id]
+            self.assertEqual(
+                len(positions), 1,
+                f"{token} must appear exactly once in encoding of {text!r}, got {positions}",
+            )
+            idx = positions[0]
+            start, end = offsets[idx]
+            self.assertEqual(
+                end - start, len(token),
+                f"{token} offset span must equal its character length "
+                f"(atomic tokenization); got span ({start}, {end})",
+            )
+
 
 class TestPrefixInvariant(unittest.TestCase):
     """Structural guarantees relied upon by the offset-based _tokenize_one.

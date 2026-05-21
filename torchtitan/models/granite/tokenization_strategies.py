@@ -102,6 +102,70 @@ def _tokenize_all_turns(
     For intermediate turns, loss ends there (the <|im_end|> position is masked
     since predicting the next-turn header is irrelevant). For the last turn,
     <|im_end|> is the final prediction target — it's outside input_ids.
+
+    Uses a single encode + character-offset bisect for all boundary lookups.
+    """
+    _validate_messages(messages)
+    _warn_special_tokens_in_content(messages)
+    last_asst_idx = max(
+        i for i, m in enumerate(messages) if m["role"] == "assistant"
+    )
+    effective = messages[: last_asst_idx + 1]
+    full_text = tokenizer.apply_chat_template(
+        effective, **chat_template_kwargs
+    ).rstrip("\n")
+    if fixup_fn:
+        full_text = fixup_fn(full_text)
+    full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
+    if full_tokens[-1] != tokenizer.eos_id:
+        full_tokens.append(tokenizer.eos_id)
+
+    input_ids = full_tokens[:-1]
+    label_ids = [IGNORE_INDEX] * len(input_ids)
+
+    full_encoding = tokenizer.tokenizer.encode(full_text)
+    token_starts = [o[0] for o in full_encoding.offsets]
+
+    for i, msg in enumerate(effective):
+        if msg["role"] != "assistant":
+            continue
+
+        prefix_render = tokenizer.apply_chat_template(
+            effective[:i], **chat_template_kwargs
+        ).rstrip("\n")
+        if fixup_fn:
+            prefix_render = fixup_fn(prefix_render)
+        prefix_end = len(prefix_render)
+
+        think_pos = full_text.index("<think>", prefix_end)
+        start = _char_to_token_idx(token_starts, think_pos + len("<think>"))
+
+        if i == last_asst_idx:
+            label_ids[start:] = full_tokens[start + 1:]
+        else:
+            end_text = tokenizer.apply_chat_template(
+                effective[:i + 1], **chat_template_kwargs
+            ).rstrip("\n")
+            if fixup_fn:
+                end_text = fixup_fn(end_text)
+            # Result equals len(encode(end_text)): -1 for length→index, -1 to skip <|im_end|>
+            label_end = _char_to_token_idx(token_starts, len(end_text)) - 2
+            end = min(label_end + 1, len(input_ids))
+            label_ids[start:end] = full_tokens[start + 1 : end + 1]
+
+    return {"input_ids": input_ids, "labels": label_ids, "n_tokens": len(input_ids)}
+
+
+def _tokenize_all_turns_reference(
+    messages: list[dict],
+    tokenizer: HuggingFaceTokenizer,
+    chat_template_kwargs: dict[str, Any],
+    *,
+    fixup_fn: Callable[[str], str] | None = None,
+) -> dict[str, list[int] | int]:
+    """Reference implementation using per-turn encode calls.
+
+    Kept for correctness testing against the offset-based _tokenize_all_turns.
     """
     _validate_messages(messages)
     last_asst_idx = max(
@@ -135,10 +199,10 @@ def _tokenize_all_turns(
         start = len(prefix_tokens) - 1
 
         if i == last_asst_idx:
-            label_ids[start:] = full_tokens[start + 1 :]
+            label_ids[start:] = full_tokens[start + 1:]
         else:
             up_to_text = tokenizer.apply_chat_template(
-                effective[: i + 1], **chat_template_kwargs
+                effective[:i + 1], **chat_template_kwargs
             ).rstrip("\n")
             if fixup_fn:
                 up_to_text = fixup_fn(up_to_text)
@@ -165,12 +229,20 @@ class TokenizationStrategy(ABC):
         self._tokenizer: HuggingFaceTokenizer | None = None
         self.failures_path = failures_path
 
+    _REQUIRED_SPECIAL_TOKENS = ("<think>", "</think>", "<|im_start|>", "<|im_end|>")
+
     @property
     def tokenizer(self) -> HuggingFaceTokenizer:
         if self._tokenizer is None:
             tok = HuggingFaceTokenizer(tokenizer_path=self._tokenizer_path)
             if tok.eos_id is None:
                 raise ValueError("Tokenizer must have a valid eos_id")
+            for token in self._REQUIRED_SPECIAL_TOKENS:
+                if tok.tokenizer.token_to_id(token) is None:
+                    raise ValueError(
+                        f"{token} must be a registered special token; "
+                        f"offset-based boundary lookup requires atomic tokenization"
+                    )
             self._tokenizer = tok
         return self._tokenizer
 
@@ -706,6 +778,38 @@ class TruncateEveryTurnStrategy(TokenizationStrategy):
 
     def _tokenize_one(self, messages: list[dict]) -> dict[str, list[int] | int]:
         _validate_messages(messages)
+        _warn_special_tokens_in_content(messages)
+        last_asst_idx = max(
+            i for i, m in enumerate(messages) if m["role"] == "assistant"
+        )
+        effective = messages[: last_asst_idx + 1]
+        full_text = self.tokenizer.apply_chat_template(
+            effective, **self.chat_template_kwargs
+        ).rstrip("\n")
+        full_tokens = self.tokenizer.encode(full_text, add_bos=True, add_eos=False)
+        if full_tokens[-1] != self.tokenizer.eos_id:
+            full_tokens.append(self.tokenizer.eos_id)
+        input_ids = full_tokens[:-1]
+        label_ids = [IGNORE_INDEX] * len(input_ids)
+
+        full_encoding = self.tokenizer.tokenizer.encode(full_text)
+        token_starts = [o[0] for o in full_encoding.offsets]
+
+        prefix_end = len(self.tokenizer.apply_chat_template(
+            effective[:-1], **self.chat_template_kwargs
+        ).rstrip("\n"))
+        think_pos = full_text.index("<think>", prefix_end)
+        start = _char_to_token_idx(token_starts, think_pos + len("<think>"))
+
+        label_ids[start:] = full_tokens[start + 1:]
+        return {"input_ids": input_ids, "labels": label_ids, "n_tokens": len(input_ids)}
+
+    def _tokenize_one_reference(self, messages: list[dict]) -> dict[str, list[int] | int]:
+        """Reference implementation using per-turn encode calls.
+
+        Kept for correctness testing against the offset-based _tokenize_one.
+        """
+        _validate_messages(messages)
         last_asst_idx = max(
             i for i, m in enumerate(messages) if m["role"] == "assistant"
         )
@@ -725,7 +829,7 @@ class TruncateEveryTurnStrategy(TokenizationStrategy):
         )
         prefix_tokens = self.tokenizer.encode(prefix_text, add_bos=True, add_eos=False)
         start = len(prefix_tokens) - 1
-        label_ids[start:] = full_tokens[start + 1 :]
+        label_ids[start:] = full_tokens[start + 1:]
         return {"input_ids": input_ids, "labels": label_ids, "n_tokens": len(input_ids)}
 
     def __call__(self, batch: dict[str, list]) -> dict[str, list]:

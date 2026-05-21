@@ -17,6 +17,8 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.models.granite.tokenization_strategies import (
     TruncateEveryTurnStrategy,
     TruncateLastStrategy,
+    _tokenize_all_turns,
+    _tokenize_all_turns_reference,
 )
 
 load_dotenv()
@@ -446,6 +448,225 @@ class TestTruncateEveryTurnSkipSplit(unittest.TestCase):
         result = self._call([needs_split, no_split])
         # needs_split: 2 examples, no_split: 1 example
         self.assertEqual(len(result["input_ids"]), 3)
+
+
+class TestSpecialTokenValidation(unittest.TestCase):
+    """Verify TokenizationStrategy raises on tokenizers missing required special tokens."""
+
+    def test_missing_special_tokens_raises(self):
+        strategy = TruncateEveryTurnStrategy("tests/assets/tokenizer")
+        with self.assertRaises(ValueError) as ctx:
+            _ = strategy.tokenizer
+        self.assertIn("registered special token", str(ctx.exception))
+
+    @unittest.skipUnless(_HF_ASSETS_PATH, "HF_ASSETS_PATH not set")
+    def test_valid_tokenizer_passes(self):
+        strategy = TruncateEveryTurnStrategy(_HF_ASSETS_PATH)
+        _ = strategy.tokenizer
+
+
+@unittest.skipUnless(_HF_ASSETS_PATH, "HF_ASSETS_PATH not set")
+class TestOffsetBasedEquivalence(unittest.TestCase):
+    """Verify offset-based implementations match per-encode references.
+
+    _assert_all_turns_equivalent is only valid when no intermediate assistant turn
+    has reasoning_content, because truncate_history_thinking=True breaks the prefix
+    invariant for reasoning turns that become historical in the full render. Tests
+    with intermediate reasoning only call _assert_tokenize_one_equivalent.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.strategy = TruncateEveryTurnStrategy(_HF_ASSETS_PATH)
+        cls.tok = HuggingFaceTokenizer(tokenizer_path=_HF_ASSETS_PATH)
+        cls.kwargs = {"truncate_history_thinking": True}
+
+    def _assert_tokenize_one_equivalent(self, msgs):
+        ref = self.strategy._tokenize_one_reference(msgs)
+        opt = self.strategy._tokenize_one(msgs)
+        for key in ref:
+            self.assertEqual(ref[key], opt[key], f"_tokenize_one: {key} mismatch")
+
+    def _assert_all_turns_equivalent(self, msgs, *, fixup_fn=None):
+        """Only valid when no intermediate turn has reasoning (prefix invariant)."""
+        ref = _tokenize_all_turns_reference(
+            msgs, self.tok, self.kwargs, fixup_fn=fixup_fn
+        )
+        opt = _tokenize_all_turns(msgs, self.tok, self.kwargs, fixup_fn=fixup_fn)
+        for key in ref:
+            self.assertEqual(ref[key], opt[key], f"_tokenize_all_turns: {key} mismatch")
+
+    def test_single_turn_reasoning(self):
+        msgs = [
+            {"role": "user", "content": "Explain quicksort."},
+            {"role": "assistant", "content": "Here is quicksort.", "reasoning_content": "Divide and conquer."},
+        ]
+        self._assert_tokenize_one_equivalent(msgs)
+        self._assert_all_turns_equivalent(msgs)
+
+    def test_single_turn_no_reasoning(self):
+        msgs = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there."},
+        ]
+        self._assert_tokenize_one_equivalent(msgs)
+        self._assert_all_turns_equivalent(msgs)
+
+    def test_multi_turn_no_reasoning(self):
+        msgs = [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2"},
+            {"role": "user", "content": "Q3"},
+            {"role": "assistant", "content": "A3"},
+        ]
+        self._assert_tokenize_one_equivalent(msgs)
+        self._assert_all_turns_equivalent(msgs)
+
+    def test_multi_turn_all_reasoning(self):
+        """Intermediate reasoning: _tokenize_one only (prefix invariant breaks for all_turns)."""
+        msgs = [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1", "reasoning_content": "R1"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2", "reasoning_content": "R2"},
+            {"role": "user", "content": "Q3"},
+            {"role": "assistant", "content": "A3", "reasoning_content": "R3"},
+        ]
+        self._assert_tokenize_one_equivalent(msgs)
+
+    def test_multi_turn_mixed_reasoning(self):
+        """Intermediate reasoning: _tokenize_one only (prefix invariant breaks for all_turns)."""
+        msgs = [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1", "reasoning_content": "R1"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2"},
+            {"role": "user", "content": "Q3"},
+            {"role": "assistant", "content": "A3", "reasoning_content": "R3"},
+        ]
+        self._assert_tokenize_one_equivalent(msgs)
+
+    def test_tool_chain_no_reasoning(self):
+        msgs = [
+            {"role": "user", "content": "Search for info."},
+            {"role": "assistant", "content": "Calling search."},
+            {"role": "tool", "content": "Result: found data."},
+            {"role": "assistant", "content": "Here is the data."},
+            {"role": "user", "content": "Thanks."},
+            {"role": "assistant", "content": "You're welcome."},
+        ]
+        self._assert_tokenize_one_equivalent(msgs)
+        self._assert_all_turns_equivalent(msgs)
+
+    def test_tool_chain_with_reasoning(self):
+        """Intermediate reasoning: _tokenize_one only (prefix invariant breaks for all_turns)."""
+        msgs = [
+            {"role": "user", "content": "Search for info."},
+            {"role": "assistant", "content": "Calling search.", "reasoning_content": "I should search."},
+            {"role": "tool", "content": "Result: found data."},
+            {"role": "assistant", "content": "Here is the data.", "reasoning_content": "Analyzing results."},
+            {"role": "user", "content": "Follow up."},
+            {"role": "assistant", "content": "Final answer.", "reasoning_content": "Wrapping up."},
+        ]
+        self._assert_tokenize_one_equivalent(msgs)
+
+    def test_system_message(self):
+        """Intermediate reasoning: _tokenize_one only (prefix invariant breaks for all_turns)."""
+        msgs = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello."},
+            {"role": "assistant", "content": "Hi!", "reasoning_content": "Greeting."},
+            {"role": "user", "content": "Bye."},
+            {"role": "assistant", "content": "Goodbye!", "reasoning_content": "Farewell."},
+        ]
+        self._assert_tokenize_one_equivalent(msgs)
+
+    def test_system_message_no_reasoning(self):
+        msgs = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello."},
+            {"role": "assistant", "content": "Hi!"},
+            {"role": "user", "content": "Bye."},
+            {"role": "assistant", "content": "Goodbye!"},
+        ]
+        self._assert_tokenize_one_equivalent(msgs)
+        self._assert_all_turns_equivalent(msgs)
+
+    def test_many_turns_with_reasoning(self):
+        """Intermediate reasoning: _tokenize_one only (prefix invariant breaks for all_turns)."""
+        msgs = []
+        for i in range(20):
+            msgs.append({"role": "user", "content": f"Question {i}"})
+            rc = f"Reasoning {i}" if i % 3 == 0 else ""
+            msg = {"role": "assistant", "content": f"Answer {i}"}
+            if rc:
+                msg["reasoning_content"] = rc
+            msgs.append(msg)
+        self._assert_tokenize_one_equivalent(msgs)
+
+    def test_many_turns_no_reasoning(self):
+        msgs = []
+        for i in range(20):
+            msgs.append({"role": "user", "content": f"Question {i}"})
+            msgs.append({"role": "assistant", "content": f"Answer {i}"})
+        self._assert_tokenize_one_equivalent(msgs)
+        self._assert_all_turns_equivalent(msgs)
+
+    def test_many_turns_last_only_reasoning(self):
+        msgs = []
+        for i in range(20):
+            msgs.append({"role": "user", "content": f"Question {i}"})
+            msg = {"role": "assistant", "content": f"Answer {i}"}
+            if i == 19:
+                msg["reasoning_content"] = "Final reasoning"
+            msgs.append(msg)
+        self._assert_tokenize_one_equivalent(msgs)
+        self._assert_all_turns_equivalent(msgs)
+
+    def test_all_turns_with_fixup_fn(self):
+        from torchtitan.models.granite.tokenization_strategies import (
+            _fix_empty_thinking,
+        )
+
+        msgs = [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2", "reasoning_content": "R2"},
+        ]
+        kwargs_no_truncate = {"truncate_history_thinking": False}
+        ref = _tokenize_all_turns_reference(
+            msgs, self.tok, kwargs_no_truncate, fixup_fn=_fix_empty_thinking
+        )
+        opt = _tokenize_all_turns(
+            msgs, self.tok, kwargs_no_truncate, fixup_fn=_fix_empty_thinking
+        )
+        for key in ref:
+            self.assertEqual(ref[key], opt[key], f"_tokenize_all_turns with fixup: {key} mismatch")
+
+    def test_all_turns_with_fixup_fn_many_turns(self):
+        from torchtitan.models.granite.tokenization_strategies import (
+            _fix_empty_thinking,
+        )
+
+        msgs = []
+        for i in range(10):
+            msgs.append({"role": "user", "content": f"Question {i}"})
+            msg = {"role": "assistant", "content": f"Answer {i}"}
+            if i % 3 == 0:
+                msg["reasoning_content"] = f"Reasoning {i}"
+            msgs.append(msg)
+        kwargs_no_truncate = {"truncate_history_thinking": False}
+        ref = _tokenize_all_turns_reference(
+            msgs, self.tok, kwargs_no_truncate, fixup_fn=_fix_empty_thinking
+        )
+        opt = _tokenize_all_turns(
+            msgs, self.tok, kwargs_no_truncate, fixup_fn=_fix_empty_thinking
+        )
+        for key in ref:
+            self.assertEqual(ref[key], opt[key], f"_tokenize_all_turns with fixup (many): {key} mismatch")
 
 
 if __name__ == "__main__":
