@@ -370,7 +370,7 @@ class MetricsProcessor(Configurable):
         # Attention cost tracking (initialized lazily via setup_attn_cost_tracking)
         self._attn_cost_buf: torch.Tensor | None = None
         self._attn_cost_count: int = 0
-        self._attn_cost_max: int = 0
+        self._attn_cost_max: float = 0
         self._attn_cost_capacity: int = 0
         self._attn_cost_device: torch.device | None = None
 
@@ -384,7 +384,7 @@ class MetricsProcessor(Configurable):
     def setup_attn_cost_tracking(
         self, *, seq_len: int, gradient_accumulation_steps: int, device: torch.device
     ):
-        self._attn_cost_max = seq_len * (seq_len + 1) // 2
+        self._attn_cost_max = seq_len * (seq_len + 1) / 2
         self._attn_cost_capacity = self.config.log_freq * gradient_accumulation_steps
         self._attn_cost_buf = torch.zeros(self._attn_cost_capacity, dtype=torch.int64)
         self._attn_cost_count = 0
