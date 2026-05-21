@@ -356,6 +356,8 @@ class MetricsProcessor(Configurable):
         self.data_loading_times = []
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
+        self._time_start: float | None = None
+        self._step_start: int | None = None
 
         self.has_quantization = has_quantization
 
@@ -553,6 +555,10 @@ class MetricsProcessor(Configurable):
 
         time_delta = time.perf_counter() - self.time_last_log
 
+        if self._time_start is None:
+            self._time_start = time.perf_counter() - time_delta
+            self._step_start = max(0, step - self.config.log_freq)
+
         # tokens per second per device, abbreviated as tps
         tps = self.ntokens_since_last_log / (
             time_delta * self.parallel_dims.non_data_parallel_size
@@ -573,9 +579,12 @@ class MetricsProcessor(Configurable):
             mfu = 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
 
         time_end_to_end = time_delta / self.config.log_freq
-        eta = timedelta(seconds=int(time_end_to_end * (total_steps - step)))
+        avg_time_per_step = (time.perf_counter() - self._time_start) / (
+            step - self._step_start
+        )
+        eta = timedelta(seconds=int(avg_time_per_step * (total_steps - step)))
         eta_ckpt = (
-            timedelta(seconds=int(time_end_to_end * steps_to_next_ckpt))
+            timedelta(seconds=int(avg_time_per_step * steps_to_next_ckpt))
             if steps_to_next_ckpt is not None
             else None
         )
