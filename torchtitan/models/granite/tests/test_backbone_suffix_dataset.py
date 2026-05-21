@@ -139,7 +139,7 @@ class TestBackboneSuffixDatasetOutputShape(unittest.TestCase):
         """Batch dict has all required keys for backbone_suffix mask."""
         ds = self._make_dataset([_example_one_suffix()])
         batch_dict, labels, stats = next(iter(ds))
-        for key in ("input", "positions", "conv_ids", "suffix_ids", "insertion_limits"):
+        for key in ("input", "positions", "conv_ids", "suffix_ids", "insertion_limits", "attn_cost"):
             self.assertIn(key, batch_dict, f"missing key: {key}")
         self.assertIsInstance(labels, torch.Tensor)
         self.assertIn("n_total_tokens", stats)
@@ -149,9 +149,11 @@ class TestBackboneSuffixDatasetOutputShape(unittest.TestCase):
         seq_len = 16
         ds = self._make_dataset([_example_one_suffix()], seq_len=seq_len)
         batch_dict, labels, _ = next(iter(ds))
-        for key, tensor in batch_dict.items():
-            self.assertEqual(tensor.shape, (seq_len,), f"{key} shape mismatch")
+        per_position_keys = ("input", "positions", "conv_ids", "suffix_ids", "insertion_limits")
+        for key in per_position_keys:
+            self.assertEqual(batch_dict[key].shape, (seq_len,), f"{key} shape mismatch")
         self.assertEqual(labels.shape, (seq_len,))
+        self.assertEqual(batch_dict["attn_cost"].shape, (), "attn_cost should be scalar")
 
     def test_seq_len_drop(self):
         """Examples exceeding seq_len are dropped entirely."""
