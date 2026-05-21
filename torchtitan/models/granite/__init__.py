@@ -105,8 +105,8 @@ def _build_granite_layers(
 
 
 def _make_untied(
-    tied_builder: Callable[[str], GraniteModel.Config],
-) -> Callable[[str], GraniteModel.Config]:
+    tied_builder: Callable[..., GraniteModel.Config],
+) -> Callable[..., GraniteModel.Config]:
     """Wrap a tied-model config builder to produce an untied variant."""
 
     def builder(attn_backend: str = "sdpa") -> GraniteModel.Config:
@@ -125,16 +125,24 @@ def _make_untied(
     return builder
 
 
-def _debugmodel(attn_backend: str = "sdpa") -> GraniteModel.Config:
-    dim = 256
-    n_heads = 16
-    n_layers = 4
-    vocab_size = 2048
+def _build_granite_config(
+    *,
+    dim: int,
+    n_heads: int,
+    n_layers: int,
+    vocab_size: int,
+    hidden_dim: int,
+    residual_multiplier: float,
+    theta: float,
+    logits_scaling: float,
+    n_kv_heads: int | None = None,
+    attn_backend: str = "sdpa",
+) -> GraniteModel.Config:
     return GraniteModel.Config(
         dim=dim,
         vocab_size=vocab_size,
         embedding_multiplier=12.0,
-        logits_scaling=16.0,
+        logits_scaling=logits_scaling,
         enable_weight_tying=True,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
@@ -150,50 +158,7 @@ def _debugmodel(attn_backend: str = "sdpa") -> GraniteModel.Config:
         rope=RoPE.Config(
             dim=dim // n_heads,
             max_seq_len=131072,
-            theta=500000,
-            backend="complex",
-            scaling="none",
-        ),
-        layers=_build_granite_layers(
-            n_layers=n_layers,
-            dim=dim,
-            n_heads=n_heads,
-            hidden_dim=512,
-            residual_multiplier=0.22,
-            attn_backend=attn_backend,
-        ),
-    )
-
-
-def _debugmodel_fa4(attn_backend: str = "fa4") -> GraniteModel.Config:
-    """Debug model with head_dim=64 (FA4 backward hits an ICE — internal compiler
-    error in the CuTe DSL kernel compiler — on head_dim<64)."""
-    dim = 256
-    n_heads = 4
-    n_kv_heads = 2
-    n_layers = 4
-    vocab_size = 2048
-    return GraniteModel.Config(
-        dim=dim,
-        vocab_size=vocab_size,
-        embedding_multiplier=12.0,
-        logits_scaling=16.0,
-        enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size,
-            embedding_dim=dim,
-            param_init=_EMBEDDING_SKIP_INIT,
-        ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        output=Linear.Config(
-            in_features=dim,
-            out_features=vocab_size,
-            param_init=_output_linear_init(dim),
-        ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=131072,
-            theta=500000,
+            theta=theta,
             backend="complex",
             scaling="none",
         ),
@@ -202,150 +167,41 @@ def _debugmodel_fa4(attn_backend: str = "fa4") -> GraniteModel.Config:
             dim=dim,
             n_heads=n_heads,
             n_kv_heads=n_kv_heads,
-            hidden_dim=512,
-            residual_multiplier=0.22,
-            attn_backend=attn_backend,
-        ),
-    )
-
-
-def _3b(attn_backend: str = "sdpa") -> GraniteModel.Config:
-    dim = 2560
-    n_heads = 40
-    n_kv_heads = 8
-    n_layers = 40
-    vocab_size = 100352
-    return GraniteModel.Config(
-        dim=dim,
-        vocab_size=vocab_size,
-        embedding_multiplier=12.0,
-        logits_scaling=10.0,
-        enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size,
-            embedding_dim=dim,
-            param_init=_EMBEDDING_SKIP_INIT,
-        ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        output=Linear.Config(
-            in_features=dim,
-            out_features=vocab_size,
-            param_init=_output_linear_init(dim),
-        ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=131072,
-            theta=10_000_000,
-            backend="complex",
-            scaling="none",
-        ),
-        layers=_build_granite_layers(
-            n_layers=n_layers,
-            dim=dim,
-            n_heads=n_heads,
-            n_kv_heads=n_kv_heads,
-            hidden_dim=8192,
-            residual_multiplier=0.22,
-            attn_backend=attn_backend,
-        ),
-    )
-
-
-def _8b(attn_backend: str = "sdpa") -> GraniteModel.Config:
-    dim = 4096
-    n_heads = 32
-    n_kv_heads = 8
-    n_layers = 40
-    vocab_size = 100352
-    return GraniteModel.Config(
-        dim=dim,
-        vocab_size=vocab_size,
-        embedding_multiplier=12.0,
-        logits_scaling=16.0,
-        enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size,
-            embedding_dim=dim,
-            param_init=_EMBEDDING_SKIP_INIT,
-        ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        output=Linear.Config(
-            in_features=dim,
-            out_features=vocab_size,
-            param_init=_output_linear_init(dim),
-        ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=131072,
-            theta=10_000_000,
-            backend="complex",
-            scaling="none",
-        ),
-        layers=_build_granite_layers(
-            n_layers=n_layers,
-            dim=dim,
-            n_heads=n_heads,
-            n_kv_heads=n_kv_heads,
-            hidden_dim=12800,
-            residual_multiplier=0.22,
-            attn_backend=attn_backend,
-        ),
-    )
-
-
-def _30b(attn_backend: str = "sdpa") -> GraniteModel.Config:
-    dim = 4096
-    n_heads = 32
-    n_kv_heads = 8
-    n_layers = 64
-    vocab_size = 100352
-    return GraniteModel.Config(
-        dim=dim,
-        vocab_size=vocab_size,
-        embedding_multiplier=12.0,
-        logits_scaling=16.0,
-        enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size,
-            embedding_dim=dim,
-            param_init=_EMBEDDING_SKIP_INIT,
-        ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        output=Linear.Config(
-            in_features=dim,
-            out_features=vocab_size,
-            param_init=_output_linear_init(dim),
-        ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=131072,
-            theta=50_000_000,
-            backend="complex",
-            scaling="none",
-        ),
-        layers=_build_granite_layers(
-            n_layers=n_layers,
-            dim=dim,
-            n_heads=n_heads,
-            n_kv_heads=n_kv_heads,
-            hidden_dim=32768,
-            residual_multiplier=0.175,
+            hidden_dim=hidden_dim,
+            residual_multiplier=residual_multiplier,
             attn_backend=attn_backend,
         ),
     )
 
 
 granite_configs = {
-    "debugmodel": _debugmodel,
-    "debugmodel_fa4": _debugmodel_fa4,
-    "3B": _3b,
-    "8B": _8b,
-    "30B": _30b,
-    "debugmodel_untied": _make_untied(_debugmodel),
-    "3B_untied": _make_untied(_3b),
-    "8B_untied": _make_untied(_8b),
-    "30B_untied": _make_untied(_30b),
+    "debugmodel": partial(_build_granite_config,
+        dim=256, n_heads=16, n_layers=4, vocab_size=2048,
+        hidden_dim=512, residual_multiplier=0.22, theta=500_000, logits_scaling=16.0,
+    ),
+    # n_heads=4 gives head_dim=64; FA4 backward hits an ICE on head_dim<64
+    "debugmodel_fa4": partial(_build_granite_config,
+        dim=256, n_heads=4, n_kv_heads=2, n_layers=4, vocab_size=2048,
+        hidden_dim=512, residual_multiplier=0.22, theta=500_000, logits_scaling=16.0,
+        attn_backend="fa4",
+    ),
+    "3B": partial(_build_granite_config,
+        dim=2560, n_heads=40, n_kv_heads=8, n_layers=40, vocab_size=100352,
+        hidden_dim=8192, residual_multiplier=0.22, theta=10_000_000, logits_scaling=10.0,
+    ),
+    "8B": partial(_build_granite_config,
+        dim=4096, n_heads=32, n_kv_heads=8, n_layers=40, vocab_size=100352,
+        hidden_dim=12800, residual_multiplier=0.22, theta=10_000_000, logits_scaling=16.0,
+    ),
+    "30B": partial(_build_granite_config,
+        dim=4096, n_heads=32, n_kv_heads=8, n_layers=64, vocab_size=100352,
+        hidden_dim=32768, residual_multiplier=0.175, theta=50_000_000, logits_scaling=16.0,
+    ),
 }
+granite_configs.update({
+    f"{name}_untied": _make_untied(granite_configs[name])
+    for name in ("debugmodel", "3B", "8B", "30B")
+})
 
 
 def model_registry(
