@@ -24,6 +24,10 @@ from torchtitan.models.granite.tokenization_strategies import (
 
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 _HF_ASSETS_PATH = os.environ.get("HF_ASSETS_PATH")
 
 _REPO_ROOT = Path(__file__).parents[4]
@@ -580,6 +584,7 @@ class TestProcessFileDropStats(unittest.TestCase):
             self.assertEqual(stats["n_dropped"], len(lines))
 
 
+@unittest.skipUnless(_HF_ASSETS_PATH, "HF_ASSETS_PATH not set")
 class TestBackboneSuffixMixedBatchSchema(unittest.TestCase):
     """Regression: empty suffix_starts in early batches must not cause a
     PyArrow schema inference failure when later batches contain non-empty lists.
@@ -635,7 +640,7 @@ class TestBackboneSuffixMixedBatchSchema(unittest.TestCase):
                 input_dir / "mixed.jsonl",
                 output_dir,
                 BackboneSuffixStrategy,
-                _TEST_TOKENIZER_PATH,
+                _HF_ASSETS_PATH,
                 shard_stem="mixed",
                 input_dir=input_dir,
                 num_cpus=2,
