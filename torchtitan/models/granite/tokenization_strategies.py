@@ -1,7 +1,7 @@
 import json
 import logging
 from abc import ABC, abstractmethod
-
+from bisect import bisect_left
 from collections.abc import Callable
 
 from filelock import FileLock
@@ -47,6 +47,46 @@ def _fix_empty_thinking(text: str) -> str:
     sees at inference.
     """
     return text.replace("<think></think>", "<think>\n</think>\n")
+
+
+def _char_to_token_idx(token_starts: list[int], char_pos: int) -> int:
+    """Map a character position to a token index in the BOS-prepended sequence.
+
+    The offset table from the Rust encoder excludes BOS (which the wrapper
+    prepends). So bisect gives a raw index; +1 translates to full_tokens space.
+    """
+    return bisect_left(token_starts, char_pos) + 1
+
+
+_SPECIAL_TOKEN_PATTERNS = ("<think>", "</think>", "<|im_start|>", "<|im_end|>")
+
+
+def _warn_special_tokens_in_content(messages: list[dict]) -> None:
+    """Log a warning if message content contains protocol-level delimiters."""
+    for i, msg in enumerate(messages):
+        content = msg.get("content", "")
+        if not isinstance(content, str):
+            logger.warning(
+                "Non-string content in %s message at index %d (type %s); "
+                "cannot check for special tokens",
+                msg["role"], i, type(content).__name__,
+            )
+            continue
+        reasoning = msg.get("reasoning_content", "")
+        for pat in _SPECIAL_TOKEN_PATTERNS:
+            pos = content.find(pat)
+            if pos != -1:
+                logger.warning(
+                    "Special token %r in content of %s message at index %d: ...%s...",
+                    pat, msg["role"], i, content[max(0, pos - 20) : pos + len(pat) + 20],
+                )
+            if isinstance(reasoning, str):
+                pos = reasoning.find(pat)
+                if pos != -1:
+                    logger.warning(
+                        "Special token %r in reasoning_content of %s message at index %d: ...%s...",
+                        pat, msg["role"], i, reasoning[max(0, pos - 20) : pos + len(pat) + 20],
+                    )
 
 
 def _tokenize_all_turns(
@@ -193,12 +233,181 @@ class BackboneSuffixStrategy(TokenizationStrategy):
 
     def _tokenize_one(self, messages: list[dict]) -> dict[str, list[int] | int]:
         _validate_messages(messages)
+        _warn_special_tokens_in_content(messages)
         last_asst_idx = max(
             i for i, m in enumerate(messages) if m["role"] == "assistant"
         )
         effective = messages[: last_asst_idx + 1]
 
-        # --- Backbone (same as TruncateLastStrategy) ---
+        # --- Backbone ---
+        full_text = self.tokenizer.apply_chat_template(
+            effective, **self.chat_template_kwargs
+        ).rstrip("\n")
+        full_tokens = self.tokenizer.encode(full_text, add_bos=True, add_eos=False)
+        if full_tokens[-1] != self.tokenizer.eos_id:
+            full_tokens.append(self.tokenizer.eos_id)
+
+        input_ids = full_tokens[:-1]
+        label_ids = [IGNORE_INDEX] * len(input_ids)
+
+        # Single encode for the backbone — character offset table for bisect lookups.
+        full_encoding = self.tokenizer.tokenizer.encode(full_text)
+        token_starts = [o[0] for o in full_encoding.offsets]
+
+        # Backbone last-turn label_start: find <think> after the preceding context
+        prefix_end = len(self.tokenizer.apply_chat_template(
+            effective[:-1], **self.chat_template_kwargs
+        ).rstrip("\n"))
+        think_pos = full_text.index("<think>", prefix_end)
+        start = _char_to_token_idx(token_starts, think_pos + len("<think>"))
+        label_ids[start:] = full_tokens[start + 1:]
+
+        backbone_input_ids = list(input_ids)
+        backbone_labels = list(label_ids)
+        backbone_positions = list(range(len(backbone_input_ids)))
+
+        # --- Suffix groups ---
+        user_indices = [i for i, m in enumerate(effective) if m["role"] == "user"]
+        group_boundaries = user_indices + [last_asst_idx]
+
+        suffix_starts: list[int] = []
+        insertion_limits: list[int] = []
+        all_suffix_input_ids: list[int] = []
+        all_suffix_labels: list[int] = []
+        all_suffix_positions: list[int] = []
+
+        for bi in range(len(group_boundaries) - 1):
+            group_start = group_boundaries[bi] + 1
+            group_end = group_boundaries[bi + 1]
+
+            has_reasoning = any(
+                m["role"] == "assistant"
+                and m.get("reasoning_content", "").strip()
+                for m in effective[group_start:group_end]
+            )
+            if not has_reasoning:
+                # No-reasoning group: label directly in backbone via offset lookup
+                for turn_idx in range(group_start, group_end):
+                    if effective[turn_idx]["role"] != "assistant":
+                        continue
+                    turn_prefix_end = len(self.tokenizer.apply_chat_template(
+                        effective[:turn_idx], **self.chat_template_kwargs
+                    ).rstrip("\n"))
+                    close_think_pos = full_text.index("</think>", turn_prefix_end)
+                    label_start = _char_to_token_idx(token_starts, close_think_pos)
+
+                    end_text = self.tokenizer.apply_chat_template(
+                        effective[: turn_idx + 1], **self.chat_template_kwargs
+                    ).rstrip("\n")
+                    label_end = _char_to_token_idx(token_starts, len(end_text)) - 2
+
+                    end = min(label_end + 1, len(backbone_input_ids))
+                    backbone_labels[label_start:end] = full_tokens[label_start + 1 : end + 1]
+                continue
+
+            # Reasoning group — build a suffix sequence
+            first_asst_in_group = next(
+                i for i in range(group_start, group_end)
+                if effective[i]["role"] == "assistant"
+            )
+
+            suffix_source_text = self.tokenizer.apply_chat_template(
+                effective[:group_end], **self.chat_template_kwargs
+            ).rstrip("\n")
+            suffix_source_tokens = self.tokenizer.encode(
+                suffix_source_text, add_bos=True, add_eos=False
+            )
+            suffix_encoding = self.tokenizer.tokenizer.encode(suffix_source_text)
+            suffix_token_starts = [o[0] for o in suffix_encoding.offsets]
+
+            # insertion_limit: token index of <think> for the first assistant in group
+            limit_prefix_end = len(self.tokenizer.apply_chat_template(
+                effective[:first_asst_in_group], **self.chat_template_kwargs
+            ).rstrip("\n"))
+            think_pos = suffix_source_text.index("<think>", limit_prefix_end)
+            insertion_limit = _char_to_token_idx(suffix_token_starts, think_pos)
+
+            suffix_tokens = suffix_source_tokens[insertion_limit + 1:]
+
+            if not suffix_tokens:
+                raise ValueError(
+                    f"Empty suffix: insertion_limit={insertion_limit} >= "
+                    f"len(suffix_source_tokens)={len(suffix_source_tokens)}; "
+                    "coordinate arithmetic is broken for this sample"
+                )
+
+            if suffix_tokens[-1] != self.tokenizer.eos_id:
+                suffix_tokens.append(self.tokenizer.eos_id)
+
+            suffix_input = suffix_tokens[:-1]
+            suffix_label = [IGNORE_INDEX] * len(suffix_input)
+
+            for turn_idx in range(group_start, group_end):
+                if effective[turn_idx]["role"] != "assistant":
+                    continue
+
+                turn_prefix_end = len(self.tokenizer.apply_chat_template(
+                    effective[:turn_idx], **self.chat_template_kwargs
+                ).rstrip("\n"))
+                # label_start: token after <think> (works for both reasoning and no-reasoning)
+                open_think_pos = suffix_source_text.index("<think>", turn_prefix_end)
+                label_start_global = _char_to_token_idx(suffix_token_starts, open_think_pos + len("<think>"))
+                label_start_in_suffix = label_start_global - (insertion_limit + 1)
+
+                end_text = self.tokenizer.apply_chat_template(
+                    effective[: turn_idx + 1], **self.chat_template_kwargs
+                ).rstrip("\n")
+                label_end_global = _char_to_token_idx(suffix_token_starts, len(end_text)) - 2
+                label_end_in_suffix = label_end_global - (insertion_limit + 1)
+
+                assert label_start_in_suffix >= 0, (
+                    f"label_start_in_suffix={label_start_in_suffix} < 0 for "
+                    f"turn_idx={turn_idx}; coordinate arithmetic is broken"
+                )
+                assert label_end_in_suffix >= label_start_in_suffix, (
+                    f"label_end_in_suffix={label_end_in_suffix} < "
+                    f"label_start_in_suffix={label_start_in_suffix} for "
+                    f"turn_idx={turn_idx}; coordinate arithmetic is broken"
+                )
+                for pos in range(label_start_in_suffix, min(label_end_in_suffix + 1, len(suffix_input))):
+                    suffix_label[pos] = suffix_tokens[pos + 1]
+
+            suffix_offset = len(backbone_input_ids) + len(all_suffix_input_ids)
+            suffix_starts.append(suffix_offset)
+            insertion_limits.append(insertion_limit)
+
+            suffix_pos_start = insertion_limit + 1
+            suffix_positions = list(range(suffix_pos_start, suffix_pos_start + len(suffix_input)))
+
+            all_suffix_input_ids.extend(suffix_input)
+            all_suffix_labels.extend(suffix_label)
+            all_suffix_positions.extend(suffix_positions)
+
+        # --- Assemble final output ---
+        final_input_ids = backbone_input_ids + all_suffix_input_ids
+        final_labels = backbone_labels + all_suffix_labels
+        final_positions = backbone_positions + all_suffix_positions
+
+        return {
+            "input_ids": final_input_ids,
+            "labels": final_labels,
+            "positions": final_positions,
+            "suffix_starts": suffix_starts,
+            "insertion_limits": insertion_limits,
+            "n_tokens": len(final_input_ids),
+        }
+
+    def _tokenize_one_reference(self, messages: list[dict]) -> dict[str, list[int] | int]:
+        """Reference implementation using per-turn encode calls.
+
+        Kept for correctness testing against the offset-based _tokenize_one.
+        """
+        _validate_messages(messages)
+        last_asst_idx = max(
+            i for i, m in enumerate(messages) if m["role"] == "assistant"
+        )
+        effective = messages[: last_asst_idx + 1]
+
         full_text = self.tokenizer.apply_chat_template(
             effective, **self.chat_template_kwargs
         ).rstrip("\n")
@@ -222,9 +431,6 @@ class BackboneSuffixStrategy(TokenizationStrategy):
         backbone_labels = list(label_ids)
         backbone_positions = list(range(len(backbone_input_ids)))
 
-        # --- Identify suffix groups ---
-        # A suffix group is a maximal run of (assistant|tool)+ between boundaries.
-        # Boundaries are user messages + last_asst_idx (backbone-labeled separately).
         user_indices = [i for i, m in enumerate(effective) if m["role"] == "user"]
         group_boundaries = user_indices + [last_asst_idx]
 
@@ -238,7 +444,6 @@ class BackboneSuffixStrategy(TokenizationStrategy):
             group_start = group_boundaries[bi] + 1
             group_end = group_boundaries[bi + 1]
 
-            # Check if any assistant turn in this group has reasoning
             has_reasoning = any(
                 m["role"] == "assistant"
                 and m.get("reasoning_content", "").strip()
@@ -270,7 +475,6 @@ class BackboneSuffixStrategy(TokenizationStrategy):
                     backbone_labels[label_start:end] = full_tokens[label_start + 1 : end + 1]
                 continue
 
-            # Compute insertion_limit: render up to first assistant in group with gen prompt
             first_asst_in_group = next(
                 i for i in range(group_start, group_end)
                 if effective[i]["role"] == "assistant"
@@ -283,11 +487,8 @@ class BackboneSuffixStrategy(TokenizationStrategy):
             prefix_for_limit_tokens = self.tokenizer.encode(
                 prefix_for_limit, add_bos=True, add_eos=False
             )
-            insertion_limit = len(prefix_for_limit_tokens) - 2  # position of <think>
+            insertion_limit = len(prefix_for_limit_tokens) - 2
 
-            # Suffix source: render messages up to (but not including) next user,
-            # with truncate=True. Since no user comes after these turns in this slice,
-            # thinking is preserved.
             suffix_source_text = self.tokenizer.apply_chat_template(
                 effective[:group_end], **self.chat_template_kwargs
             ).rstrip("\n")
@@ -295,7 +496,6 @@ class BackboneSuffixStrategy(TokenizationStrategy):
                 suffix_source_text, add_bos=True, add_eos=False
             )
 
-            # Suffix tokens: everything from insertion_limit+1 onward in suffix_source
             suffix_tokens = suffix_source_tokens[insertion_limit + 1:]
 
             if not suffix_tokens:
@@ -305,20 +505,16 @@ class BackboneSuffixStrategy(TokenizationStrategy):
                     "coordinate arithmetic is broken for this sample"
                 )
 
-            # Ensure suffix ends with eos
             if suffix_tokens[-1] != self.tokenizer.eos_id:
                 suffix_tokens.append(self.tokenizer.eos_id)
 
-            # Suffix input_ids (shifted): suffix_tokens[:-1]
             suffix_input = suffix_tokens[:-1]
             suffix_label = [IGNORE_INDEX] * len(suffix_input)
 
-            # Compute label boundaries for each assistant turn in the group
             for turn_idx in range(group_start, group_end):
                 if effective[turn_idx]["role"] != "assistant":
                     continue
 
-                # label_start for this turn: render prefix up to this turn with gen prompt
                 prefix_for_turn = self.tokenizer.apply_chat_template(
                     effective[:turn_idx],
                     add_generation_prompt=True,
@@ -330,8 +526,6 @@ class BackboneSuffixStrategy(TokenizationStrategy):
                 label_start_global = len(prefix_for_turn_tokens) - 1
                 label_start_in_suffix = label_start_global - (insertion_limit + 1)
 
-                # label_end: position before <|im_end|> for this turn.
-                # Render through this turn; rstripped rendering ends with <|im_end|>.
                 end_render_text = self.tokenizer.apply_chat_template(
                     effective[: turn_idx + 1], **self.chat_template_kwargs
                 ).rstrip("\n")
@@ -341,7 +535,6 @@ class BackboneSuffixStrategy(TokenizationStrategy):
                 label_end_global = len(end_render_tokens) - 2
                 label_end_in_suffix = label_end_global - (insertion_limit + 1)
 
-                # Assign labels: from label_start to label_end (inclusive)
                 assert label_start_in_suffix >= 0, (
                     f"label_start_in_suffix={label_start_in_suffix} < 0 for "
                     f"turn_idx={turn_idx}; coordinate arithmetic is broken"
@@ -354,12 +547,10 @@ class BackboneSuffixStrategy(TokenizationStrategy):
                 for pos in range(label_start_in_suffix, min(label_end_in_suffix + 1, len(suffix_input))):
                     suffix_label[pos] = suffix_tokens[pos + 1]
 
-            # Record this suffix
             suffix_offset = len(backbone_input_ids) + len(all_suffix_input_ids)
             suffix_starts.append(suffix_offset)
             insertion_limits.append(insertion_limit)
 
-            # Positions: sequential starting at insertion_limit+1
             suffix_pos_start = insertion_limit + 1
             suffix_positions = list(range(suffix_pos_start, suffix_pos_start + len(suffix_input)))
 
@@ -367,7 +558,6 @@ class BackboneSuffixStrategy(TokenizationStrategy):
             all_suffix_labels.extend(suffix_label)
             all_suffix_positions.extend(suffix_positions)
 
-        # --- Assemble final output ---
         final_input_ids = backbone_input_ids + all_suffix_input_ids
         final_labels = backbone_labels + all_suffix_labels
         final_positions = backbone_positions + all_suffix_positions

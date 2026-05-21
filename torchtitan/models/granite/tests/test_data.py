@@ -315,6 +315,151 @@ class TestChatTemplate(unittest.TestCase):
         self.assertEqual(backbone_tokens[len(prefix_tokens) - 1], end_think_id)
 
 
+class TestPrefixInvariant(unittest.TestCase):
+    """Structural guarantees relied upon by the offset-based _tokenize_one.
+
+    The optimized tokenizer derives label boundaries via bisect on a character offset
+    table. This requires that render(msgs[:k]).rstrip("\\n") is a character prefix of
+    the target text for the cases used by BackboneSuffixStrategy.
+
+    Requires HF_ASSETS_PATH. Skips if absent.
+    """
+
+    _tokenizer = None
+
+    @classmethod
+    def setUpClass(cls):
+        from dotenv import load_dotenv
+
+        from torchtitan.components.tokenizer import HuggingFaceTokenizer
+
+        load_dotenv()
+        ckpt_path = os.getenv("HF_ASSETS_PATH")
+        if ckpt_path is None:
+            return
+        cls._tokenizer = HuggingFaceTokenizer(tokenizer_path=ckpt_path)
+
+    def setUp(self):
+        from dotenv import load_dotenv
+
+        load_dotenv()
+        if os.getenv("HF_ASSETS_PATH") is None:
+            self.skipTest("HF_ASSETS_PATH not set")
+
+    def _render(self, msgs, **kwargs):
+        return self._tokenizer.apply_chat_template(
+            msgs, truncate_history_thinking=True, **kwargs
+        )
+
+    def test_prefix_invariant_no_reasoning(self):
+        """render(msgs[:k]).rstrip is a prefix of render(msgs) when no assistant has reasoning."""
+        msgs = [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2"},
+            {"role": "user", "content": "Q3"},
+            {"role": "assistant", "content": "A3"},
+        ]
+        full = self._render(msgs).rstrip("\n")
+        for k in range(1, len(msgs)):
+            prefix = self._render(msgs[:k]).rstrip("\n")
+            self.assertTrue(
+                full.startswith(prefix),
+                f"Prefix invariant failed at k={k}: render(msgs[:{k}]) is not a prefix of full render",
+            )
+
+    def test_prefix_invariant_no_reasoning_with_system(self):
+        """Same as above but with a system message and longer content to stress BPE boundaries."""
+        msgs = [
+            {"role": "system", "content": "You are a helpful coding assistant."},
+            {"role": "user", "content": "Explain how binary search works in Python."},
+            {"role": "assistant", "content": "Binary search repeatedly halves the search interval."},
+            {"role": "user", "content": "Can you show me an implementation?"},
+            {"role": "assistant", "content": "Here is an iterative implementation of binary search."},
+        ]
+        full = self._render(msgs).rstrip("\n")
+        for k in range(1, len(msgs)):
+            prefix = self._render(msgs[:k]).rstrip("\n")
+            self.assertTrue(
+                full.startswith(prefix),
+                f"Prefix invariant failed at k={k} (with system message)",
+            )
+
+    def test_prefix_invariant_reasoning_suffix(self):
+        """render(msgs[:k]).rstrip is a prefix of render(msgs[:group_end]) for turns within a reasoning group."""
+        msgs = [
+            {"role": "user", "content": "Search for X."},
+            {"role": "assistant", "content": "Calling tool.", "reasoning_content": "I should search."},
+            {"role": "tool", "content": "Result from search."},
+            {"role": "assistant", "content": "Final answer.", "reasoning_content": "Analyzing results."},
+        ]
+        group_end = len(msgs)
+        target = self._render(msgs[:group_end]).rstrip("\n")
+        for k in range(1, group_end):
+            prefix = self._render(msgs[:k]).rstrip("\n")
+            self.assertTrue(
+                target.startswith(prefix),
+                f"Prefix invariant failed at k={k} for reasoning group",
+            )
+
+    def test_prefix_invariant_fails_for_last_reasoning_turn(self):
+        """Prefix invariant does NOT hold when subset ends with a reasoning assistant that has a subsequent user.
+
+        The mechanism: in the subset render, the reasoning assistant is the last turn
+        so thinking is preserved. In the full render, a subsequent user makes it historical
+        so thinking is stripped. If the template changes to no longer strip thinking,
+        this test would fail — that's intentional: the offset-based algorithm's safety
+        argument depends on this divergence being known and handled separately.
+        """
+        msgs = [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1", "reasoning_content": "R1"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2"},
+        ]
+        full = self._render(msgs).rstrip("\n")
+        subset = self._render(msgs[:2]).rstrip("\n")
+        self.assertFalse(
+            full.startswith(subset),
+            "Expected invariant to FAIL when subset ends with reasoning assistant followed by user",
+        )
+
+    def test_close_think_follows_turn_header(self):
+        """</think> appears immediately after <think> in truncated no-reasoning turns."""
+        msgs = [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2"},
+        ]
+        rendered = self._render(msgs).rstrip("\n")
+        for asst_idx in [1, 3]:
+            prefix = self._render(msgs[:asst_idx]).rstrip("\n")
+            after_prefix = rendered[len(prefix):]
+            think_pos = after_prefix.index("<think>")
+            close_think_pos = after_prefix.index("</think>")
+            self.assertEqual(
+                close_think_pos, think_pos + len("<think>"),
+                f"</think> must immediately follow <think> in no-reasoning turn at index {asst_idx}",
+            )
+
+    def test_open_think_newline_in_preserved_turn(self):
+        """<think>\\n appears in preserved reasoning turns (suffix search anchor)."""
+        msgs = [
+            {"role": "user", "content": "Q"},
+            {"role": "assistant", "content": "A", "reasoning_content": "R"},
+        ]
+        rendered = self._render(msgs).rstrip("\n")
+        prefix = self._render(msgs[:1]).rstrip("\n")
+        after_prefix = rendered[len(prefix):]
+        self.assertIn(
+            "<think>\n",
+            after_prefix,
+            "Preserved reasoning turn must contain <think>\\n",
+        )
+
+
 class TestGraniteSFTDataFormat(unittest.TestCase):
     """Structural checks on the raw GLM-5.1 Reasoning dataset.
 
