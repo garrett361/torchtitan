@@ -191,7 +191,7 @@ class PreTokenizedDataset(IterableDataset, Stateful):
 
     Handles manifest loading, shard concatenation, cross-rank LPT packing,
     and checkpointing. Subclasses implement format-specific primitives
-    (_item_from_arrow, _new_batch, _place_item, _pad_and_flush).
+    (_cost_from_metadata, _materialize_item, _new_batch, _place_item, _pad_and_flush).
 
     Cross-rank packing: all DP ranks read from the same global data stream.
     Each packing step forms dp_world_size batches simultaneously: seed with
@@ -261,12 +261,13 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         self._worker_id: int = 0
         self._num_workers: int = 1
 
-        self._buffer: list = []
+        self._row_indices: list[int] = []
         self._lengths: list[int] = []
         self._costs: list[int] = []
         self._ages: list[int] = []
         self._age_counter: int = 0
         self._batch_rng = np.random.default_rng(42)
+        self._pending_restore: tuple | None = None
 
         self._data_exhausted: bool = False
 
@@ -274,15 +275,21 @@ class PreTokenizedDataset(IterableDataset, Stateful):
 
     _arrow_list_columns: tuple[str, ...] = ()
     _arrow_scalar_columns: tuple[str, ...] = ()
+    _cost_list_columns: tuple[str, ...] = ()
 
     @abstractmethod
-    def _item_from_arrow(
+    def _cost_from_metadata(
         self,
-        list_arrays: dict[str, tuple[np.ndarray, np.ndarray]],
         scalars: dict[str, np.ndarray],
+        list_arrays: dict[str, tuple[np.ndarray, np.ndarray]],
         idx: int,
-    ) -> Any | None:
-        """Construct one buffer item from pre-extracted Arrow column data."""
+    ) -> tuple[int, int] | None:
+        """Return (length, cost) from metadata columns, or None to skip row."""
+        ...
+
+    @abstractmethod
+    def _materialize_item(self, row_idx: int) -> Any:
+        """Read full item from Arrow table by shard-relative row index."""
         ...
 
     @abstractmethod
@@ -302,35 +309,18 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         """Pad to seq_len and produce final (inputs_dict, labels, stats)."""
         ...
 
-    @abstractmethod
-    def _item_cost(self, item) -> int:
-        """Exact attention cost (mask entry count) for a single buffer item."""
-        ...
-
     # --- Shared infrastructure ---
 
-    _item_type: type
-
-    def _serialize_buffer(self) -> list:
-        return [
-            [f.tolist() if hasattr(f, "tolist") else list(f) for f in item]
-            for item in self._buffer
-        ]
-
-    def _deserialize_buffer(self, data: list) -> list:
-        return [self._item_type(*[list(f) for f in fields]) for fields in data]
-
-    def _insert_item(self, item) -> None:
-        item_len = len(item.input_ids)
-        idx = bisect.bisect_right(self._lengths, item_len)
-        self._buffer.insert(idx, item)
-        self._lengths.insert(idx, item_len)
-        self._costs.insert(idx, self._item_cost(item))
+    def _insert_entry(self, length: int, cost: int, row_idx: int) -> None:
+        idx = bisect.bisect_right(self._lengths, length)
+        self._row_indices.insert(idx, row_idx)
+        self._lengths.insert(idx, length)
+        self._costs.insert(idx, cost)
         self._ages.insert(idx, self._age_counter)
         self._age_counter += 1
 
     def _remove_at(self, idx: int) -> None:
-        del self._buffer[idx]
+        del self._row_indices[idx]
         del self._lengths[idx]
         del self._costs[idx]
         del self._ages[idx]
@@ -387,6 +377,11 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         else:
             self._data = self._original_data
         self._sample_idx = min(self._sample_idx, len(self._data))
+        if self._pending_restore is not None:
+            row_indices, ages, age_counter = self._pending_restore
+            self._pending_restore = None
+            self._age_counter = age_counter
+            self._reconstruct_buffer(row_indices, ages)
 
     def _advance_epoch(self) -> None:
         self._sample_idx = 0
@@ -399,8 +394,8 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         )
 
     def _refill_buffer(self) -> None:
-        """Batch-read from Arrow tables via sequential table.slice()."""
-        needed = self._buffer_size - len(self._buffer)
+        """Batch-read metadata from Arrow tables (no full item materialization)."""
+        needed = self._buffer_size - len(self._row_indices)
         if needed <= 0 or self._data_exhausted:
             return
         data_len = len(self._data)
@@ -411,19 +406,21 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         chunk_size = min(needed, data_len - self._sample_idx)
         table_slice = self._data.data.slice(self._sample_idx, chunk_size)
 
-        list_arrays: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-        for col_name in self._arrow_list_columns:
-            col = table_slice.column(col_name).combine_chunks()
-            list_arrays[col_name] = (col.offsets.to_numpy(), col.values.to_numpy())
-
         scalars: dict[str, np.ndarray] = {}
         for col_name in self._arrow_scalar_columns:
             scalars[col_name] = table_slice.column(col_name).to_numpy()
 
+        list_arrays: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for col_name in self._cost_list_columns:
+            col = table_slice.column(col_name).combine_chunks()
+            list_arrays[col_name] = (col.offsets.to_numpy(), col.values.to_numpy())
+
+        base_idx = self._sample_idx
         for i in range(chunk_size):
-            item = self._item_from_arrow(list_arrays, scalars, i)
-            if item is not None:
-                self._insert_item(item)
+            result = self._cost_from_metadata(scalars, list_arrays, i)
+            if result is not None:
+                length, cost = result
+                self._insert_entry(length, cost, base_idx + i)
 
         self._sample_idx += chunk_size
 
@@ -436,53 +433,54 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         while True:
             self._refill_buffer()
 
-            # End-of-epoch: fewer items remain than dp_world_size, so we
-            # cannot seed one batch per rank. Drop the remainder.
-            epoch_remnant = len(self._buffer) < dp
+            epoch_remnant = len(self._row_indices) < dp
             if epoch_remnant:
                 if not self.infinite:
-                    if self._buffer:
+                    if self._row_indices:
                         import warnings
                         warnings.warn(
-                            f"Dataset '{self._dataset_id}': {len(self._buffer)} items "
-                            f"remaining at end of epoch but need {dp} to form a "
-                            f"step. Dropping.",
+                            f"Dataset '{self._dataset_id}': {len(self._row_indices)} "
+                            f"items remaining at end of epoch but need {dp} to form "
+                            f"a step. Dropping.",
                             stacklevel=2,
                         )
                     break
                 self._advance_epoch()
                 self._refill_buffer()
-                if len(self._buffer) < dp:
+                if len(self._row_indices) < dp:
                     break
 
-            # Seed dp batches with the dp oldest buffer items
+            # Seed: dp oldest buffer entries by age
             oldest_indices = sorted(
                 range(len(self._ages)), key=self._ages.__getitem__
             )[:dp]
-            seeds = [self._buffer[i] for i in oldest_indices]
-            # Safely remove indices by going from largest idx to smallest
+            seed_lengths = [self._lengths[i] for i in oldest_indices]
+            seed_costs = [self._costs[i] for i in oldest_indices]
+            seed_row_indices = [self._row_indices[i] for i in oldest_indices]
             for i in sorted(oldest_indices, reverse=True):
                 self._remove_at(i)
 
-            batches = [self._new_batch() for _ in range(dp)]
+            my_batch = self._new_batch()
             batch_remaining = [self.seq_len] * dp
             batch_cost = [0] * dp
 
-            for r, seed in enumerate(seeds):
-                self._place_item(batches[r], seed)
-                batch_remaining[r] -= len(seed.input_ids)
-                batch_cost[r] += self._item_cost(seed)
+            for r in range(dp):
+                batch_remaining[r] -= seed_lengths[r]
+                batch_cost[r] += seed_costs[r]
+                if r == self._dp_rank:
+                    item = self._materialize_item(seed_row_indices[r])
+                    self._place_item(my_batch, item)
 
             if self._packing == "attn_balanced":
-                self._fill_attn_balanced(batches, batch_remaining, batch_cost, dp)
+                self._fill_attn_balanced(my_batch, batch_remaining, batch_cost, dp)
             else:
-                self._fill_default(batches, batch_remaining, batch_cost, dp)
+                self._fill_default(my_batch, batch_remaining, batch_cost, dp)
 
-            yield self._pad_and_flush(batches[self._dp_rank])
+            yield self._pad_and_flush(my_batch)
 
     def _fill_default(
         self,
-        batches: list[dict],
+        my_batch: dict,
         batch_remaining: list[int],
         batch_cost: list[int],
         dp: int,
@@ -493,6 +491,11 @@ class PreTokenizedDataset(IterableDataset, Stateful):
             else _select_buffer_shuffle
         )
         while True:
+            if not self._row_indices:
+                self._refill_buffer()
+                if not self._row_indices:
+                    break
+
             max_remaining = max(batch_remaining)
             if max_remaining <= 0:
                 break
@@ -501,9 +504,9 @@ class PreTokenizedDataset(IterableDataset, Stateful):
             if idx == -1:
                 break
 
-            item = self._buffer[idx]
-            item_len = len(item.input_ids)
+            item_len = self._lengths[idx]
             item_cost = self._costs[idx]
+            row_idx = self._row_indices[idx]
 
             best_rank = -1
             best_cost = float("inf")
@@ -513,25 +516,26 @@ class PreTokenizedDataset(IterableDataset, Stateful):
                     best_rank = r
 
             self._remove_at(idx)
-            self._place_item(batches[best_rank], item)
+
+            if best_rank == self._dp_rank:
+                item = self._materialize_item(row_idx)
+                self._place_item(my_batch, item)
+
             batch_remaining[best_rank] -= item_len
             batch_cost[best_rank] += item_cost
 
-            if not self._buffer:
-                self._refill_buffer()
-
     def _fill_attn_balanced(
         self,
-        batches: list[dict],
+        my_batch: dict,
         batch_remaining: list[int],
         batch_cost: list[int],
         dp: int,
     ) -> None:
         """Fill loop for attn_balanced: pick cheapest rank, select item to close gap."""
         while True:
-            if not self._buffer:
+            if not self._row_indices:
                 self._refill_buffer()
-                if not self._buffer:
+                if not self._row_indices:
                     break
 
             best_rank = -1
@@ -547,7 +551,6 @@ class PreTokenizedDataset(IterableDataset, Stateful):
             deficit = max(batch_cost) - batch_cost[best_rank]
 
             if deficit == 0:
-                # Ranks are tied — random pick avoids degenerate selection
                 idx = _select_buffer_shuffle(self, remaining)
                 if idx == -1:
                     batch_remaining[best_rank] = 0
@@ -559,10 +562,15 @@ class PreTokenizedDataset(IterableDataset, Stateful):
                     batch_remaining[best_rank] = 0
                     continue
 
-            item = self._buffer[idx]
+            item_len = self._lengths[idx]
+            row_idx = self._row_indices[idx]
             self._remove_at(idx)
-            self._place_item(batches[best_rank], item)
-            batch_remaining[best_rank] -= len(item.input_ids)
+
+            if best_rank == self._dp_rank:
+                item = self._materialize_item(row_idx)
+                self._place_item(my_batch, item)
+
+            batch_remaining[best_rank] -= item_len
             batch_cost[best_rank] += item_cost
 
     def __iter__(self):
@@ -577,8 +585,13 @@ class PreTokenizedDataset(IterableDataset, Stateful):
             "sample_idx": self._sample_idx,
             "batch_rng_state": self._batch_rng.bit_generator.state,
         }
-        if self._buffer:
-            d["buffer"] = self._serialize_buffer()
+        if self._pending_restore is not None:
+            row_indices, ages, age_counter = self._pending_restore
+            d["row_indices"] = list(row_indices)
+            d["ages"] = list(ages)
+            d["age_counter"] = age_counter
+        elif self._row_indices:
+            d["row_indices"] = list(self._row_indices)
             d["ages"] = list(self._ages)
             d["age_counter"] = self._age_counter
         return d
@@ -589,18 +602,40 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         if "batch_rng_state" in state_dict:
             self._batch_rng = np.random.default_rng()
             self._batch_rng.bit_generator.state = state_dict["batch_rng_state"]
-        if "buffer" in state_dict:
-            self._buffer = self._deserialize_buffer(state_dict["buffer"])
-            self._lengths = [len(item.input_ids) for item in self._buffer]
-            self._ages = state_dict["ages"]
-            self._age_counter = state_dict["age_counter"]
-            order = sorted(
-                range(len(self._lengths)), key=self._lengths.__getitem__
+        if "row_indices" in state_dict:
+            self._pending_restore = (
+                state_dict["row_indices"],
+                state_dict["ages"],
+                state_dict["age_counter"],
             )
-            self._buffer = [self._buffer[i] for i in order]
-            self._lengths = [self._lengths[i] for i in order]
-            self._ages = [self._ages[i] for i in order]
-            self._costs = [self._item_cost(item) for item in self._buffer]
+
+    def _reconstruct_buffer(self, row_indices: list[int], ages: list[int]) -> None:
+        """Re-read metadata from Arrow to rebuild buffer state."""
+        data_len = len(self._data)
+        for row_idx, age in zip(row_indices, ages):
+            if row_idx >= data_len:
+                raise ValueError(
+                    f"Stored row index {row_idx} exceeds dataset length {data_len}. "
+                    f"Checkpoint was likely saved with a different num_workers or "
+                    f"dataset shard configuration."
+                )
+            table_slice = self._data.data.slice(row_idx, 1)
+            scalars: dict[str, np.ndarray] = {}
+            for col in self._arrow_scalar_columns:
+                scalars[col] = table_slice.column(col).to_numpy()
+            list_arrays: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+            for col in self._cost_list_columns:
+                c = table_slice.column(col).combine_chunks()
+                list_arrays[col] = (c.offsets.to_numpy(), c.values.to_numpy())
+            result = self._cost_from_metadata(scalars, list_arrays, 0)
+            if result is None:
+                continue
+            length, cost = result
+            idx = bisect.bisect_right(self._lengths, length)
+            self._row_indices.insert(idx, row_idx)
+            self._lengths.insert(idx, length)
+            self._costs.insert(idx, cost)
+            self._ages.insert(idx, age)
 
 
 # ---------------------------------------------------------------------------
@@ -620,27 +655,24 @@ class StandardPackingDataset(PreTokenizedDataset):
     TruncateLastStrategy, FullThinkingStrategy, TruncateEveryTurnStrategy.
     """
 
-    _item_type = _ChatItem
     _arrow_list_columns = ("input_ids", "labels")
     _arrow_scalar_columns = ("n_tokens",)
+    _cost_list_columns: tuple[str, ...] = ()
 
-    def _deserialize_buffer(self, data: list) -> list:
-        return [
-            _ChatItem(
-                np.asarray(fields[0], dtype=np.int32),
-                np.asarray(fields[1], dtype=np.int32),
-            )
-            for fields in data
-        ]
-
-    def _item_from_arrow(self, list_arrays, scalars, idx):
-        n_tokens = int(scalars["n_tokens"][idx])
-        if n_tokens > self.seq_len:
+    def _cost_from_metadata(self, scalars, list_arrays, idx):
+        n = int(scalars["n_tokens"][idx])
+        if n > self.seq_len:
             return None
-        offsets, values = list_arrays["input_ids"]
-        inp = values[offsets[idx]:offsets[idx + 1]]
-        offsets, values = list_arrays["labels"]
-        lbl = values[offsets[idx]:offsets[idx + 1]]
+        return (n, n * (n + 1) // 2)
+
+    def _materialize_item(self, row_idx: int) -> _ChatItem:
+        table_slice = self._data.data.slice(row_idx, 1)
+        col = table_slice.column("input_ids").combine_chunks()
+        offsets = col.offsets.to_numpy()
+        inp = col.values.to_numpy()[offsets[0]:offsets[1]].copy()
+        col = table_slice.column("labels").combine_chunks()
+        offsets = col.offsets.to_numpy()
+        lbl = col.values.to_numpy()[offsets[0]:offsets[1]].copy()
         if not self._logged_first_sample:
             self._log_first_sample(inp.tolist(), lbl.tolist())
         return _ChatItem(inp, lbl)
@@ -688,9 +720,6 @@ class StandardPackingDataset(PreTokenizedDataset):
             stats,
         )
 
-    def _item_cost(self, item: _ChatItem) -> int:
-        n = len(item.input_ids)
-        return n * (n + 1) // 2
 
 
 # ---------------------------------------------------------------------------
@@ -699,11 +728,11 @@ class StandardPackingDataset(PreTokenizedDataset):
 
 
 class _BackboneSuffixItem(NamedTuple):
-    input_ids: list[int]
-    labels: list[int]
-    positions: list[int]
-    suffix_starts: list[int]
-    insertion_limits: list[int]
+    input_ids: np.ndarray
+    labels: np.ndarray
+    positions: np.ndarray
+    suffix_starts: np.ndarray
+    insertion_limits: np.ndarray
 
 
 class BackboneSuffixDataset(PreTokenizedDataset):
@@ -714,22 +743,45 @@ class BackboneSuffixDataset(PreTokenizedDataset):
     (conv_ids, suffix_ids, insertion_limits) during packing.
     """
 
-    _item_type = _BackboneSuffixItem
     _arrow_list_columns = (
         "input_ids", "labels", "positions", "suffix_starts", "insertion_limits",
     )
     _arrow_scalar_columns = ("n_tokens",)
+    _cost_list_columns = ("suffix_starts", "insertion_limits")
 
-    def _item_from_arrow(self, list_arrays, scalars, idx):
-        n_tokens = int(scalars["n_tokens"][idx])
-        if n_tokens > self.seq_len:
+    def _cost_from_metadata(self, scalars, list_arrays, idx):
+        n = int(scalars["n_tokens"][idx])
+        if n > self.seq_len:
             return None
+        if not self._cost_list_columns:
+            return (n, n * (n + 1) // 2)
+        offsets, values = list_arrays["suffix_starts"]
+        suffix_starts = values[offsets[idx]:offsets[idx + 1]]
+        offsets, values = list_arrays["insertion_limits"]
+        insertion_limits = values[offsets[idx]:offsets[idx + 1]]
+        if len(suffix_starts) == 0:
+            return (n, n * (n + 1) // 2)
+        backbone_len = int(suffix_starts[0])
+        cost = backbone_len * (backbone_len + 1) // 2
+        for k in range(len(suffix_starts)):
+            s_start = int(suffix_starts[k])
+            s_end = int(suffix_starts[k + 1]) if k + 1 < len(suffix_starts) else n
+            s_len = s_end - s_start
+            cost += s_len * (s_len + 1) // 2
+            cost += s_len * (int(insertion_limits[k]) + 1)
+        return (n, cost)
+
+    def _materialize_item(self, row_idx: int) -> _BackboneSuffixItem:
+        table_slice = self._data.data.slice(row_idx, 1)
         fields = {}
         for col_name in self._arrow_list_columns:
-            offsets, values = list_arrays[col_name]
-            fields[col_name] = values[offsets[idx]:offsets[idx + 1]].tolist()
+            col = table_slice.column(col_name).combine_chunks()
+            offsets = col.offsets.to_numpy()
+            fields[col_name] = col.values.to_numpy()[offsets[0]:offsets[1]].copy()
         if not self._logged_first_sample:
-            self._log_first_sample(fields["input_ids"], fields["labels"])
+            self._log_first_sample(
+                fields["input_ids"].tolist(), fields["labels"].tolist()
+            )
         return _BackboneSuffixItem(
             fields["input_ids"],
             fields["labels"],
@@ -762,7 +814,7 @@ class BackboneSuffixDataset(PreTokenizedDataset):
         ins_limits = item.insertion_limits
         off = batch["offset"]
         n = len(input_ids)
-        backbone_len = suffix_starts[0] if suffix_starts else n
+        backbone_len = suffix_starts[0] if len(suffix_starts) > 0 else n
         conv_id = batch["conv_counter"]
 
         batch["inputs"][off:off + n] = input_ids
@@ -820,23 +872,6 @@ class BackboneSuffixDataset(PreTokenizedDataset):
             stats,
         )
 
-    def _item_cost(self, item: _BackboneSuffixItem) -> int:
-        n = len(item.input_ids)
-        if not item.suffix_starts:
-            return n * (n + 1) // 2
-
-        backbone_len = item.suffix_starts[0]
-        cost = backbone_len * (backbone_len + 1) // 2
-
-        num_suffixes = len(item.suffix_starts)
-        for k in range(num_suffixes):
-            s_start = item.suffix_starts[k]
-            s_end = item.suffix_starts[k + 1] if k + 1 < num_suffixes else n
-            s_len = s_end - s_start
-            cost += s_len * (s_len + 1) // 2
-            cost += s_len * (item.insertion_limits[k] + 1)
-
-        return cost
 
 
 # ---------------------------------------------------------------------------

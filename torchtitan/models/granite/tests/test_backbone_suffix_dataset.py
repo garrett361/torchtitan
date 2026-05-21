@@ -623,7 +623,7 @@ class TestBackboneSuffixEpochBoundary(unittest.TestCase):
         ds = self._make_dataset(examples, buffer_size=10)
         ds._prepare_iter()
         ds._refill_buffer()
-        self.assertLessEqual(len(ds._buffer), 3)
+        self.assertLessEqual(len(ds._row_indices), 3)
         ds._refill_buffer()
         self.assertTrue(ds._data_exhausted)
 

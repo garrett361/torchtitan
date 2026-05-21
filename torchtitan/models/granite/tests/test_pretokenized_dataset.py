@@ -170,7 +170,7 @@ class TestGreedyPacking(unittest.TestCase):
 
         idx = _select_buffer_shuffle(ds, remaining=9999)
         self.assertGreaterEqual(idx, 0)
-        self.assertLess(idx, len(ds._buffer))
+        self.assertLess(idx, len(ds._row_indices))
 
     def test_greedy_selection_rejects_when_too_long(self):
         """Greedy selection returns -1 when no item fits."""
@@ -196,9 +196,10 @@ class TestSortedBufferInvariants(unittest.TestCase):
         return ds
 
     def _assert_sync(self, ds):
-        self.assertEqual(len(ds._buffer), len(ds._lengths))
-        self.assertEqual(len(ds._buffer), len(ds._ages))
-        for i, item in enumerate(ds._buffer):
+        self.assertEqual(len(ds._row_indices), len(ds._lengths))
+        self.assertEqual(len(ds._row_indices), len(ds._ages))
+        for i, row_idx in enumerate(ds._row_indices):
+            item = ds._materialize_item(row_idx)
             self.assertEqual(ds._lengths[i], len(item.input_ids))
 
     def _assert_sorted(self, ds):
@@ -216,7 +217,7 @@ class TestSortedBufferInvariants(unittest.TestCase):
         it = ds._iter_packed()
         for _ in range(3):
             next(it, None)
-        if ds._buffer:
+        if ds._row_indices:
             self._assert_sync(ds)
 
     def test_sort_invariant_after_refill(self):
@@ -229,7 +230,7 @@ class TestSortedBufferInvariants(unittest.TestCase):
         ds = self._get_filled_dataset()
         it = ds._iter_packed()
         next(it, None)
-        if ds._buffer:
+        if ds._row_indices:
             self._assert_sorted(ds)
 
 
@@ -241,7 +242,7 @@ class TestEpochBoundary(unittest.TestCase):
         ds = _build_dataset(seq_len=16, buffer_size=10, packing="buffer_shuffle")
         ds._prepare_iter()
         ds._refill_buffer()
-        self.assertLessEqual(len(ds._buffer), 6)
+        self.assertLessEqual(len(ds._row_indices), 6)
         # Second refill discovers exhaustion
         ds._refill_buffer()
         self.assertTrue(ds._data_exhausted)
@@ -307,7 +308,9 @@ class TestOldestFirstSeed(unittest.TestCase):
         # Record the first-inserted item (lowest age = oldest)
         oldest_age = min(ds._ages)
         oldest_idx = ds._ages.index(oldest_age)
-        oldest_ids = list(ds._buffer[oldest_idx].input_ids)
+        oldest_row_idx = ds._row_indices[oldest_idx]
+        oldest_item = ds._materialize_item(oldest_row_idx)
+        oldest_ids = list(oldest_item.input_ids)
 
         batch = next(ds._iter_packed())
         input_tensor = batch[0]["input"].tolist()
@@ -614,32 +617,39 @@ class TestCrossRankLPT(unittest.TestCase):
             self.assertTrue(b1[0]["input"].equal(b2[0]["input"]))
 
 
-class TestItemCost(unittest.TestCase):
-    """Tests for _item_cost: exact attention cost computation."""
+class TestCostFromMetadata(unittest.TestCase):
+    """Tests for _cost_from_metadata: cost computation from Arrow metadata."""
 
     def test_standard_triangular(self):
-        """StandardPackingDataset._item_cost returns n*(n+1)//2."""
+        """StandardPackingDataset returns (n, n*(n+1)//2) for valid rows."""
         import numpy as np
 
-        from torchtitan.models.granite.pretokenized_dataset import _ChatItem
-
         ds = _build_dataset(packing="longest")
-        for n, expected in [(1, 1), (4, 10), (8, 36), (16, 136)]:
-            item = _ChatItem(
-                np.arange(n, dtype=np.int32), np.zeros(n, dtype=np.int32)
-            )
-            self.assertEqual(ds._item_cost(item), expected)
+        for n, expected_cost in [(1, 1), (4, 10), (8, 36), (16, 136)]:
+            scalars = {"n_tokens": np.array([n])}
+            result = ds._cost_from_metadata(scalars, {}, 0)
+            self.assertEqual(result, (n, expected_cost))
+
+    def test_standard_skips_oversized(self):
+        """Returns None when n_tokens > seq_len."""
+        import numpy as np
+
+        ds = _build_dataset(seq_len=8, packing="longest")
+        scalars = {"n_tokens": np.array([9])}
+        self.assertIsNone(ds._cost_from_metadata(scalars, {}, 0))
 
     def test_backbone_suffix_no_suffixes(self):
-        """With no suffixes, BackboneSuffixDataset._item_cost equals triangular."""
-        from torchtitan.models.granite.pretokenized_dataset import (
-            BackboneSuffixDataset,
-            _BackboneSuffixItem,
-        )
+        """With no suffixes, BackboneSuffixDataset returns triangular cost."""
+        import numpy as np
 
         ds = _build_backbone_suffix_dataset()
-        item = _BackboneSuffixItem([0] * 6, [0] * 6, list(range(6)), [], [])
-        self.assertEqual(ds._item_cost(item), 21)
+        scalars = {"n_tokens": np.array([6])}
+        list_arrays = {
+            "suffix_starts": (np.array([0, 0]), np.array([], dtype=np.int64)),
+            "insertion_limits": (np.array([0, 0]), np.array([], dtype=np.int64)),
+        }
+        result = ds._cost_from_metadata(scalars, list_arrays, 0)
+        self.assertEqual(result, (6, 21))
 
     def test_backbone_suffix_known_structure(self):
         """Verify cost for B=4, one suffix of length 3, ins_limit=2.
@@ -649,17 +659,16 @@ class TestItemCost(unittest.TestCase):
         suffix→backbone: 3*(2+1) = 9
         total: 25
         """
-        from torchtitan.models.granite.pretokenized_dataset import (
-            BackboneSuffixDataset,
-            _BackboneSuffixItem,
-        )
+        import numpy as np
 
         ds = _build_backbone_suffix_dataset()
-        item = _BackboneSuffixItem(
-            [0] * 7, [0] * 7, list(range(7)),
-            suffix_starts=[4], insertion_limits=[2],
-        )
-        self.assertEqual(ds._item_cost(item), 25)
+        scalars = {"n_tokens": np.array([7])}
+        list_arrays = {
+            "suffix_starts": (np.array([0, 1]), np.array([4])),
+            "insertion_limits": (np.array([0, 1]), np.array([2])),
+        }
+        result = ds._cost_from_metadata(scalars, list_arrays, 0)
+        self.assertEqual(result, (7, 25))
 
     def test_backbone_suffix_multiple_suffixes(self):
         """Verify cost with B=3, two suffixes S1=2 (ins=1), S2=2 (ins=2).
@@ -669,39 +678,31 @@ class TestItemCost(unittest.TestCase):
         S2 self: 2*3//2 = 3, S2→backbone: 2*(2+1) = 6
         total: 22
         """
-        from torchtitan.models.granite.pretokenized_dataset import (
-            BackboneSuffixDataset,
-            _BackboneSuffixItem,
-        )
+        import numpy as np
 
         ds = _build_backbone_suffix_dataset()
-        item = _BackboneSuffixItem(
-            [0] * 7, [0] * 7, list(range(7)),
-            suffix_starts=[3, 5], insertion_limits=[1, 2],
-        )
-        self.assertEqual(ds._item_cost(item), 22)
+        scalars = {"n_tokens": np.array([7])}
+        list_arrays = {
+            "suffix_starts": (np.array([0, 2]), np.array([3, 5])),
+            "insertion_limits": (np.array([0, 2]), np.array([1, 2])),
+        }
+        result = ds._cost_from_metadata(scalars, list_arrays, 0)
+        self.assertEqual(result, (7, 22))
 
 
 class TestSelectAttnBalanced(unittest.TestCase):
     """Tests for _select_attn_balanced selection contract."""
 
     def _make_ds_with_buffer(self, lengths):
-        import numpy as np
-
-        from torchtitan.models.granite.pretokenized_dataset import _ChatItem
-
         ds = _build_dataset(packing="attn_balanced", buffer_size=len(lengths))
-        ds._buffer = []
+        ds._row_indices = []
         ds._lengths = []
         ds._costs = []
         ds._ages = []
         ds._age_counter = 0
-        for length in lengths:
-            item = _ChatItem(
-                np.arange(length, dtype=np.int32),
-                np.zeros(length, dtype=np.int32),
-            )
-            ds._insert_item(item)
+        for i, length in enumerate(lengths):
+            cost = length * (length + 1) // 2
+            ds._insert_entry(length, cost, row_idx=i)
         return ds
 
     def test_returns_neg1_when_nothing_fits(self):
@@ -873,8 +874,269 @@ class TestAttnBalancedPacking(unittest.TestCase):
             self.assertTrue(b1[0]["input"].equal(b2[0]["input"]))
 
 
+class TestMaterializeItem(unittest.TestCase):
+    """Verify _materialize_item returns correct data from Arrow source."""
+
+    def test_standard_matches_arrow(self):
+        """Materialized input_ids/labels match raw Arrow column values."""
+        import numpy as np
+
+        ds = _build_dataset(seq_len=16, buffer_size=6, packing="longest")
+        ds._prepare_iter()
+
+        for row_idx in range(len(ds._data)):
+            item = ds._materialize_item(row_idx)
+            table_slice = ds._data.data.slice(row_idx, 1)
+            col = table_slice.column("input_ids").combine_chunks()
+            offsets = col.offsets.to_numpy()
+            expected = col.values.to_numpy()[offsets[0]:offsets[1]]
+            np.testing.assert_array_equal(item.input_ids, expected)
+
+    def test_backbone_suffix_all_fields_numpy(self):
+        """BackboneSuffixDataset materializes all fields as np.ndarray."""
+        import tempfile
+
+        import numpy as np
+        from datasets import Dataset
+
+        from torchtitan.models.granite.pretokenized_dataset import (
+            BackboneSuffixDataset,
+        )
+
+        ds_data = Dataset.from_dict({
+            "input_ids": [[1, 2, 3, 4, 5], [10, 20, 30]],
+            "labels": [[-100, -100, 3, 4, 5], [-100, 20, 30]],
+            "positions": [[0, 1, 2, 3, 4], [0, 1, 2]],
+            "suffix_starts": [[3], []],
+            "insertion_limits": [[2], []],
+            "n_tokens": [5, 3],
+        })
+        manifest = {
+            "strategy": "backbone_suffix",
+            "tokenizer": {"eos_token_id": 0},
+            "shards": {"completed": []},
+            "stats": {"total_examples": 2},
+        }
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        json.dump(manifest, tmp)
+        tmp.close()
+
+        try:
+            ds = BackboneSuffixDataset(
+                manifest_path=tmp.name,
+                seq_len=32,
+                dp_rank=0,
+                dp_world_size=1,
+                infinite=False,
+                _manifest=manifest,
+                _full_dataset=ds_data,
+                packing="longest",
+                buffer_size=4,
+            )
+            ds._prepare_iter()
+
+            for row_idx in range(len(ds._data)):
+                item = ds._materialize_item(row_idx)
+                for field in item:
+                    self.assertIsInstance(field, np.ndarray)
+        finally:
+            os.unlink(tmp.name)
+
+    def test_last_row_in_shard(self):
+        """Materializing the last row doesn't raise."""
+        ds = _build_dataset(seq_len=16, buffer_size=6, packing="longest")
+        ds._prepare_iter()
+        last_idx = len(ds._data) - 1
+        item = ds._materialize_item(last_idx)
+        self.assertGreater(len(item.input_ids), 0)
+
+
+class TestRefillBufferMetadata(unittest.TestCase):
+    """Verify buffer metadata consistency after _refill_buffer."""
+
+    def test_lengths_match_materialized_items(self):
+        """_lengths[k] equals len(_materialize_item(_row_indices[k]).input_ids)."""
+        ds = _build_dataset(seq_len=16, buffer_size=6, packing="longest")
+        ds._prepare_iter()
+        ds._refill_buffer()
+
+        for k in range(len(ds._row_indices)):
+            item = ds._materialize_item(ds._row_indices[k])
+            self.assertEqual(ds._lengths[k], len(item.input_ids))
+
+    def test_oversized_items_excluded(self):
+        """Items with n_tokens > seq_len are absent from buffer."""
+        ds = _build_dataset(seq_len=4, buffer_size=10, packing="longest")
+        ds._prepare_iter()
+        ds._refill_buffer()
+
+        for length in ds._lengths:
+            self.assertLessEqual(length, 4)
+
+    def test_row_indices_in_range(self):
+        """All _row_indices values are valid shard-relative indices."""
+        ds = _build_dataset(seq_len=16, buffer_size=6, packing="longest")
+        ds._prepare_iter()
+        ds._refill_buffer()
+
+        data_len = len(ds._data)
+        for row_idx in ds._row_indices:
+            self.assertGreaterEqual(row_idx, 0)
+            self.assertLess(row_idx, data_len)
+
+
+class TestPendingRestore(unittest.TestCase):
+    """Deferred checkpoint restore: load_state_dict → _prepare_iter window."""
+
+    def test_pending_set_after_load(self):
+        """After load_state_dict with row_indices, _pending_restore is set."""
+        ds1 = _build_dataset(seq_len=16, buffer_size=4, packing="buffer_shuffle")
+        it1 = iter(ds1)
+        next(it1)
+
+        state = ds1.state_dict()
+        self.assertIn("row_indices", state)
+
+        ds2 = _build_dataset(seq_len=16, buffer_size=4, packing="buffer_shuffle")
+        ds2.load_state_dict(state)
+
+        self.assertIsNotNone(ds2._pending_restore)
+        self.assertEqual(ds2._row_indices, [])
+
+    def test_buffer_reconstructed_after_iter(self):
+        """After iter() triggers _prepare_iter, buffer is reconstructed."""
+        ds1 = _build_dataset(seq_len=16, buffer_size=4, packing="buffer_shuffle")
+        it1 = iter(ds1)
+        next(it1)
+
+        state = ds1.state_dict()
+
+        ds2 = _build_dataset(seq_len=16, buffer_size=4, packing="buffer_shuffle")
+        ds2.load_state_dict(state)
+        ds2._prepare_iter()
+
+        self.assertIsNone(ds2._pending_restore)
+        self.assertEqual(len(ds2._row_indices), len(ds1._row_indices))
+        self.assertEqual(ds2._lengths, ds1._lengths)
+
+    def test_state_dict_in_pending_window(self):
+        """state_dict() called before _prepare_iter serializes from _pending_restore."""
+        ds1 = _build_dataset(seq_len=16, buffer_size=4, packing="buffer_shuffle")
+        it1 = iter(ds1)
+        next(it1)
+
+        state1 = ds1.state_dict()
+
+        ds2 = _build_dataset(seq_len=16, buffer_size=4, packing="buffer_shuffle")
+        ds2.load_state_dict(state1)
+        state2 = ds2.state_dict()
+
+        self.assertEqual(state1["row_indices"], state2["row_indices"])
+        self.assertEqual(state1["ages"], state2["ages"])
+        self.assertEqual(state1["age_counter"], state2["age_counter"])
+
+    def test_iteration_matches_after_restore(self):
+        """Restored dataset produces identical batches to original."""
+        ds1 = _build_dataset(seq_len=16, buffer_size=4, packing="buffer_shuffle")
+        it1 = iter(ds1)
+        next(it1)
+
+        state = ds1.state_dict()
+        remaining1 = list(it1)
+
+        ds2 = _build_dataset(seq_len=16, buffer_size=4, packing="buffer_shuffle")
+        ds2.load_state_dict(state)
+        remaining2 = list(ds2)
+
+        self.assertEqual(len(remaining1), len(remaining2))
+        for b1, b2 in zip(remaining1, remaining2):
+            self.assertTrue(b1[0]["input"].equal(b2[0]["input"]))
+
+
+class TestReconstructBufferBounds(unittest.TestCase):
+    """Out-of-bounds row index raises ValueError during reconstruction."""
+
+    def test_invalid_row_index_raises(self):
+        ds = _build_dataset(seq_len=16, buffer_size=4, packing="buffer_shuffle")
+        ds._prepare_iter()
+
+        with self.assertRaises(ValueError) as ctx:
+            ds._reconstruct_buffer([9999], [0])
+        self.assertIn("9999", str(ctx.exception))
+
+
+class TestMidLoopRefill(unittest.TestCase):
+    """Force mid-loop refill with tiny buffer_size."""
+
+    def test_fill_default_refills_mid_loop(self):
+        """With buffer_size=2, dp=1, fill loop must refill to pack all items."""
+        ds = _build_dataset(seq_len=16, buffer_size=2, packing="longest")
+        batches = list(ds)
+        self.assertGreater(len(batches), 0)
+        total_examples = sum(b[2]["n_examples_packed"] for b in batches)
+        self.assertGreater(total_examples, 2)
+
+    def test_fill_attn_balanced_refills_mid_loop(self):
+        """With buffer_size=2, dp=1, attn_balanced fill refills mid-loop."""
+        ds = _build_dataset(seq_len=16, buffer_size=2, packing="attn_balanced")
+        batches = list(ds)
+        self.assertGreater(len(batches), 0)
+        total_examples = sum(b[2]["n_examples_packed"] for b in batches)
+        self.assertGreater(total_examples, 2)
+
+    def test_small_buffer_cross_rank(self):
+        """With buffer_size=2, dp_world_size=2, all items still consumed."""
+        batches_r0 = list(
+            _build_dataset(
+                seq_len=16, buffer_size=2, packing="longest",
+                dp_rank=0, dp_world_size=2,
+            )
+        )
+        batches_r1 = list(
+            _build_dataset(
+                seq_len=16, buffer_size=2, packing="longest",
+                dp_rank=1, dp_world_size=2,
+            )
+        )
+        total = sum(b[2]["n_examples_packed"] for b in batches_r0 + batches_r1)
+        self.assertGreaterEqual(total, 4)
+
+
+class TestEpochWrap(unittest.TestCase):
+    """Test infinite=True epoch wrapping and remnant dropping."""
+
+    def test_infinite_wraps_epoch(self):
+        """With infinite=True, dataset produces more batches than one epoch."""
+        ds = _build_dataset(
+            seq_len=16, buffer_size=4, packing="longest", infinite=True
+        )
+        it = iter(ds)
+        batches = [next(it) for _ in range(10)]
+        self.assertEqual(len(batches), 10)
+        total_examples = sum(b[2]["n_examples_packed"] for b in batches)
+        self.assertGreater(total_examples, 6)
+
+    def test_finite_remnant_dropped_with_warning(self):
+        """When fewer items remain than dp_world_size, warns and drops."""
+        import warnings
+
+        # seq_len=5 filters out items with n_tokens > 5; with 6 examples
+        # only 3 fit, but dp=4 needs 4 seeds → triggers remnant warning.
+        ds = _build_dataset(
+            seq_len=5, buffer_size=6, packing="longest",
+            dp_rank=0, dp_world_size=4, infinite=False,
+        )
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            list(ds)
+        remnant_warnings = [
+            x for x in w if "remaining at end of epoch" in str(x.message)
+        ]
+        self.assertGreater(len(remnant_warnings), 0)
+
+
 def _build_backbone_suffix_dataset(seq_len=16, buffer_size=6):
-    """Helper to build a BackboneSuffixDataset for _item_cost tests."""
+    """Helper to build a BackboneSuffixDataset for cost metadata tests."""
     import json
     import tempfile
 
