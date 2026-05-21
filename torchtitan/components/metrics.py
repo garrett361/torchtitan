@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from torch.utils.tensorboard import SummaryWriter
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
@@ -364,8 +365,79 @@ class MetricsProcessor(Configurable):
         self.lr_schedulers = None
         self.model_parts = None
 
+        # Attention cost tracking (initialized lazily via setup_attn_cost_tracking)
+        self._attn_cost_buf: torch.Tensor | None = None
+        self._attn_cost_count: int = 0
+        self._attn_cost_max: int = 0
+        self._attn_cost_capacity: int = 0
+        self._attn_cost_device: torch.device | None = None
+
     def should_log(self, step: int) -> bool:
         return step == 1 or step % self.config.log_freq == 0
+
+    @property
+    def attn_cost_tracking_enabled(self) -> bool:
+        return self._attn_cost_buf is not None
+
+    def setup_attn_cost_tracking(
+        self, *, seq_len: int, gradient_accumulation_steps: int, device: torch.device
+    ):
+        self._attn_cost_max = seq_len * (seq_len + 1) // 2
+        self._attn_cost_capacity = self.config.log_freq * gradient_accumulation_steps
+        self._attn_cost_buf = torch.zeros(self._attn_cost_capacity, dtype=torch.int64)
+        self._attn_cost_count = 0
+        self._attn_cost_device = device
+
+    def record_attn_cost(self, cost: int):
+        if self._attn_cost_buf is None:
+            return
+        idx = self._attn_cost_count
+        if idx < self._attn_cost_capacity:
+            self._attn_cost_buf[idx] = cost
+        self._attn_cost_count += 1
+
+    def _compute_attn_cost_metrics(self) -> dict[str, float]:
+        if self._attn_cost_buf is None or self._attn_cost_count == 0:
+            return {}
+
+        n = min(self._attn_cost_count, self._attn_cost_capacity)
+        batch_mesh = self.parallel_dims.get_optional_mesh("batch")
+
+        if batch_mesh is None:
+            normed = self._attn_cost_buf[:n].float() / self._attn_cost_max
+            return {
+                "attn_costs/mean": normed.mean().item(),
+                "attn_costs/global_min": normed.min().item(),
+                "attn_costs/global_max": normed.max().item(),
+            }
+
+        local = self._attn_cost_buf[:n].float().to(self._attn_cost_device)
+        dp_degree = batch_mesh.size()
+
+        gathered = torch.empty(dp_degree * n, device=self._attn_cost_device)
+        dist.all_gather_into_tensor(
+            gathered, local, group=batch_mesh.get_group()
+        )
+
+        # Shape: (dp_degree, n_microbatches_in_period)
+        normed = gathered.view(dp_degree, n) / self._attn_cost_max
+
+        step_std = normed.std(dim=0)
+        step_mean = normed.mean(dim=0)
+
+        step_min = normed.min(dim=0).values
+        step_max = normed.max(dim=0).values
+
+        return {
+            "attn_costs/mean": normed.mean().item(),
+            "attn_costs/std": step_std.mean().item(),
+            "attn_costs/global_min": normed.min().item(),
+            "attn_costs/global_max": normed.max().item(),
+            "attn_costs/step_min_avg": step_min.mean().item(),
+            "attn_costs/step_max_avg": step_max.mean().item(),
+            "attn_costs/cv": (step_std / step_mean).mean().item(),
+            "attn_costs/max_min_ratio": (step_max / step_min).mean().item(),
+        }
 
     def _build_metric_logger(
         self,
@@ -535,6 +607,10 @@ class MetricsProcessor(Configurable):
         if extra_metrics:
             metrics.update(extra_metrics)
 
+        attn_cost_metrics = self._compute_attn_cost_metrics()
+        if attn_cost_metrics:
+            metrics.update(attn_cost_metrics)
+
         self.logger.log(metrics, step)
 
         color = self.color
@@ -581,6 +657,7 @@ class MetricsProcessor(Configurable):
         self.ntokens_since_last_log = 0
         self.nvalid_tokens_since_last_log = 0
         self.data_loading_times.clear()
+        self._attn_cost_count = 0
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 

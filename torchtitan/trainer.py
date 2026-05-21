@@ -542,6 +542,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # entire step will not be executed.
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
+            attn_cost = input_dict.pop("attn_cost", None)
+            if attn_cost is not None:
+                if not self.metrics_processor.attn_cost_tracking_enabled:
+                    self.metrics_processor.setup_attn_cost_tracking(
+                        seq_len=input_dict["input"].shape[-1],
+                        gradient_accumulation_steps=self.gradient_accumulation_steps,
+                        device=self.device,
+                    )
+                self.metrics_processor.record_attn_cost(attn_cost.item())
             ntokens_batch = labels.numel()
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
             self.metrics_processor.nvalid_tokens_since_last_log += int(

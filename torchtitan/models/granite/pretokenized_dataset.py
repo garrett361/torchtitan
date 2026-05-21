@@ -473,6 +473,7 @@ class PreTokenizedDataset(IterableDataset, Stateful):
             else:
                 self._fill_default(my_batch, batch_remaining, batch_cost, dp)
 
+            my_batch["attn_cost"] = batch_cost[self._dp_rank]
             yield self._pad_and_flush(my_batch)
 
     def _fill_default(
@@ -717,6 +718,7 @@ class StandardPackingDataset(PreTokenizedDataset):
             {
                 "input": torch.from_numpy(batch["inputs"].astype(np.int64)),
                 "positions": torch.from_numpy(batch["positions"].astype(np.int64)),
+                "attn_cost": torch.tensor(batch.get("attn_cost", 0), dtype=torch.int64),
             },
             torch.from_numpy(batch["labels"].astype(np.int64)),
             stats,
@@ -866,6 +868,7 @@ class BackboneSuffixDataset(PreTokenizedDataset):
                 "insertion_limits": torch.from_numpy(
                     batch["insertion_limits"].astype(np.int64)
                 ),
+                "attn_cost": torch.tensor(batch.get("attn_cost", 0), dtype=torch.int64),
             },
             torch.from_numpy(batch["labels"].astype(np.int64)),
             stats,
