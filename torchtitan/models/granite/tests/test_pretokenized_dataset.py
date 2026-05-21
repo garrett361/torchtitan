@@ -76,18 +76,6 @@ class TestMultiDatasetMerge(unittest.TestCase):
             with self.assertRaises(ValueError, msg="eos_token_id mismatch"):
                 _load_and_merge_manifests([MANIFEST_PATH, manifest_file])
 
-    def test_merge_computes_length_stats(self):
-        """Merged manifest has correct length_stats over combined dataset."""
-        manifest, _ = _load_and_merge_manifests([MANIFEST_PATH, MANIFEST_PATH_B])
-        ls = manifest["length_stats"]
-        # Both fixtures: [6,5,8,4,7,4] → combined [4,4,4,4,5,5,6,6,7,7,8,8]
-        self.assertEqual(ls["min"], 4)
-        self.assertEqual(ls["max"], 8)
-        self.assertAlmostEqual(ls["mean"], 5.7, places=1)
-        self.assertEqual(ls["median"], 5)
-        self.assertAlmostEqual(ls["std"], 1.5, places=1)
-        self.assertEqual(ls["p95"], 8)
-
     def test_merge_preserves_tokenizer_info(self):
         """Merged manifest retains tokenizer from first dataset."""
         manifest, _ = _load_and_merge_manifests([MANIFEST_PATH, MANIFEST_PATH_B])

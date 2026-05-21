@@ -100,7 +100,6 @@ def _load_and_merge_manifests(
         m["stats"].get("total_trained_tokens", 0) for m in manifests
     )
 
-    n_tokens_arr = np.array(combined["n_tokens"], dtype=np.int64)
     merged_manifest: dict[str, Any] = {
         "version": ref["version"],
         "strategy": ref["strategy"],
@@ -109,14 +108,6 @@ def _load_and_merge_manifests(
             "total_examples": total_examples,
             "total_tokens": total_tokens,
             "total_trained_tokens": total_trained_tokens,
-        },
-        "length_stats": {
-            "min": int(n_tokens_arr.min()),
-            "max": int(n_tokens_arr.max()),
-            "mean": round(float(n_tokens_arr.mean()), 1),
-            "median": int(np.median(n_tokens_arr)),
-            "std": round(float(n_tokens_arr.std()), 1),
-            "p95": int(np.percentile(n_tokens_arr, 95)),
         },
     }
 
@@ -291,6 +282,12 @@ class PreTokenizedDataset(IterableDataset, Stateful):
     def _materialize_item(self, row_idx: int) -> Any:
         """Read full item from Arrow table by shard-relative row index."""
         ...
+
+    def _read_list_column(self, table_slice, col_name: str) -> np.ndarray:
+        assert table_slice.num_rows == 1
+        col = table_slice.column(col_name).combine_chunks()
+        offsets = col.offsets.to_numpy()
+        return col.values.to_numpy()[offsets[0]:offsets[1]].copy()
 
     @abstractmethod
     def _new_batch(self) -> dict:
@@ -612,22 +609,27 @@ class PreTokenizedDataset(IterableDataset, Stateful):
     def _reconstruct_buffer(self, row_indices: list[int], ages: list[int]) -> None:
         """Re-read metadata from Arrow to rebuild buffer state."""
         data_len = len(self._data)
-        for row_idx, age in zip(row_indices, ages):
+        for row_idx in row_indices:
             if row_idx >= data_len:
                 raise ValueError(
                     f"Stored row index {row_idx} exceeds dataset length {data_len}. "
                     f"Checkpoint was likely saved with a different num_workers or "
                     f"dataset shard configuration."
                 )
-            table_slice = self._data.data.slice(row_idx, 1)
-            scalars: dict[str, np.ndarray] = {}
-            for col in self._arrow_scalar_columns:
-                scalars[col] = table_slice.column(col).to_numpy()
-            list_arrays: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-            for col in self._cost_list_columns:
-                c = table_slice.column(col).combine_chunks()
-                list_arrays[col] = (c.offsets.to_numpy(), c.values.to_numpy())
-            result = self._cost_from_metadata(scalars, list_arrays, 0)
+
+        table_slice = self._data.data.table.take(row_indices)
+
+        scalars: dict[str, np.ndarray] = {}
+        for col_name in self._arrow_scalar_columns:
+            scalars[col_name] = table_slice.column(col_name).to_numpy()
+
+        list_arrays: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for col_name in self._cost_list_columns:
+            col = table_slice.column(col_name).combine_chunks()
+            list_arrays[col_name] = (col.offsets.to_numpy(), col.values.to_numpy())
+
+        for i, (row_idx, age) in enumerate(zip(row_indices, ages)):
+            result = self._cost_from_metadata(scalars, list_arrays, i)
             if result is None:
                 continue
             length, cost = result
@@ -667,15 +669,15 @@ class StandardPackingDataset(PreTokenizedDataset):
 
     def _materialize_item(self, row_idx: int) -> _ChatItem:
         table_slice = self._data.data.slice(row_idx, 1)
-        col = table_slice.column("input_ids").combine_chunks()
-        offsets = col.offsets.to_numpy()
-        inp = col.values.to_numpy()[offsets[0]:offsets[1]].copy()
-        col = table_slice.column("labels").combine_chunks()
-        offsets = col.offsets.to_numpy()
-        lbl = col.values.to_numpy()[offsets[0]:offsets[1]].copy()
+        fields = {
+            col: self._read_list_column(table_slice, col)
+            for col in self._arrow_list_columns
+        }
         if not self._logged_first_sample:
-            self._log_first_sample(inp.tolist(), lbl.tolist())
-        return _ChatItem(inp, lbl)
+            self._log_first_sample(
+                fields["input_ids"].tolist(), fields["labels"].tolist()
+            )
+        return _ChatItem(fields["input_ids"], fields["labels"])
 
     def _new_batch(self) -> dict:
         return {
@@ -753,8 +755,6 @@ class BackboneSuffixDataset(PreTokenizedDataset):
         n = int(scalars["n_tokens"][idx])
         if n > self.seq_len:
             return None
-        if not self._cost_list_columns:
-            return (n, n * (n + 1) // 2)
         offsets, values = list_arrays["suffix_starts"]
         suffix_starts = values[offsets[idx]:offsets[idx + 1]]
         offsets, values = list_arrays["insertion_limits"]
@@ -773,11 +773,10 @@ class BackboneSuffixDataset(PreTokenizedDataset):
 
     def _materialize_item(self, row_idx: int) -> _BackboneSuffixItem:
         table_slice = self._data.data.slice(row_idx, 1)
-        fields = {}
-        for col_name in self._arrow_list_columns:
-            col = table_slice.column(col_name).combine_chunks()
-            offsets = col.offsets.to_numpy()
-            fields[col_name] = col.values.to_numpy()[offsets[0]:offsets[1]].copy()
+        fields = {
+            col: self._read_list_column(table_slice, col)
+            for col in self._arrow_list_columns
+        }
         if not self._logged_first_sample:
             self._log_first_sample(
                 fields["input_ids"].tolist(), fields["labels"].tolist()
