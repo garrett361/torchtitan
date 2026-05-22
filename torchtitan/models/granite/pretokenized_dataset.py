@@ -896,11 +896,10 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         buffer_size: int = 512
         """Number of examples held in the lookahead buffer (per worker)."""
 
-        snapshot_every_n_steps: int = 1024
+        snapshot_every_n_steps: int = 16
         """How often StatefulDataLoader snapshots worker state for checkpointing.
-        Higher values reduce data loading overhead (buffer serialization is expensive
-        for large buffer_size) at the cost of replaying up to N-1 steps on resume.
-        Set to checkpoint interval for zero replay and zero overhead."""
+        At most N-1 steps are replayed on resume. Lower N reduces replay at
+        negligible serialization cost."""
 
     def __init__(
         self,
