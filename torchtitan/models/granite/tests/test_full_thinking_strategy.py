@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.models.granite.tests.helpers import find_unmasked_regions
 
 load_dotenv()
 
@@ -75,19 +76,7 @@ class TestFullThinkingStrategy(unittest.TestCase):
         labels = result["labels"]
 
         # Both assistant turns should have unmasked regions
-        unmasked_regions = []
-        in_region = False
-        start = None
-        for i, lbl in enumerate(labels):
-            if lbl != IGNORE_INDEX and not in_region:
-                in_region = True
-                start = i
-            elif lbl == IGNORE_INDEX and in_region:
-                in_region = False
-                unmasked_regions.append((start, i))
-        if in_region:
-            unmasked_regions.append((start, len(labels)))
-
+        unmasked_regions = find_unmasked_regions(labels)
         self.assertEqual(
             len(unmasked_regions),
             2,
@@ -105,19 +94,7 @@ class TestFullThinkingStrategy(unittest.TestCase):
         result = self._tokenize(msgs)
         labels = result["labels"]
 
-        unmasked_regions = []
-        in_region = False
-        start = None
-        for i, lbl in enumerate(labels):
-            if lbl != IGNORE_INDEX and not in_region:
-                in_region = True
-                start = i
-            elif lbl == IGNORE_INDEX and in_region:
-                in_region = False
-                unmasked_regions.append((start, i))
-        if in_region:
-            unmasked_regions.append((start, len(labels)))
-
+        unmasked_regions = find_unmasked_regions(labels)
         self.assertEqual(
             len(unmasked_regions),
             2,
@@ -140,19 +117,7 @@ class TestFullThinkingStrategy(unittest.TestCase):
         unmasked_count = sum(1 for lbl in labels if lbl != IGNORE_INDEX)
         self.assertGreater(unmasked_count, 0)
 
-        unmasked_regions = []
-        in_region = False
-        start = None
-        for i, lbl in enumerate(labels):
-            if lbl != IGNORE_INDEX and not in_region:
-                in_region = True
-                start = i
-            elif lbl == IGNORE_INDEX and in_region:
-                in_region = False
-                unmasked_regions.append((start, i))
-        if in_region:
-            unmasked_regions.append((start, len(labels)))
-
+        unmasked_regions = find_unmasked_regions(labels)
         self.assertEqual(
             len(unmasked_regions),
             3,
@@ -206,21 +171,10 @@ class TestFullThinkingStrategy(unittest.TestCase):
         labels = result["labels"]
 
         # All 3 assistant turns have reasoning → 3 unmasked regions
-        unmasked_regions = []
-        in_region = False
-        for i, lbl in enumerate(labels):
-            if lbl != IGNORE_INDEX and not in_region:
-                in_region = True
-            elif lbl == IGNORE_INDEX and in_region:
-                in_region = False
-                unmasked_regions.append(True)
-        if in_region:
-            unmasked_regions.append(True)
-
         self.assertEqual(
-            len(unmasked_regions),
+            len(find_unmasked_regions(labels)),
             3,
-            f"Expected 3 unmasked regions for 3 reasoning assistant turns, got {len(unmasked_regions)}",
+            f"Expected 3 unmasked regions for 3 reasoning assistant turns, got {len(find_unmasked_regions(labels))}",
         )
 
     def test_trailing_messages_dropped(self):
@@ -270,17 +224,9 @@ class TestFullThinkingStrategy(unittest.TestCase):
 
         # For intermediate turn: the last unmasked label in the first region
         # should predict a token that precedes the next user turn.
-        # Find first unmasked region end
-        in_region = False
-        first_region_end = None
-        for i, lbl in enumerate(labels):
-            if lbl != IGNORE_INDEX and not in_region:
-                in_region = True
-            elif lbl == IGNORE_INDEX and in_region:
-                first_region_end = i
-                break
-
-        self.assertIsNotNone(first_region_end)
+        regions = find_unmasked_regions(labels)
+        self.assertGreater(len(regions), 0)
+        first_region_end = regions[0][1]
         # Last label in intermediate region predicts <|im_end|>
         self.assertEqual(labels[first_region_end - 1], self.im_end_id)
 
@@ -396,19 +342,7 @@ class TestFullThinkingInferenceFidelity(unittest.TestCase):
         labels = result["labels"]
 
         # Find unmasked regions
-        regions = []
-        in_region = False
-        start = None
-        for i, lbl in enumerate(labels):
-            if lbl != IGNORE_INDEX and not in_region:
-                in_region = True
-                start = i
-            elif lbl == IGNORE_INDEX and in_region:
-                in_region = False
-                regions.append((start, i))
-        if in_region:
-            regions.append((start, len(labels)))
-
+        regions = find_unmasked_regions(labels)
         self.assertEqual(len(regions), 2)
         # Last label in each region should be <|im_end|>
         for reg_start, reg_end in regions:

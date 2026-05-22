@@ -12,7 +12,8 @@ import unittest
 import warnings
 
 import torch
-import torch.nn.functional as F
+
+from torchtitan.models.granite.tests.helpers import has_fa4, ref_attention
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -21,18 +22,8 @@ SCALE = 1.0 / D
 DTYPE = torch.bfloat16
 
 
-def _has_fa4():
-    try:
-        import cutlass.cute  # noqa: F401
-        from flash_attn.cute import flash_attn_func  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
-
-
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-@unittest.skipUnless(_has_fa4(), "flash_attn.cute (FA4) not installed")
+@unittest.skipUnless(has_fa4(), "flash_attn.cute (FA4) not installed")
 class TestFA4Masks(unittest.TestCase):
     """Validate FA4 mask_mod correctness on SM100."""
 
@@ -44,17 +35,7 @@ class TestFA4Masks(unittest.TestCase):
         torch.testing.assert_close(a, b, atol=atol, rtol=rtol, msg=name)
 
     def _ref_attention(self, q, k, v, mask):
-        """SDPA reference attention with explicit bool mask. Handles GQA."""
-        # q: (B, S_q, H, D), k/v: (B, S_kv, HKV, D), mask: (S_q, S_kv) bool
-        # SDPA expects (B, H, S, D)
-        q_t = q.transpose(1, 2).float()
-        k_t = k.transpose(1, 2).float()
-        v_t = v.transpose(1, 2).float()
-        attn_mask = mask.unsqueeze(0).unsqueeze(0).expand(B, H, -1, -1)
-        out = F.scaled_dot_product_attention(
-            q_t, k_t, v_t, attn_mask=attn_mask, scale=SCALE, enable_gqa=True,
-        )
-        return out.transpose(1, 2).to(DTYPE)
+        return ref_attention(q, k, v, mask, num_heads=H, scale=SCALE, dtype=DTYPE)
 
     def test_causal_mask_mod_matches_causal_flag(self):
         """FA4 causal mask_mod produces same output+grads as causal=True."""
@@ -486,7 +467,7 @@ class TestFA4Masks(unittest.TestCase):
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-@unittest.skipUnless(_has_fa4(), "flash_attn.cute (FA4) not installed")
+@unittest.skipUnless(has_fa4(), "flash_attn.cute (FA4) not installed")
 class TestBuildFA4Mask(unittest.TestCase):
     """Validate build_fa4_mask produces correct masks for CP and document isolation."""
 
@@ -494,14 +475,7 @@ class TestBuildFA4Mask(unittest.TestCase):
         torch.manual_seed(42)
 
     def _ref_attention(self, q, k, v, mask):
-        q_t = q.transpose(1, 2).float()
-        k_t = k.transpose(1, 2).float()
-        v_t = v.transpose(1, 2).float()
-        attn_mask = mask.unsqueeze(0).unsqueeze(0).expand(B, H, -1, -1)
-        out = F.scaled_dot_product_attention(
-            q_t, k_t, v_t, attn_mask=attn_mask, scale=SCALE, enable_gqa=True,
-        )
-        return out.transpose(1, 2).to(DTYPE)
+        return ref_attention(q, k, v, mask, num_heads=H, scale=SCALE, dtype=DTYPE)
 
     def test_doc_causal_mask_matches_reference(self):
         """build_fa4_mask with document_ids matches dense doc+causal reference."""
@@ -850,7 +824,7 @@ class TestBuildFA4Mask(unittest.TestCase):
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-@unittest.skipUnless(_has_fa4(), "flash_attn.cute (FA4) not installed")
+@unittest.skipUnless(has_fa4(), "flash_attn.cute (FA4) not installed")
 class TestDocumentIdsFromPositions(unittest.TestCase):
     """Unit tests for document_ids_from_positions."""
 
@@ -902,7 +876,7 @@ class TestDocumentIdsFromPositions(unittest.TestCase):
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-@unittest.skipUnless(_has_fa4(), "flash_attn.cute (FA4) not installed")
+@unittest.skipUnless(has_fa4(), "flash_attn.cute (FA4) not installed")
 class TestFA4IndexDirectionCanary(unittest.TestCase):
     """Small known-permutation test to catch index direction regressions."""
 
@@ -910,14 +884,7 @@ class TestFA4IndexDirectionCanary(unittest.TestCase):
         torch.manual_seed(42)
 
     def _ref_attention(self, q, k, v, mask):
-        q_t = q.transpose(1, 2).float()
-        k_t = k.transpose(1, 2).float()
-        v_t = v.transpose(1, 2).float()
-        attn_mask = mask.unsqueeze(0).unsqueeze(0).expand(B, H, -1, -1)
-        out = F.scaled_dot_product_attention(
-            q_t, k_t, v_t, attn_mask=attn_mask, scale=SCALE, enable_gqa=True,
-        )
-        return out.transpose(1, 2).to(DTYPE)
+        return ref_attention(q, k, v, mask, num_heads=H, scale=SCALE, dtype=DTYPE)
 
     def test_known_permutation_4tokens(self):
         """Permutation [2,3,0,1]: rank 0 holds perm positions [0,1] = orig [2,3]."""

@@ -15,16 +15,7 @@ import torch
 
 from torchtitan.models.granite import granite_configs
 from torchtitan.models.granite.model import GraniteModel
-
-
-def _has_fa4():
-    try:
-        import cutlass.cute  # noqa: F401
-        from flash_attn.cute import flash_attn_func  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
+from torchtitan.models.granite.tests.helpers import has_fa4
 
 
 def _build_model(backend: str = "fa4") -> GraniteModel:
@@ -60,7 +51,7 @@ def _train_loop(model, steps=20, lr=1e-3, seq_len=64):
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-@unittest.skipUnless(_has_fa4(), "flash_attn.cute (FA4) not installed")
+@unittest.skipUnless(has_fa4(), "flash_attn.cute (FA4) not installed")
 class TestFA4Model(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(42)
@@ -104,7 +95,7 @@ class TestFA4Model(unittest.TestCase):
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-@unittest.skipUnless(_has_fa4(), "flash_attn.cute (FA4) not installed")
+@unittest.skipUnless(has_fa4(), "flash_attn.cute (FA4) not installed")
 class TestFA4Training(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(42)
@@ -125,7 +116,7 @@ class TestFA4Training(unittest.TestCase):
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-@unittest.skipUnless(_has_fa4(), "flash_attn.cute (FA4) not installed")
+@unittest.skipUnless(has_fa4(), "flash_attn.cute (FA4) not installed")
 class TestFA4Compile(unittest.TestCase):
     def test_compile_forward_matches_eager(self):
         torch.manual_seed(0)
@@ -141,7 +132,7 @@ class TestFA4Compile(unittest.TestCase):
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-@unittest.skipUnless(_has_fa4(), "flash_attn.cute (FA4) not installed")
+@unittest.skipUnless(has_fa4(), "flash_attn.cute (FA4) not installed")
 class TestFA4Masking(unittest.TestCase):
     """Verify block_causal masking path (get_attention_masks → forward)."""
 
