@@ -23,7 +23,7 @@ class GraniteStateDictAdapter(StateDictAdapter):
     - ``lm_head.weight`` is absent from the HF checkpoint (weight tying);
       ``from_hf`` synthesizes it from ``model.embed_tokens.weight``.
     - HF Granite uses the same interleaved Q/K RoPE layout as LLaMA3 HF, so
-      ``_permute``/``_reverse_permute`` are correct and must be kept.
+      ``_permute`` (forward and reverse) is correct and must be kept.
       (Validated empirically: logits match ``transformers.GraniteForCausalLM``
       within bfloat16 numerical noise, max absolute diff ≈ 0.48 over 40 layers.)
     """
@@ -74,7 +74,7 @@ class GraniteStateDictAdapter(StateDictAdapter):
                 "lm_head.weight": "output.weight",
             }
 
-    def _permute(self, w, n_heads_arg, dim1=None, dim2=None):
+    def _permute(self, w, n_heads_arg, dim1=None, dim2=None, *, reverse=False):
         if dim1 is None:
             dim1 = w.shape[0]
         if dim2 is None:
@@ -88,32 +88,12 @@ class GraniteStateDictAdapter(StateDictAdapter):
             w = w.redistribute(device_mesh=mesh, placements=[Replicate()] * mesh.ndim)
         else:
             mesh = placements = None
-        result = (
-            w.view(n_heads_arg, dim1 // n_heads_arg // 2, 2, dim2)
-            .transpose(1, 2)
-            .reshape(dim1, dim2)
-            .clone()
-        )
-        if placements is not None:
-            return result.redistribute(device_mesh=mesh, placements=placements)
-        return result
-
-    def _reverse_permute(self, w, n_heads_arg, dim1=None, dim2=None):
-        if dim1 is None:
-            dim1 = w.shape[0]
-        if dim2 is None:
-            dim2 = w.shape[1]
-        if isinstance(w, DTensor):
-            mesh, placements = w.device_mesh, w.placements
-            w = w.redistribute(device_mesh=mesh, placements=[Replicate()] * mesh.ndim)
+        half = dim1 // n_heads_arg // 2
+        if reverse:
+            shape = (n_heads_arg, 2, half, dim2)
         else:
-            mesh = placements = None
-        result = (
-            w.view(n_heads_arg, 2, dim1 // n_heads_arg // 2, dim2)
-            .transpose(1, 2)
-            .reshape(dim1, dim2)
-            .clone()
-        )
+            shape = (n_heads_arg, half, 2, dim2)
+        result = w.view(shape).transpose(1, 2).reshape(dim1, dim2).clone()
         if placements is not None:
             return result.redistribute(device_mesh=mesh, placements=placements)
         return result
@@ -207,10 +187,10 @@ class GraniteStateDictAdapter(StateDictAdapter):
                 layer_num = re.search(r"\d+", key).group(0)
 
                 if abstract_key == "model.layers.{}.self_attn.q_proj.weight":
-                    value = self._reverse_permute(value, n_heads)
+                    value = self._permute(value, n_heads, reverse=True)
                 if abstract_key == "model.layers.{}.self_attn.k_proj.weight":
                     key_value_dim = head_dim * n_kv_heads
-                    value = self._reverse_permute(value, n_kv_heads, key_value_dim, dim)
+                    value = self._permute(value, n_kv_heads, key_value_dim, dim, reverse=True)
 
                 if self.fuse_qkv and abstract_key in (
                     "model.layers.{}.self_attn.q_proj.weight",
