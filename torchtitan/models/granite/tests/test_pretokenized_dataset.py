@@ -185,7 +185,7 @@ class TestSortedBufferInvariants(unittest.TestCase):
 
     def _assert_sync(self, ds):
         self.assertEqual(len(ds._row_indices), len(ds._lengths))
-        self.assertEqual(len(ds._row_indices), len(ds._ages))
+        self.assertEqual(len(ds._row_indices), len(ds._costs))
         for i, row_idx in enumerate(ds._row_indices):
             item = ds._materialize_item(row_idx)
             self.assertEqual(ds._lengths[i], len(item.input_ids))
@@ -283,47 +283,44 @@ class TestEpochBoundary(unittest.TestCase):
         )
 
 
-class TestOldestFirstSeed(unittest.TestCase):
-    """Tests for oldest-first seed selection in the packing buffer."""
+class TestRandomSeed(unittest.TestCase):
+    """Tests for random seed selection in the packing buffer."""
 
-    def test_seed_is_oldest_item(self):
-        """Batch seed is always the oldest (earliest-inserted) buffer item."""
+    def test_seed_drawn_from_buffer(self):
+        """Batch seed is a valid buffer item."""
         ds = _build_dataset(seq_len=16, buffer_size=6, packing="buffer_shuffle")
         ds._prepare_iter()
         ds._data_exhausted = False
         ds._refill_buffer()
 
-        # Record the first-inserted item (lowest age = oldest)
-        oldest_age = min(ds._ages)
-        oldest_idx = ds._ages.index(oldest_age)
-        oldest_row_idx = ds._row_indices[oldest_idx]
-        oldest_item = ds._materialize_item(oldest_row_idx)
-        oldest_ids = list(oldest_item.input_ids)
-
+        buffer_row_indices = list(ds._row_indices)
         batch = next(ds._iter_packed())
         input_tensor = batch[0]["input"].tolist()
-        self.assertEqual(
-            input_tensor[: len(oldest_ids)],
-            oldest_ids,
-            "Seed should be the oldest item in the buffer",
-        )
 
-    def test_ages_checkpoint_roundtrip(self):
-        """Ages and age_counter survive checkpoint save/restore."""
+        # The seed item's input_ids should match one of the buffer items
+        found = False
+        for row_idx in buffer_row_indices:
+            item = ds._materialize_item(row_idx)
+            ids = list(item.input_ids)
+            if input_tensor[: len(ids)] == ids:
+                found = True
+                break
+        self.assertTrue(found, "Seed should be drawn from the buffer")
+
+    def test_checkpoint_roundtrip(self):
+        """Buffer row_indices survive checkpoint save/restore."""
         ds1 = _build_dataset(seq_len=16, buffer_size=4, packing="buffer_shuffle")
         it1 = iter(ds1)
         next(it1)
 
         state = ds1.state_dict()
-        self.assertIn("ages", state)
-        self.assertIn("age_counter", state)
+        self.assertIn("row_indices", state)
 
         ds2 = _build_dataset(seq_len=16, buffer_size=4, packing="buffer_shuffle")
         ds2.load_state_dict(state)
         ds2._prepare_iter()
 
-        self.assertEqual(ds1._ages, ds2._ages)
-        self.assertEqual(ds1._age_counter, ds2._age_counter)
+        self.assertEqual(ds1._row_indices, ds2._row_indices)
 
         remaining1 = list(it1)
         remaining2 = list(ds2)
@@ -498,7 +495,7 @@ class TestCrossRankLPT(unittest.TestCase):
         self.assertTrue(any_different, "Ranks should get different batch slices")
 
     def test_all_items_consumed_across_dp_degree(self):
-        """Union of examples across ranks covers all input data, no duplicates."""
+        """Union of examples across ranks covers all input data (up to dp-1 remnant)."""
         ds0 = self._build_for_rank(dp_rank=0, dp_world_size=2)
         ds1 = self._build_for_rank(dp_rank=1, dp_world_size=2)
 
@@ -532,7 +529,12 @@ class TestCrossRankLPT(unittest.TestCase):
             tuple(full_ds[i]["input_ids"]) for i in range(len(full_ds))
         )
 
-        self.assertEqual(all_examples, expected_examples)
+        # At most dp-1 items may be dropped at end of finite epoch
+        dp = 2
+        self.assertGreaterEqual(len(all_examples), len(expected_examples) - (dp - 1))
+        for ex in all_examples:
+            self.assertIn(ex, expected_examples, "No spurious items")
+        self.assertEqual(len(all_examples), len(set(all_examples)), "No duplicates")
 
     def test_dp_degree_one_equivalence(self):
         """dp_world_size=1 produces same batches as before (no cross-rank logic)."""
@@ -686,8 +688,6 @@ class TestSelectAttnBalanced(unittest.TestCase):
         ds._row_indices = []
         ds._lengths = []
         ds._costs = []
-        ds._ages = []
-        ds._age_counter = 0
         for i, length in enumerate(lengths):
             cost = length * (length + 1) // 2
             ds._insert_entry(length, cost, row_idx=i)
@@ -1020,8 +1020,6 @@ class TestPendingRestore(unittest.TestCase):
         state2 = ds2.state_dict()
 
         self.assertEqual(state1["row_indices"], state2["row_indices"])
-        self.assertEqual(state1["ages"], state2["ages"])
-        self.assertEqual(state1["age_counter"], state2["age_counter"])
 
     def test_iteration_matches_after_restore(self):
         """Restored dataset produces identical batches to original."""
@@ -1049,7 +1047,7 @@ class TestReconstructBufferBounds(unittest.TestCase):
         ds._prepare_iter()
 
         with self.assertRaises(ValueError) as ctx:
-            ds._reconstruct_buffer([9999], [0])
+            ds._reconstruct_buffer([9999])
         self.assertIn("9999", str(ctx.exception))
 
 

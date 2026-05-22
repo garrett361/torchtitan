@@ -246,12 +246,12 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         self._row_indices: list[int] = []
         self._lengths: list[int] = []
         self._costs: list[int] = []
-        self._ages: list[int] = []
-        self._age_counter: int = 0
         self._batch_rng = np.random.default_rng(42)
         self._pending_restore: tuple | None = None
 
         self._data_exhausted: bool = False
+        self._expose_all_costs: bool = False
+        self._last_all_batch_costs: list[int] = []
 
     # --- Abstract primitives (subclass contract) ---
 
@@ -304,14 +304,11 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         self._row_indices.insert(idx, row_idx)
         self._lengths.insert(idx, length)
         self._costs.insert(idx, cost)
-        self._ages.insert(idx, self._age_counter)
-        self._age_counter += 1
 
     def _remove_at(self, idx: int) -> None:
         del self._row_indices[idx]
         del self._lengths[idx]
         del self._costs[idx]
-        del self._ages[idx]
 
     def _log_first_sample(self, input_ids: list[int], label_ids: list[int]) -> None:
         """Log the first sample with trained tokens highlighted."""
@@ -366,10 +363,9 @@ class PreTokenizedDataset(IterableDataset, Stateful):
             self._data = self._original_data
         self._sample_idx = min(self._sample_idx, len(self._data))
         if self._pending_restore is not None:
-            row_indices, ages, age_counter = self._pending_restore
+            row_indices = self._pending_restore
             self._pending_restore = None
-            self._age_counter = age_counter
-            self._reconstruct_buffer(row_indices, ages)
+            self._reconstruct_buffer(row_indices)
 
     def _advance_epoch(self) -> None:
         self._sample_idx = 0
@@ -438,14 +434,15 @@ class PreTokenizedDataset(IterableDataset, Stateful):
                 if len(self._row_indices) < dp:
                     break
 
-            # Seed: dp oldest buffer entries by age
-            oldest_indices = sorted(
-                range(len(self._ages)), key=self._ages.__getitem__
-            )[:dp]
-            seed_lengths = [self._lengths[i] for i in oldest_indices]
-            seed_costs = [self._costs[i] for i in oldest_indices]
-            seed_row_indices = [self._row_indices[i] for i in oldest_indices]
-            for i in sorted(oldest_indices, reverse=True):
+            # Seed: dp random buffer entries
+            seed_indices = sorted(
+                self._batch_rng.choice(len(self._row_indices), size=dp, replace=False),
+                reverse=True,
+            )
+            seed_lengths = [self._lengths[i] for i in seed_indices]
+            seed_costs = [self._costs[i] for i in seed_indices]
+            seed_row_indices = [self._row_indices[i] for i in seed_indices]
+            for i in seed_indices:
                 self._remove_at(i)
 
             my_batch = self._new_batch()
@@ -465,6 +462,8 @@ class PreTokenizedDataset(IterableDataset, Stateful):
                 self._fill_default(my_batch, batch_remaining, batch_cost, dp)
 
             my_batch["attn_cost"] = batch_cost[self._dp_rank]
+            if self._expose_all_costs:
+                self._last_all_batch_costs = list(batch_cost)
             yield self._pad_and_flush(my_batch)
 
     def _fill_default(
@@ -575,14 +574,9 @@ class PreTokenizedDataset(IterableDataset, Stateful):
             "batch_rng_state": self._batch_rng.bit_generator.state,
         }
         if self._pending_restore is not None:
-            row_indices, ages, age_counter = self._pending_restore
-            d["row_indices"] = list(row_indices)
-            d["ages"] = list(ages)
-            d["age_counter"] = age_counter
+            d["row_indices"] = list(self._pending_restore)
         elif self._row_indices:
             d["row_indices"] = list(self._row_indices)
-            d["ages"] = list(self._ages)
-            d["age_counter"] = self._age_counter
         return d
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
@@ -592,13 +586,9 @@ class PreTokenizedDataset(IterableDataset, Stateful):
             self._batch_rng = np.random.default_rng()
             self._batch_rng.bit_generator.state = state_dict["batch_rng_state"]
         if "row_indices" in state_dict:
-            self._pending_restore = (
-                state_dict["row_indices"],
-                state_dict["ages"],
-                state_dict["age_counter"],
-            )
+            self._pending_restore = state_dict["row_indices"]
 
-    def _reconstruct_buffer(self, row_indices: list[int], ages: list[int]) -> None:
+    def _reconstruct_buffer(self, row_indices: list[int]) -> None:
         """Re-read metadata from Arrow to rebuild buffer state."""
         data_len = len(self._data)
         for row_idx in row_indices:
@@ -620,16 +610,12 @@ class PreTokenizedDataset(IterableDataset, Stateful):
             col = table_slice.column(col_name).combine_chunks()
             list_arrays[col_name] = (col.offsets.to_numpy(), col.values.to_numpy())
 
-        for i, (row_idx, age) in enumerate(zip(row_indices, ages)):
+        for i, row_idx in enumerate(row_indices):
             result = self._cost_from_metadata(scalars, list_arrays, i)
             if result is None:
                 continue
             length, cost = result
-            idx = bisect.bisect_right(self._lengths, length)
-            self._row_indices.insert(idx, row_idx)
-            self._lengths.insert(idx, length)
-            self._costs.insert(idx, cost)
-            self._ages.insert(idx, age)
+            self._insert_entry(length, cost, row_idx)
 
 
 # ---------------------------------------------------------------------------
