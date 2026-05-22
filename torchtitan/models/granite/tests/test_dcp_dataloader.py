@@ -22,13 +22,15 @@ from torchtitan.models.granite.pretokenized_dataset import GranitePreTokenizedDa
 
 _EOS_ID = 2003
 
+# 20 examples with varied lengths (3-8 tokens each) so that packing produces
+# distinct batches at different positions, preventing epoch-wrap coincidences.
 _EXAMPLES = [
-    ([1, 2, 3, _EOS_ID], [IGNORE_INDEX, 2, 3, _EOS_ID]),
-    ([4, 5, 6, _EOS_ID], [IGNORE_INDEX, 5, 6, _EOS_ID]),
-    ([7, 8, 9, _EOS_ID], [IGNORE_INDEX, 8, 9, _EOS_ID]),
-    ([10, 11, 12, _EOS_ID], [IGNORE_INDEX, 11, 12, _EOS_ID]),
-    ([13, 14, 15, _EOS_ID], [IGNORE_INDEX, 14, 15, _EOS_ID]),
-    ([16, 17, 18, _EOS_ID], [IGNORE_INDEX, 17, 18, _EOS_ID]),
+    ([i * 100 + j for j in range(length)] + [_EOS_ID],
+     [IGNORE_INDEX] * length + [_EOS_ID])
+    for i, length in enumerate([
+        3, 5, 4, 7, 3, 6, 4, 5, 8, 3,
+        6, 4, 7, 5, 3, 8, 4, 6, 5, 7,
+    ])
 ]
 
 
@@ -72,7 +74,7 @@ def _build_loader(
     *,
     dp_rank: int = 0,
     dp_world_size: int = 1,
-    seq_len: int = 16,
+    seq_len: int = 32,
     batch_size: int = 1,
     snapshot_every_n_steps: int = 4,
     **config_kwargs,
@@ -101,6 +103,20 @@ def _dcp_load(loader, ckpt_dir: str):
     dcp.load({"dataloader": loader}, checkpoint_id=ckpt_dir, no_dist=True)
 
 
+def _assert_batches_equal(test_case, expected, actual_iter, *, context: str):
+    """Assert that actual_iter produces batches matching expected."""
+    for i, (exp_inp, exp_lbl) in enumerate(expected):
+        inp, lbl = next(actual_iter)
+        test_case.assertTrue(
+            inp["input"].equal(exp_inp["input"]),
+            f"Batch {i} input mismatch ({context})",
+        )
+        test_case.assertTrue(
+            lbl.equal(exp_lbl),
+            f"Batch {i} labels mismatch ({context})",
+        )
+
+
 class TestDCPRoundTrip(unittest.TestCase):
     """Full DCP filesystem round-trip for GranitePreTokenizedDataLoader."""
 
@@ -122,21 +138,36 @@ class TestDCPRoundTrip(unittest.TestCase):
         ckpt_dir = str(self._tmp / "ckpt_resume")
         _dcp_save(dl, ckpt_dir)
 
-        expected = [next(it) for _ in range(3)]
+        expected = [next(it) for _ in range(5)]
 
         dl2 = _build_loader(self._manifest)
         _dcp_load(dl2, ckpt_dir)
-        it2 = iter(dl2)
 
-        for i, (exp_inp, exp_lbl) in enumerate(expected):
-            inp, lbl = next(it2)
-            self.assertTrue(
-                inp["input"].equal(exp_inp["input"]),
-                f"Batch {i} input mismatch after DCP resume",
-            )
-            self.assertTrue(
-                lbl.equal(exp_lbl), f"Batch {i} labels mismatch after DCP resume"
-            )
+        _assert_batches_equal(self, expected, iter(dl2), context="DCP resume")
+
+    def test_resumed_differs_from_fresh(self):
+        """A resumed loader produces different batches than a fresh one."""
+        dl = _build_loader(self._manifest)
+        it = iter(dl)
+        for _ in range(8):
+            next(it)
+
+        ckpt_dir = str(self._tmp / "ckpt_neg")
+        _dcp_save(dl, ckpt_dir)
+
+        dl_resumed = _build_loader(self._manifest)
+        _dcp_load(dl_resumed, ckpt_dir)
+        it_resumed = iter(dl_resumed)
+        resumed_batch, _ = next(it_resumed)
+
+        dl_fresh = _build_loader(self._manifest)
+        it_fresh = iter(dl_fresh)
+        fresh_batch, _ = next(it_fresh)
+
+        self.assertFalse(
+            resumed_batch["input"].equal(fresh_batch["input"]),
+            "Resumed loader must differ from fresh (DCP state must take effect)",
+        )
 
     def test_consumed_stats_survive(self):
         """get_data_stats() matches after DCP round-trip."""
@@ -165,53 +196,37 @@ class TestDCPRoundTrip(unittest.TestCase):
 
     def test_buffer_packing_longest(self):
         """DCP round-trip with packing='longest' preserves row_indices."""
-        dl = _build_loader(self._manifest, packing="longest", buffer_size=6)
+        dl = _build_loader(self._manifest, packing="longest", buffer_size=10)
         it = iter(dl)
-        for _ in range(4):
+        for _ in range(6):
             next(it)
 
         ckpt_dir = str(self._tmp / "ckpt_longest")
         _dcp_save(dl, ckpt_dir)
 
-        expected = [next(it) for _ in range(3)]
+        expected = [next(it) for _ in range(5)]
 
-        dl2 = _build_loader(self._manifest, packing="longest", buffer_size=6)
+        dl2 = _build_loader(self._manifest, packing="longest", buffer_size=10)
         _dcp_load(dl2, ckpt_dir)
-        it2 = iter(dl2)
 
-        for i, (exp_inp, exp_lbl) in enumerate(expected):
-            inp, lbl = next(it2)
-            self.assertTrue(
-                inp["input"].equal(exp_inp["input"]),
-                f"Batch {i} input mismatch (longest packing)",
-            )
-            self.assertTrue(lbl.equal(exp_lbl), f"Batch {i} labels mismatch (longest)")
+        _assert_batches_equal(self, expected, iter(dl2), context="longest packing")
 
     def test_buffer_shuffle_rng(self):
         """DCP round-trip with packing='buffer_shuffle' preserves RNG state."""
-        dl = _build_loader(self._manifest, packing="buffer_shuffle", buffer_size=6)
+        dl = _build_loader(self._manifest, packing="buffer_shuffle", buffer_size=10)
         it = iter(dl)
-        for _ in range(4):
+        for _ in range(6):
             next(it)
 
         ckpt_dir = str(self._tmp / "ckpt_shuffle")
         _dcp_save(dl, ckpt_dir)
 
-        expected = [next(it) for _ in range(3)]
+        expected = [next(it) for _ in range(5)]
 
-        dl2 = _build_loader(self._manifest, packing="buffer_shuffle", buffer_size=6)
+        dl2 = _build_loader(self._manifest, packing="buffer_shuffle", buffer_size=10)
         _dcp_load(dl2, ckpt_dir)
-        it2 = iter(dl2)
 
-        for i, (exp_inp, exp_lbl) in enumerate(expected):
-            inp, lbl = next(it2)
-            self.assertTrue(
-                inp["input"].equal(exp_inp["input"]),
-                f"Batch {i} input mismatch (buffer_shuffle)",
-            )
-            self.assertTrue(
-                lbl.equal(exp_lbl), f"Batch {i} labels mismatch (buffer_shuffle)"
-            )
+        _assert_batches_equal(self, expected, iter(dl2), context="buffer_shuffle")
 
     def test_with_num_workers(self):
         """DCP round-trip with num_workers=2 preserves per-worker state."""
@@ -222,14 +237,15 @@ class TestDCPRoundTrip(unittest.TestCase):
             prefetch_factor=2,
         )
         it = iter(dl)
-        for _ in range(5):
+        for _ in range(8):
             next(it)
 
         ckpt_dir = str(self._tmp / "ckpt_workers")
         _dcp_save(dl, ckpt_dir)
 
-        expected = [next(it) for _ in range(3)]
+        expected = [next(it) for _ in range(5)]
 
+        # Resumed loader
         dl2 = _build_loader(
             self._manifest,
             num_workers=2,
@@ -239,19 +255,24 @@ class TestDCPRoundTrip(unittest.TestCase):
         _dcp_load(dl2, ckpt_dir)
         it2 = iter(dl2)
 
-        for i, (exp_inp, exp_lbl) in enumerate(expected):
-            inp, lbl = next(it2)
-            self.assertTrue(
-                inp["input"].equal(exp_inp["input"]),
-                f"Batch {i} input mismatch (num_workers=2)",
-            )
-            self.assertTrue(
-                lbl.equal(exp_lbl), f"Batch {i} labels mismatch (num_workers=2)"
-            )
+        _assert_batches_equal(self, expected, it2, context="num_workers=2")
+
+        # Fresh loader must produce different first batch (state matters)
+        dl_fresh = _build_loader(
+            self._manifest,
+            num_workers=2,
+            persistent_workers=False,
+            prefetch_factor=2,
+        )
+        fresh_batch, _ = next(iter(dl_fresh))
+        self.assertFalse(
+            expected[0][0]["input"].equal(fresh_batch["input"]),
+            "num_workers=2: resumed batch must differ from fresh start",
+        )
 
 
 class TestDCPMultiRank(unittest.TestCase):
-    """Rank isolation and error handling through DCP."""
+    """Rank isolation through DCP."""
 
     def setUp(self):
         self._tmpdir = tempfile.mkdtemp()
@@ -267,9 +288,9 @@ class TestDCPMultiRank(unittest.TestCase):
         dl1 = _build_loader(self._manifest, dp_rank=1, dp_world_size=2)
 
         it0, it1 = iter(dl0), iter(dl1)
-        for _ in range(3):
+        for _ in range(4):
             next(it0)
-        for _ in range(6):
+        for _ in range(8):
             next(it1)
 
         ckpt0 = str(self._tmp / "ckpt_rank0")
@@ -277,32 +298,26 @@ class TestDCPMultiRank(unittest.TestCase):
         _dcp_save(dl0, ckpt0)
         _dcp_save(dl1, ckpt1)
 
-        expected0 = [next(it0) for _ in range(3)]
-        expected1 = [next(it1) for _ in range(3)]
+        expected0 = [next(it0) for _ in range(5)]
+        expected1 = [next(it1) for _ in range(5)]
+
+        # Ranks produce different data (precondition for meaningful isolation test)
+        self.assertFalse(
+            all(
+                e0[0]["input"].equal(e1[0]["input"])
+                for e0, e1 in zip(expected0, expected1)
+            ),
+            "Ranks must produce different data for isolation test to be meaningful",
+        )
 
         dl0_resumed = _build_loader(self._manifest, dp_rank=0, dp_world_size=2)
         _dcp_load(dl0_resumed, ckpt0)
-        it0r = iter(dl0_resumed)
 
         dl1_resumed = _build_loader(self._manifest, dp_rank=1, dp_world_size=2)
         _dcp_load(dl1_resumed, ckpt1)
-        it1r = iter(dl1_resumed)
 
-        for i, (exp_inp, exp_lbl) in enumerate(expected0):
-            inp, lbl = next(it0r)
-            self.assertTrue(
-                inp["input"].equal(exp_inp["input"]),
-                f"Rank 0 batch {i} input mismatch",
-            )
-            self.assertTrue(lbl.equal(exp_lbl), f"Rank 0 batch {i} labels mismatch")
-
-        for i, (exp_inp, exp_lbl) in enumerate(expected1):
-            inp, lbl = next(it1r)
-            self.assertTrue(
-                inp["input"].equal(exp_inp["input"]),
-                f"Rank 1 batch {i} input mismatch",
-            )
-            self.assertTrue(lbl.equal(exp_lbl), f"Rank 1 batch {i} labels mismatch")
+        _assert_batches_equal(self, expected0, iter(dl0_resumed), context="rank 0")
+        _assert_batches_equal(self, expected1, iter(dl1_resumed), context="rank 1")
 
 
 class TestSnapshotDCPInteraction(unittest.TestCase):
@@ -326,22 +341,12 @@ class TestSnapshotDCPInteraction(unittest.TestCase):
         ckpt_dir = str(self._tmp / "ckpt_misaligned")
         _dcp_save(dl, ckpt_dir)
 
-        expected = [next(it) for _ in range(3)]
+        expected = [next(it) for _ in range(5)]
 
         dl2 = _build_loader(self._manifest, snapshot_every_n_steps=4)
         _dcp_load(dl2, ckpt_dir)
-        it2 = iter(dl2)
 
-        for i, (exp_inp, exp_lbl) in enumerate(expected):
-            inp, lbl = next(it2)
-            self.assertTrue(
-                inp["input"].equal(exp_inp["input"]),
-                f"Batch {i} mismatch (misaligned snapshot)",
-            )
-            self.assertTrue(
-                lbl.equal(exp_lbl),
-                f"Batch {i} labels mismatch (misaligned snapshot)",
-            )
+        _assert_batches_equal(self, expected, iter(dl2), context="misaligned snapshot")
 
     def test_aligned_step(self):
         """DCP save at step 8 (on snapshot boundary) resumes without replay."""
@@ -353,22 +358,12 @@ class TestSnapshotDCPInteraction(unittest.TestCase):
         ckpt_dir = str(self._tmp / "ckpt_aligned")
         _dcp_save(dl, ckpt_dir)
 
-        expected = [next(it) for _ in range(3)]
+        expected = [next(it) for _ in range(5)]
 
         dl2 = _build_loader(self._manifest, snapshot_every_n_steps=4)
         _dcp_load(dl2, ckpt_dir)
-        it2 = iter(dl2)
 
-        for i, (exp_inp, exp_lbl) in enumerate(expected):
-            inp, lbl = next(it2)
-            self.assertTrue(
-                inp["input"].equal(exp_inp["input"]),
-                f"Batch {i} mismatch (aligned snapshot)",
-            )
-            self.assertTrue(
-                lbl.equal(exp_lbl),
-                f"Batch {i} labels mismatch (aligned snapshot)",
-            )
+        _assert_batches_equal(self, expected, iter(dl2), context="aligned snapshot")
 
 
 if __name__ == "__main__":
