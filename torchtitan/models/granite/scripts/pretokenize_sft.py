@@ -297,14 +297,15 @@ def _write_manifest(
     tokenizer = HuggingFaceTokenizer(tokenizer_path=tokenizer_path)
     shards_dir = output_dir / "shards"
     all_stats: list[dict[str, Any]] = []
-    skipped_files: list[str] = []
+    skipped_stats: list[dict[str, Any]] = []
     for p in sorted(shards_dir.glob("*_stats.json")):
         with open(p) as f:
             s = json.load(f)
         if s.get("skipped", False):
-            skipped_files.append(s["input_file"])
+            skipped_stats.append(s)
             continue
         all_stats.append(s)
+    skipped_files = [s["input_file"] for s in skipped_stats]
 
     total_input_conversations = sum(s["n_input_conversations"] for s in all_stats)
     total_examples = sum(s["n_examples"] for s in all_stats)
@@ -391,7 +392,9 @@ def _write_manifest(
         if manifest_path.exists():
             logger.info("Manifest already written by another rank, skipping")
             return False
+        _write_json_atomic(output_dir / "per_file_stats.json", all_stats + skipped_stats)
         # Atomic: other ranks poll manifest_path.exists() and must not see partial content.
+        # Written last — its presence is the completion signal.
         tmp_manifest = manifest_path.with_suffix(".tmp")
         with open(tmp_manifest, "w") as f:
             json.dump(manifest, f, indent=2)

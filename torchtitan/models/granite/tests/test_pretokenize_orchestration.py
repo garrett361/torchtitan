@@ -15,6 +15,7 @@ from torchtitan.models.granite.scripts.pretokenize_sft import (
     _process_file,
     _shard_stem,
     _write_json_atomic,
+    _write_manifest,
 )
 from torchtitan.models.granite.tokenization_strategies import (
     BackboneSuffixStrategy,
@@ -660,6 +661,121 @@ class TestBackboneSuffixMixedBatchSchema(unittest.TestCase):
                 1 for row in ds if len(row["suffix_starts"]) > 0
             )
             self.assertGreater(n_with_suffix, 0)
+
+
+@unittest.skipUnless(_HF_ASSETS_PATH, "HF_ASSETS_PATH not set")
+class TestWriteManifestPerFileStats(unittest.TestCase):
+    """Verify _write_manifest writes per_file_stats.json alongside the manifest."""
+
+    def _setup_shards(self, tmp_path: Path):
+        """Process a mix of valid and invalid files, returning (output_dir, input_files)."""
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+
+        # Valid file
+        _write_jsonl(input_dir / "good.jsonl", [_valid_sample()] * 3)
+        # All-invalid file (will be skipped)
+        _write_jsonl(input_dir / "bad.jsonl", [_invalid_sample_no_assistant()] * 2)
+
+        input_files = sorted(input_dir.glob("*.jsonl"))
+        for f in input_files:
+            _process_file(
+                f,
+                output_dir,
+                TruncateLastStrategy,
+                _HF_ASSETS_PATH,
+                shard_stem=_shard_stem(f, input_dir),
+                input_dir=input_dir,
+                num_cpus=1,
+                batch_size=10,
+                rank=0,
+            )
+        return input_dir, output_dir, input_files
+
+    def test_per_file_stats_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_dir, output_dir, input_files = self._setup_shards(Path(tmp))
+
+            result = _write_manifest(
+                output_dir, input_dir, input_files,
+                "truncate_last", _HF_ASSETS_PATH,
+                {"truncate_history_thinking": True},
+            )
+            self.assertTrue(result)
+
+            per_file_path = output_dir / "per_file_stats.json"
+            self.assertTrue(per_file_path.exists())
+
+            with open(per_file_path) as f:
+                per_file = json.load(f)
+            self.assertIsInstance(per_file, list)
+            self.assertEqual(len(per_file), 2)
+
+    def test_per_file_stats_includes_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_dir, output_dir, input_files = self._setup_shards(Path(tmp))
+
+            _write_manifest(
+                output_dir, input_dir, input_files,
+                "truncate_last", _HF_ASSETS_PATH,
+                {"truncate_history_thinking": True},
+            )
+
+            with open(output_dir / "per_file_stats.json") as f:
+                per_file = json.load(f)
+
+            skipped = [s for s in per_file if s.get("skipped")]
+            non_skipped = [s for s in per_file if not s.get("skipped")]
+            self.assertEqual(len(skipped), 1)
+            self.assertEqual(len(non_skipped), 1)
+            self.assertIn("bad.jsonl", skipped[0]["input_file"])
+
+    def test_per_file_stats_sums_match_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_dir, output_dir, input_files = self._setup_shards(Path(tmp))
+
+            _write_manifest(
+                output_dir, input_dir, input_files,
+                "truncate_last", _HF_ASSETS_PATH,
+                {"truncate_history_thinking": True},
+            )
+
+            with open(output_dir / "manifest.json") as f:
+                manifest = json.load(f)
+            with open(output_dir / "per_file_stats.json") as f:
+                per_file = json.load(f)
+
+            non_skipped = [s for s in per_file if not s.get("skipped")]
+            self.assertEqual(
+                sum(s["total_trained_tokens"] for s in non_skipped),
+                manifest["stats"]["total_trained_tokens"],
+            )
+            self.assertEqual(
+                sum(s["total_tokens"] for s in non_skipped),
+                manifest["stats"]["total_tokens"],
+            )
+
+    def test_per_file_stats_not_rewritten_on_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_dir, output_dir, input_files = self._setup_shards(Path(tmp))
+
+            _write_manifest(
+                output_dir, input_dir, input_files,
+                "truncate_last", _HF_ASSETS_PATH,
+                {"truncate_history_thinking": True},
+            )
+
+            # Second call should not rewrite (manifest already exists)
+            result = _write_manifest(
+                output_dir, input_dir, input_files,
+                "truncate_last", _HF_ASSETS_PATH,
+                {"truncate_history_thinking": True},
+            )
+            self.assertFalse(result)
+            # per_file_stats.json still present from first write
+            self.assertTrue((output_dir / "per_file_stats.json").exists())
 
 
 if __name__ == "__main__":
