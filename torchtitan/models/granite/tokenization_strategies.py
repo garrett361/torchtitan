@@ -14,6 +14,12 @@ logger = logging.getLogger(__name__)
 
 _VALID_MESSAGE_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
+# Think tags in content indicate data cleaning failures; start_end are rarer and typically from code snippets.
+REJECT_TOKEN_GROUPS: dict[str, tuple[str, ...]] = {
+    "think": ("<think>", "</think>"),
+    "start_end": ("<|im_start|>", "<|im_end|>"),
+}
+
 
 def _validate_messages(messages: list[dict]) -> None:
     """Validate message list structure."""
@@ -31,6 +37,16 @@ def _validate_messages(messages: list[dict]) -> None:
     system_positions = [i for i, m in enumerate(messages) if m["role"] == "system"]
     if len(system_positions) > 1 or (system_positions and system_positions[0] != 0):
         raise ValueError("system message must be the first message if present")
+    for i, msg in enumerate(messages):
+        for field in ("content", "reasoning_content"):
+            text = msg.get(field)
+            if text is None:
+                continue
+            if not isinstance(text, str):
+                raise ValueError(
+                    f"Non-string {field} in {msg['role']} message at index {i} "
+                    f"(type {type(text).__name__})"
+                )
 
 
 def _fix_empty_thinking(text: str) -> str:
@@ -254,10 +270,17 @@ def _append_failures(path: str, failures: list[dict]) -> None:
 
 
 class TokenizationStrategy(ABC):
-    def __init__(self, tokenizer_path: str, *, failures_path: str | None = None) -> None:
+    def __init__(
+        self,
+        tokenizer_path: str,
+        *,
+        failures_path: str | None = None,
+        forbidden_content_tokens: tuple[str, ...] = (),
+    ) -> None:
         self._tokenizer_path = tokenizer_path
         self._tokenizer: HuggingFaceTokenizer | None = None
         self.failures_path = failures_path
+        self.forbidden_content_tokens = forbidden_content_tokens
 
     _REQUIRED_SPECIAL_TOKENS = ("<think>", "</think>", "<|im_start|>", "<|im_end|>")
 
@@ -281,12 +304,29 @@ class TokenizationStrategy(ABC):
         """Tokenize one sample. Raises on malformed input or tokenization error."""
         ...
 
+    def _check_forbidden_content(self, messages: list[dict]) -> None:
+        """Raise ValueError if any message contains forbidden tokens in content."""
+        if not self.forbidden_content_tokens:
+            return
+        for i, msg in enumerate(messages):
+            for field in ("content", "reasoning_content"):
+                text = msg.get(field)
+                if not isinstance(text, str):
+                    continue
+                for tok in self.forbidden_content_tokens:
+                    if tok in text:
+                        raise ValueError(
+                            f"Forbidden token {tok!r} in {field} of {msg['role']} "
+                            f"message at index {i}"
+                        )
+
     def __call__(self, batch: dict[str, list]) -> dict[str, list]:
         """Tokenize a batch of samples. Malformed samples are dropped and logged."""
         results: dict[str, list] = {k: [] for k in self.column_schema}
         failures: list[dict] = []
         for messages in batch["messages"]:
             try:
+                self._check_forbidden_content(messages)
                 result = self._tokenize_one(messages)
                 for key in results:
                     results[key].append(result[key])
@@ -795,6 +835,7 @@ class TruncateEveryTurnStrategy(TokenizationStrategy):
         failures: list[dict] = []
         for messages in batch["messages"]:
             try:
+                self._check_forbidden_content(messages)
                 last_asst_idx = max(
                     i for i, m in enumerate(messages) if m["role"] == "assistant"
                 )

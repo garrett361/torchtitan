@@ -46,6 +46,7 @@ from filelock import FileLock
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.models.granite.tokenization_strategies import (
+    REJECT_TOKEN_GROUPS,
     BackboneSuffixStrategy,
     FullThinkingStrategy,
     TokenizationStrategy,
@@ -146,6 +147,7 @@ def _process_file(
     num_cpus: int,
     batch_size: int,
     rank: int,
+    forbidden_content_tokens: tuple[str, ...] = (),
 ) -> None:
     """Tokenize one JSONL file and write its shard."""
     shards_dir = output_dir / "shards"
@@ -154,7 +156,11 @@ def _process_file(
     final_path = shards_dir / shard_stem
     stats_path = shards_dir / f"{shard_stem}_stats.json"
     failures_path = shards_dir / f"{shard_stem}_failures.jsonl"
-    strategy = strategy_cls(tokenizer_path, failures_path=str(failures_path))
+    strategy = strategy_cls(
+        tokenizer_path,
+        failures_path=str(failures_path),
+        forbidden_content_tokens=forbidden_content_tokens,
+    )
 
     try:
         _tokenize_file(
@@ -671,6 +677,13 @@ def main() -> None:
         default=42,
         help="Seed for global cross-shard shuffle (Phase 2)",
     )
+    parser.add_argument(
+        "--reject-tokens",
+        nargs="*",
+        choices=list(REJECT_TOKEN_GROUPS),
+        default=["think"],
+        help="Token groups to reject from message content (default: think)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -719,6 +732,9 @@ def main() -> None:
         seen_stems[stem] = f
 
     strategy_cls = _STRATEGIES[args.strategy]
+    forbidden_content_tokens: tuple[str, ...] = ()
+    for group in args.reject_tokens or []:
+        forbidden_content_tokens += REJECT_TOKEN_GROUPS[group]
     strategy_for_config = strategy_cls(args.tokenizer_path)
 
     run_config_path = output_dir / _RUN_CONFIG_FILENAME
@@ -780,6 +796,7 @@ def main() -> None:
             num_cpus=num_cpus,
             batch_size=args.batch_size,
             rank=args.rank,
+            forbidden_content_tokens=forbidden_content_tokens,
         )
 
     # Barrier: wait for all tokenization to complete before entering Phase 2.
