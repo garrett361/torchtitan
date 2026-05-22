@@ -158,18 +158,9 @@ def _select_attn_balanced(
     if max_idx < 0:
         return -1, 0
 
-    best_idx = -1
-    best_cost = 0
-    best_distance = float("inf")
-    for i in range(max_idx + 1):
-        cost = dataset._costs[i]
-        distance = abs(cost - deficit)
-        if distance < best_distance:
-            best_distance = distance
-            best_idx = i
-            best_cost = cost
-
-    return best_idx, best_cost
+    costs_arr = np.asarray(dataset._costs[: max_idx + 1], dtype=np.int64)
+    best_idx = int(np.abs(costs_arr - deficit).argmin())
+    return best_idx, int(costs_arr[best_idx])
 
 
 # ---------------------------------------------------------------------------
