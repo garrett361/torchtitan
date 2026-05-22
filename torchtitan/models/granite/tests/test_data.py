@@ -314,6 +314,57 @@ class TestChatTemplate(unittest.TestCase):
         self.assertEqual(prefix_tokens[-1], newline_id)
         self.assertEqual(backbone_tokens[len(prefix_tokens) - 1], end_think_id)
 
+    def test_think_in_content_skips_structural_prefix(self):
+        """Template skips <think></think> prefix when content contains '<think>'."""
+        msgs = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "The <think> token is special."},
+        ]
+        rendered = self._tokenizer.apply_chat_template(
+            msgs, truncate_history_thinking=False
+        )
+        self.assertIn(
+            "<|im_start|>assistant\nThe <think> token is special.<|im_end|>",
+            rendered,
+        )
+        self.assertNotIn("<think></think>", rendered)
+
+    def test_think_in_content_truncation_corrupts(self):
+        """Truncation path drops content before the last </think>."""
+        msgs = [
+            {"role": "user", "content": "How do think tags work?"},
+            {"role": "assistant", "content": "Encodes <think> and </think> atomically."},
+            {"role": "user", "content": "Thanks"},
+            {"role": "assistant", "content": "Welcome", "reasoning_content": "Done"},
+        ]
+        rendered = self._tokenizer.apply_chat_template(
+            msgs, truncate_history_thinking=True
+        )
+        # Content before the last </think> is dropped; only " atomically." survives
+        self.assertIn("<think></think> atomically.<|im_end|>", rendered)
+        self.assertNotIn("Encodes", rendered)
+
+    def test_think_in_content_truncation_corrupts_even_with_reasoning(self):
+        """Truncation corrupts even when reasoning_content is defined.
+
+        The template merges reasoning into content as
+        '<think>\\nreasoning\\n</think>\\ncontent', then the truncation path
+        splits on '</think>' and takes the last segment — which lands on the
+        content-level </think> if one exists.
+        """
+        msgs = [
+            {"role": "user", "content": "Q0"},
+            {"role": "assistant", "content": "The <think> and </think> tokens are special.", "reasoning_content": "Explaining."},
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "Done.", "reasoning_content": "Wrapping up."},
+        ]
+        rendered = self._tokenizer.apply_chat_template(
+            msgs, truncate_history_thinking=True
+        )
+        # Content before the content-level </think> is dropped
+        self.assertIn("<think></think> tokens are special.<|im_end|>", rendered)
+        self.assertNotIn("Explaining", rendered)
+
     def test_special_tokens_are_atomic_in_offset_table(self):
         """Special tokens produce exactly one entry in the Rust encoder's offset table.
 
@@ -345,11 +396,13 @@ class TestChatTemplate(unittest.TestCase):
 
 
 class TestPrefixInvariant(unittest.TestCase):
-    """Structural guarantees relied upon by the offset-based _tokenize_one.
+    """Documents when text-space sub-renders are/aren't prefixes of the full render.
 
-    The optimized tokenizer derives label boundaries via bisect on a character offset
-    table. This requires that render(msgs[:k]).rstrip("\\n") is a character prefix of
-    the target text for the cases used by BackboneSuffixStrategy.
+    The template's truncate_history_thinking heuristic uses last_user_idx, which
+    differs between sub-render and full render. Sub-renders are reliable prefixes
+    only within a single reasoning group (no earlier reasoning turns flip state).
+    This limitation is why per-turn token-space encoding replaced the offset-based
+    approach.
 
     Requires HF_ASSETS_PATH. Skips if absent.
     """

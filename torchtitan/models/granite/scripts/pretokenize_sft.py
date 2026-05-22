@@ -705,8 +705,11 @@ def main() -> None:
         "--reject-tokens",
         nargs="*",
         choices=list(REJECT_TOKEN_GROUPS),
-        default=["think"],
-        help="Token groups to reject from message content (default: think)",
+        default=[],
+        help=(
+            "Optional token groups to reject from message content. "
+            "<think>/</think> rejection is always active (correctness invariant)."
+        ),
     )
     args = parser.parse_args()
 

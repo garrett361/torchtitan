@@ -125,11 +125,11 @@ class TestForbiddenContentTokens(unittest.TestCase):
         )
 
     def test_clean_sample_not_rejected(self):
-        strategy = self._make_strategy(REJECT_TOKEN_GROUPS["think"])
+        strategy = self._make_strategy(())
         strategy._check_forbidden_content(self._CLEAN_MESSAGES)
 
-    def test_think_in_content_rejected(self):
-        strategy = self._make_strategy(REJECT_TOKEN_GROUPS["think"])
+    def test_think_in_content_rejected_unconditionally(self):
+        strategy = self._make_strategy(())
         messages = [
             {"role": "user", "content": "please <think> about this"},
             {"role": "assistant", "content": "ok"},
@@ -137,8 +137,8 @@ class TestForbiddenContentTokens(unittest.TestCase):
         with self.assertRaises(ValueError, msg="<think>"):
             strategy._check_forbidden_content(messages)
 
-    def test_close_think_in_content_rejected(self):
-        strategy = self._make_strategy(REJECT_TOKEN_GROUPS["think"])
+    def test_close_think_in_content_rejected_unconditionally(self):
+        strategy = self._make_strategy(())
         messages = [
             {"role": "user", "content": "hello"},
             {"role": "assistant", "content": "result </think> oops"},
@@ -146,8 +146,8 @@ class TestForbiddenContentTokens(unittest.TestCase):
         with self.assertRaises(ValueError, msg="</think>"):
             strategy._check_forbidden_content(messages)
 
-    def test_think_in_reasoning_content_rejected(self):
-        strategy = self._make_strategy(REJECT_TOKEN_GROUPS["think"])
+    def test_think_in_reasoning_content_rejected_unconditionally(self):
+        strategy = self._make_strategy(())
         messages = [
             {"role": "user", "content": "hello"},
             {"role": "assistant", "content": "ok", "reasoning_content": "nested <think> bad"},
@@ -155,8 +155,8 @@ class TestForbiddenContentTokens(unittest.TestCase):
         with self.assertRaises(ValueError, msg="<think>"):
             strategy._check_forbidden_content(messages)
 
-    def test_start_end_not_rejected_when_only_think_forbidden(self):
-        strategy = self._make_strategy(REJECT_TOKEN_GROUPS["think"])
+    def test_start_end_not_rejected_without_config(self):
+        strategy = self._make_strategy(())
         messages = [
             {"role": "user", "content": "code: <|im_start|>system"},
             {"role": "assistant", "content": "noted"},
@@ -172,16 +172,25 @@ class TestForbiddenContentTokens(unittest.TestCase):
         with self.assertRaises(ValueError, msg="<|im_start|>"):
             strategy._check_forbidden_content(messages)
 
-    def test_no_forbidden_tokens_passes_everything(self):
+    def test_no_configured_forbidden_still_rejects_think(self):
         strategy = self._make_strategy(())
         messages = [
-            {"role": "user", "content": "<think> <|im_start|> all the tokens"},
-            {"role": "assistant", "content": "</think> <|im_end|>"},
+            {"role": "user", "content": "<think> in content"},
+            {"role": "assistant", "content": "ok"},
+        ]
+        with self.assertRaises(ValueError):
+            strategy._check_forbidden_content(messages)
+
+    def test_no_configured_forbidden_passes_start_end(self):
+        strategy = self._make_strategy(())
+        messages = [
+            {"role": "user", "content": "<|im_start|> <|im_end|> in content"},
+            {"role": "assistant", "content": "ok"},
         ]
         strategy._check_forbidden_content(messages)
 
     def test_call_drops_forbidden_sample(self):
-        strategy = self._make_strategy(REJECT_TOKEN_GROUPS["think"])
+        strategy = self._make_strategy(())
         batch = {"messages": [
             [
                 {"role": "user", "content": "has <think> in it"},
@@ -195,9 +204,7 @@ class TestForbiddenContentTokens(unittest.TestCase):
         _HF_ASSETS_PATH, "HF_ASSETS_PATH not set — needs tokenizer for clean sample"
     )
     def test_call_keeps_clean_sample_alongside_forbidden(self):
-        strategy = TruncateLastStrategy(
-            _HF_ASSETS_PATH, forbidden_content_tokens=REJECT_TOKEN_GROUPS["think"],
-        )
+        strategy = TruncateLastStrategy(_HF_ASSETS_PATH)
         clean = [
             {"role": "user", "content": "clean"},
             {"role": "assistant", "content": "response"},

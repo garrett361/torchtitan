@@ -1,7 +1,6 @@
 import json
 import logging
 from abc import ABC, abstractmethod
-from bisect import bisect_left
 from collections.abc import Callable
 
 from filelock import FileLock
@@ -14,11 +13,18 @@ logger = logging.getLogger(__name__)
 
 _VALID_MESSAGE_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
-# Think tags in content indicate data cleaning failures; start_end are rarer and typically from code snippets.
+# Think tags in content are a correctness invariant, not an optional filter: the chat
+# template's heuristic (`'<think>' not in content`) skips structural <think></think>
+# and the truncation path (`c.split('</think>')[-1]`) corrupts content. Per-turn encode
+# boundary detection assumes exactly one structural <think> per assistant turn.
+# Rejection is unconditional via _MANDATORY_FORBIDDEN_TOKENS below.
+#
+# start_end is an optional quality filter for data-cleaning failures (code snippets etc).
 REJECT_TOKEN_GROUPS: dict[str, tuple[str, ...]] = {
-    "think": ("<think>", "</think>"),
     "start_end": ("<|im_start|>", "<|im_end|>"),
 }
+
+_MANDATORY_FORBIDDEN_TOKENS = ("<think>", "</think>")
 
 
 def _validate_messages(messages: list[dict]) -> None:
@@ -109,15 +115,6 @@ def _expand_empty_thinking_tokens(
             expanded.append(newline_id)
 
     return expanded, pos_map
-
-
-def _char_to_token_idx(token_starts: list[int], char_pos: int) -> int:
-    """Map a character position to a token index in the BOS-prepended sequence.
-
-    The offset table from the Rust encoder excludes BOS (which the wrapper
-    prepends). So bisect gives a raw index; +1 translates to full_tokens space.
-    """
-    return bisect_left(token_starts, char_pos) + 1
 
 
 _SPECIAL_TOKEN_PATTERNS = ("<think>", "</think>", "<|im_start|>", "<|im_end|>")
@@ -212,6 +209,7 @@ def _tokenize_all_turns(
     chat_template_kwargs: dict[str, Any],
     *,
     expand_empty_thinking: bool = False,
+    fixup_fn: Callable[[str], str] | None = None,
 ) -> dict[str, list[int] | int]:
     """Tokenize a conversation labeling every assistant turn.
 
@@ -220,7 +218,7 @@ def _tokenize_all_turns(
     since predicting the next-turn header is irrelevant). For the last turn,
     <|im_end|> is the final prediction target — it's outside input_ids.
 
-    Uses a single encode + character-offset bisect for all boundary lookups.
+    Uses per-turn encode calls to find label boundaries in token space.
 
     When expand_empty_thinking=True (used with truncate_history_thinking=False),
     no-reasoning turns (<think></think>) are expanded to <think>\\n</think>\\n in
@@ -230,12 +228,9 @@ def _tokenize_all_turns(
     inserted \\n with content characters across the boundary.
     """
     effective, full_text, full_tokens, input_ids, label_ids = _prepare_full_sequence(
-        messages, tokenizer, chat_template_kwargs,
+        messages, tokenizer, chat_template_kwargs, fixup_fn=fixup_fn,
     )
     last_asst_idx = len(effective) - 1
-
-    full_encoding = tokenizer.tokenizer.encode(full_text)
-    token_starts = [o[0] for o in full_encoding.offsets]
 
     boundaries: list[tuple[int, int | None]] = []
     turn_think_positions: list[int] = []
@@ -244,23 +239,46 @@ def _tokenize_all_turns(
         if msg["role"] != "assistant":
             continue
 
-        prefix_render = tokenizer.apply_chat_template(
-            effective[:i], **chat_template_kwargs
-        ).rstrip("\n")
-        prefix_end = len(prefix_render)
+        prefix_text = tokenizer.apply_chat_template(
+            effective[:i],
+            add_generation_prompt=True,
+            **chat_template_kwargs,
+        )
+        if fixup_fn:
+            prefix_text = fixup_fn(prefix_text)
+        prefix_tokens = tokenizer.encode(prefix_text, add_bos=True, add_eos=False)
+        start = len(prefix_tokens) - 1
+        think_token_pos = start - 1
 
-        think_pos = full_text.index("<think>", prefix_end)
-        think_token_pos = _char_to_token_idx(token_starts, think_pos)
+        if full_tokens[:start] != prefix_tokens[:-1]:
+            raise ValueError(
+                f"BPE prefix mismatch at turn {i}: sub-render is not a "
+                f"token-prefix of full render (start={start}, "
+                f"len(prefix)={len(prefix_tokens)}, len(full)={len(full_tokens)})"
+            )
+
         turn_think_positions.append(think_token_pos)
 
         if i == last_asst_idx:
             boundaries.append((think_token_pos, None))
         else:
-            end_text = tokenizer.apply_chat_template(
+            up_to_text = tokenizer.apply_chat_template(
                 effective[:i + 1], **chat_template_kwargs
             ).rstrip("\n")
-            label_end = _char_to_token_idx(token_starts, len(end_text)) - 2
-            boundaries.append((think_token_pos, label_end))
+            if fixup_fn:
+                up_to_text = fixup_fn(up_to_text)
+            up_to_tokens = tokenizer.encode(
+                up_to_text, add_bos=True, add_eos=False
+            )
+            # -2: skip BOS (idx 0) and the trailing <|im_end|> (last token)
+            end = len(up_to_tokens) - 2
+            if full_tokens[: end + 1] != up_to_tokens[:-1]:
+                raise ValueError(
+                    f"BPE end-boundary mismatch at turn {i}: up_to render is not "
+                    f"a token-prefix of full render (end={end}, "
+                    f"len(up_to)={len(up_to_tokens)}, len(full)={len(full_tokens)})"
+                )
+            boundaries.append((think_token_pos, end))
 
     if expand_empty_thinking:
         full_tokens, pos_map = _expand_empty_thinking_tokens(
@@ -284,54 +302,6 @@ def _tokenize_all_turns(
             else:
                 end_idx = min(end + 1, len(input_ids))
                 label_ids[start:end_idx] = full_tokens[start + 1 : end_idx + 1]
-
-    return {"input_ids": input_ids, "labels": label_ids, "n_tokens": len(input_ids)}
-
-
-def _tokenize_all_turns_reference(
-    messages: list[dict],
-    tokenizer: HuggingFaceTokenizer,
-    chat_template_kwargs: dict[str, Any],
-    *,
-    fixup_fn: Callable[[str], str] | None = None,
-) -> dict[str, list[int] | int]:
-    """Reference implementation using per-turn encode calls.
-
-    Kept for correctness testing against the offset-based _tokenize_all_turns.
-    """
-    effective, full_text, full_tokens, input_ids, label_ids = _prepare_full_sequence(
-        messages, tokenizer, chat_template_kwargs, fixup_fn=fixup_fn,
-    )
-    last_asst_idx = len(effective) - 1
-
-    for i, msg in enumerate(effective):
-        if msg["role"] != "assistant":
-            continue
-
-        prefix_text = tokenizer.apply_chat_template(
-            effective[:i],
-            add_generation_prompt=True,
-            **chat_template_kwargs,
-        )
-        if fixup_fn:
-            prefix_text = fixup_fn(prefix_text)
-        prefix_tokens = tokenizer.encode(prefix_text, add_bos=True, add_eos=False)
-        start = len(prefix_tokens) - 1
-
-        if i == last_asst_idx:
-            label_ids[start:] = full_tokens[start + 1:]
-        else:
-            up_to_text = tokenizer.apply_chat_template(
-                effective[:i + 1], **chat_template_kwargs
-            ).rstrip("\n")
-            if fixup_fn:
-                up_to_text = fixup_fn(up_to_text)
-            up_to_tokens = tokenizer.encode(
-                up_to_text, add_bos=True, add_eos=False
-            )
-            end = len(up_to_tokens) - 2
-            end = min(end + 1, len(input_ids))
-            label_ids[start:end] = full_tokens[start + 1 : end + 1]
 
     return {"input_ids": input_ids, "labels": label_ids, "n_tokens": len(input_ids)}
 
@@ -380,14 +350,13 @@ class TokenizationStrategy(ABC):
 
     def _check_forbidden_content(self, messages: list[dict]) -> None:
         """Raise ValueError if any message contains forbidden tokens in content."""
-        if not self.forbidden_content_tokens:
-            return
+        check_tokens = _MANDATORY_FORBIDDEN_TOKENS + self.forbidden_content_tokens
         for i, msg in enumerate(messages):
             for field in ("content", "reasoning_content"):
                 text = msg.get(field)
                 if not isinstance(text, str):
                     continue
-                for tok in self.forbidden_content_tokens:
+                for tok in check_tokens:
                     if tok in text:
                         raise ValueError(
                             f"Forbidden token {tok!r} in {field} of {msg['role']} "
@@ -455,165 +424,6 @@ class BackboneSuffixStrategy(TokenizationStrategy):
         )
         last_asst_idx = len(effective) - 1
 
-        # Single encode for the backbone — character offset table for bisect lookups.
-        full_encoding = self.tokenizer.tokenizer.encode(full_text)
-        token_starts = [o[0] for o in full_encoding.offsets]
-
-        # Backbone last-turn label_start: find <think> after the preceding context
-        prefix_end = len(self.tokenizer.apply_chat_template(
-            effective[:-1], **self.chat_template_kwargs
-        ).rstrip("\n"))
-        think_pos = full_text.index("<think>", prefix_end)
-        start = _char_to_token_idx(token_starts, think_pos + len("<think>"))
-        label_ids[start:] = full_tokens[start + 1:]
-
-        backbone_input_ids = list(input_ids)
-        backbone_labels = list(label_ids)
-        backbone_positions = list(range(len(backbone_input_ids)))
-
-        # --- Suffix groups ---
-        user_indices = [i for i, m in enumerate(effective) if m["role"] == "user"]
-        group_boundaries = user_indices + [last_asst_idx]
-
-        suffix_starts: list[int] = []
-        insertion_limits: list[int] = []
-        all_suffix_input_ids: list[int] = []
-        all_suffix_labels: list[int] = []
-        all_suffix_positions: list[int] = []
-
-        for bi in range(len(group_boundaries) - 1):
-            group_start = group_boundaries[bi] + 1
-            group_end = group_boundaries[bi + 1]
-
-            has_reasoning = any(
-                m["role"] == "assistant"
-                and m.get("reasoning_content", "").strip()
-                for m in effective[group_start:group_end]
-            )
-            if not has_reasoning:
-                # No-reasoning group: label directly in backbone via offset lookup
-                for turn_idx in range(group_start, group_end):
-                    if effective[turn_idx]["role"] != "assistant":
-                        continue
-                    turn_prefix_end = len(self.tokenizer.apply_chat_template(
-                        effective[:turn_idx], **self.chat_template_kwargs
-                    ).rstrip("\n"))
-                    close_think_pos = full_text.index("</think>", turn_prefix_end)
-                    label_start = _char_to_token_idx(token_starts, close_think_pos)
-
-                    end_text = self.tokenizer.apply_chat_template(
-                        effective[: turn_idx + 1], **self.chat_template_kwargs
-                    ).rstrip("\n")
-                    label_end = _char_to_token_idx(token_starts, len(end_text)) - 2
-
-                    end = min(label_end + 1, len(backbone_input_ids))
-                    backbone_labels[label_start:end] = full_tokens[label_start + 1 : end + 1]
-                continue
-
-            # Reasoning group — build a suffix sequence
-            first_asst_in_group = next(
-                i for i in range(group_start, group_end)
-                if effective[i]["role"] == "assistant"
-            )
-
-            suffix_source_text = self.tokenizer.apply_chat_template(
-                effective[:group_end], **self.chat_template_kwargs
-            ).rstrip("\n")
-            suffix_source_tokens = self.tokenizer.encode(
-                suffix_source_text, add_bos=True, add_eos=False
-            )
-            suffix_encoding = self.tokenizer.tokenizer.encode(suffix_source_text)
-            suffix_token_starts = [o[0] for o in suffix_encoding.offsets]
-
-            # insertion_limit: token index of <think> for the first assistant in group
-            limit_prefix_end = len(self.tokenizer.apply_chat_template(
-                effective[:first_asst_in_group], **self.chat_template_kwargs
-            ).rstrip("\n"))
-            think_pos = suffix_source_text.index("<think>", limit_prefix_end)
-            insertion_limit = _char_to_token_idx(suffix_token_starts, think_pos)
-
-            suffix_tokens = suffix_source_tokens[insertion_limit + 1:]
-
-            if not suffix_tokens:
-                raise ValueError(
-                    f"Empty suffix: insertion_limit={insertion_limit} >= "
-                    f"len(suffix_source_tokens)={len(suffix_source_tokens)}; "
-                    "coordinate arithmetic is broken for this sample"
-                )
-
-            if suffix_tokens[-1] != self.tokenizer.eos_id:
-                suffix_tokens.append(self.tokenizer.eos_id)
-
-            suffix_input = suffix_tokens[:-1]
-            suffix_label = [IGNORE_INDEX] * len(suffix_input)
-
-            for turn_idx in range(group_start, group_end):
-                if effective[turn_idx]["role"] != "assistant":
-                    continue
-
-                turn_prefix_end = len(self.tokenizer.apply_chat_template(
-                    effective[:turn_idx], **self.chat_template_kwargs
-                ).rstrip("\n"))
-                # label_start: token after <think> (works for both reasoning and no-reasoning)
-                open_think_pos = suffix_source_text.index("<think>", turn_prefix_end)
-                label_start_global = _char_to_token_idx(suffix_token_starts, open_think_pos + len("<think>"))
-                label_start_in_suffix = label_start_global - (insertion_limit + 1)
-
-                end_text = self.tokenizer.apply_chat_template(
-                    effective[: turn_idx + 1], **self.chat_template_kwargs
-                ).rstrip("\n")
-                label_end_global = _char_to_token_idx(suffix_token_starts, len(end_text)) - 2
-                label_end_in_suffix = label_end_global - (insertion_limit + 1)
-
-                assert label_start_in_suffix >= 0, (
-                    f"label_start_in_suffix={label_start_in_suffix} < 0 for "
-                    f"turn_idx={turn_idx}; coordinate arithmetic is broken"
-                )
-                assert label_end_in_suffix >= label_start_in_suffix, (
-                    f"label_end_in_suffix={label_end_in_suffix} < "
-                    f"label_start_in_suffix={label_start_in_suffix} for "
-                    f"turn_idx={turn_idx}; coordinate arithmetic is broken"
-                )
-                for pos in range(label_start_in_suffix, min(label_end_in_suffix + 1, len(suffix_input))):
-                    suffix_label[pos] = suffix_tokens[pos + 1]
-
-            suffix_offset = len(backbone_input_ids) + len(all_suffix_input_ids)
-            suffix_starts.append(suffix_offset)
-            insertion_limits.append(insertion_limit)
-
-            suffix_pos_start = insertion_limit + 1
-            suffix_positions = list(range(suffix_pos_start, suffix_pos_start + len(suffix_input)))
-
-            all_suffix_input_ids.extend(suffix_input)
-            all_suffix_labels.extend(suffix_label)
-            all_suffix_positions.extend(suffix_positions)
-
-        # --- Assemble final output ---
-        final_input_ids = backbone_input_ids + all_suffix_input_ids
-        final_labels = backbone_labels + all_suffix_labels
-        final_positions = backbone_positions + all_suffix_positions
-
-        return {
-            "input_ids": final_input_ids,
-            "labels": final_labels,
-            "positions": final_positions,
-            "suffix_starts": suffix_starts,
-            "insertion_limits": insertion_limits,
-            "n_tokens": len(final_input_ids),
-        }
-
-    def _tokenize_one_reference(self, messages: list[dict]) -> dict[str, list[int] | int]:
-        """Reference implementation using per-turn encode calls.
-
-        Kept for correctness testing against the offset-based _tokenize_one.
-        """
-        effective, full_text, full_tokens, input_ids, label_ids = (
-            _prepare_full_sequence(
-                messages, self.tokenizer, self.chat_template_kwargs,
-            )
-        )
-        last_asst_idx = len(effective) - 1
-
         prefix_text = self.tokenizer.apply_chat_template(
             effective[:-1],
             add_generation_prompt=True,
@@ -621,6 +431,14 @@ class BackboneSuffixStrategy(TokenizationStrategy):
         )
         prefix_tokens = self.tokenizer.encode(prefix_text, add_bos=True, add_eos=False)
         start = len(prefix_tokens) - 1
+
+        if full_tokens[:start] != prefix_tokens[:-1]:
+            raise ValueError(
+                "BPE prefix mismatch at last turn: sub-render is not a "
+                f"token-prefix of full render (start={start}, "
+                f"len(prefix)={len(prefix_tokens)}, len(full)={len(full_tokens)})"
+            )
+
         label_ids[start:] = full_tokens[start + 1:]
 
         backbone_input_ids = list(input_ids)
@@ -880,28 +698,6 @@ class TruncateEveryTurnStrategy(TokenizationStrategy):
         return {"truncate_history_thinking": True}
 
     def _tokenize_one(self, messages: list[dict]) -> dict[str, list[int] | int]:
-        effective, full_text, full_tokens, input_ids, label_ids = (
-            _prepare_full_sequence(
-                messages, self.tokenizer, self.chat_template_kwargs,
-            )
-        )
-        full_encoding = self.tokenizer.tokenizer.encode(full_text)
-        token_starts = [o[0] for o in full_encoding.offsets]
-
-        prefix_end = len(self.tokenizer.apply_chat_template(
-            effective[:-1], **self.chat_template_kwargs
-        ).rstrip("\n"))
-        think_pos = full_text.index("<think>", prefix_end)
-        start = _char_to_token_idx(token_starts, think_pos + len("<think>"))
-
-        label_ids[start:] = full_tokens[start + 1:]
-        return {"input_ids": input_ids, "labels": label_ids, "n_tokens": len(input_ids)}
-
-    def _tokenize_one_reference(self, messages: list[dict]) -> dict[str, list[int] | int]:
-        """Reference implementation using per-turn encode calls.
-
-        Kept for correctness testing against the offset-based _tokenize_one.
-        """
         return _tokenize_last_turn(messages, self.tokenizer, self.chat_template_kwargs)
 
     def __call__(self, batch: dict[str, list]) -> dict[str, list]:
