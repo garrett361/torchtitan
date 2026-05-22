@@ -372,16 +372,18 @@ def _write_manifest(
             "chat_template_sha256": chat_template_sha256,
         },
         "chat_template_kwargs": chat_template_kwargs,
+        "input_files": {
+            "total": len(input_files),
+            "paths": [str(f) for f in sorted(input_files)],
+            "skipped": skipped_files,
+        },
         "shards": {
             "completed": completed_shards,
-            "total_expected": len(input_files),
         },
-        "skipped_files": skipped_files,
         "stats": stats_block,
         "length_stats": length_stats_block,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "input_dir": str(input_dir),
-        "input_files": [str(f) for f in sorted(input_files)],
     }
 
     manifest_path = output_dir / "manifest.json"
@@ -420,10 +422,7 @@ def _finalize_shuffle(
     new_shard_names = [f"shard_{i:04d}" for i in range(num_shards)]
     new_manifest = {
         **manifest,
-        "shards": {
-            "completed": new_shard_names,
-            "total_expected": num_shards,
-        },
+        "shards": {"completed": new_shard_names},
         "shuffle": {"seed": shuffle_seed, "num_shards": num_shards},
     }
     tmp_manifest = output_dir / "manifest_new.json"
@@ -499,6 +498,15 @@ def _shuffle_and_reshard(
     manifest = _load_manifest(output_dir / "manifest.json")
     shard_names = sorted(manifest["shards"]["completed"])
     num_shards = len(shard_names)
+    total_input = manifest["input_files"]["total"]
+    if num_shards < total_input:
+        n_missing = total_input - num_shards
+        logger.warning(
+            "%d/%d input files produced no shard; shuffling %d available shards",
+            n_missing,
+            total_input,
+            num_shards,
+        )
 
     if num_shards == 0:
         logger.info("[rank %d] No shards to shuffle, skipping Phase 2", rank)
@@ -530,7 +538,20 @@ def _shuffle_and_reshard(
         shard_name = f"shard_{i:04d}"
         stats_path = shuffled_dir / f"{shard_name}_stats.json"
         if stats_path.exists():
-            continue
+            with open(stats_path) as f:
+                existing = json.load(f)
+            if "error" not in existing:
+                continue
+            logger.warning(
+                "[rank %d] Shard %s previously failed (%s); retrying",
+                rank,
+                shard_name,
+                existing["error"],
+            )
+            stats_path.unlink()
+            shard_dir = shuffled_dir / shard_name
+            if shard_dir.exists():
+                shutil.rmtree(shard_dir)
 
         try:
             start = i * examples_per_shard
@@ -765,6 +786,27 @@ def main() -> None:
 
     shards_dir = output_dir / "shards"
     my_files = _assign_files_by_cost(input_files, args.world_size)[args.rank]
+
+    # Retry shards that failed on a previous run (error stats block resume otherwise).
+    for input_file in my_files:
+        shard_stem = _shard_stem(input_file, input_dir)
+        stats_path = shards_dir / f"{shard_stem}_stats.json"
+        if not stats_path.exists():
+            continue
+        with open(stats_path) as f:
+            prev_stats = json.load(f)
+        if "error" not in prev_stats:
+            continue
+        logger.warning(
+            "[rank %d] %s previously failed (%s); retrying",
+            args.rank,
+            shard_stem,
+            prev_stats["error"],
+        )
+        stats_path.unlink()
+        shard_dir = shards_dir / shard_stem
+        if shard_dir.exists():
+            shutil.rmtree(shard_dir)
 
     completed = _completed_stems(shards_dir)
     num_skipped = sum(1 for f in my_files if _shard_stem(f, input_dir) in completed)
