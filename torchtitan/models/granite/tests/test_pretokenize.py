@@ -1,11 +1,7 @@
 """Tests for TruncateLastStrategy tokenization and label masking.
 
-Uses the shared test tokenizer at tests/assets/tokenizer/ (which has a minimal
-chat template: bos + role\ncontent + eos per turn). All tests run without GPUs
-or model weights.
-
-Tests with the real Granite tokenizer (chat_template.jinja, truncate_history_thinking,
-<think> tokens) are skipped if HF_ASSETS_PATH is not set.
+Requires HF_ASSETS_PATH pointing to a Granite tokenizer with <think>/<|im_start|>
+as registered special tokens. Tests are skipped if HF_ASSETS_PATH is not set.
 """
 
 import json
@@ -114,11 +110,14 @@ class TestValidateMessages(unittest.TestCase):
             )
 
 
+@unittest.skipUnless(
+    _HF_ASSETS_PATH, "HF_ASSETS_PATH not set — skipping Granite tokenizer tests"
+)
 class TestTruncateLastStrategyBasic(unittest.TestCase):
-    """Output structure, shift invariant, and last-turn-only masking using the test tokenizer."""
+    """Output structure, shift invariant, and last-turn-only masking."""
     def setUp(self):
-        self.tokenizer = HuggingFaceTokenizer(tokenizer_path=_TEST_TOKENIZER_PATH)
-        self.strategy = TruncateLastStrategy(_TEST_TOKENIZER_PATH)
+        self.tokenizer = HuggingFaceTokenizer(tokenizer_path=_HF_ASSETS_PATH)
+        self.strategy = TruncateLastStrategy(_HF_ASSETS_PATH)
 
     def _tokenize(self, messages):
         return self.strategy._tokenize_one(messages)
@@ -279,12 +278,15 @@ class TestTruncateLastStrategyBasic(unittest.TestCase):
             self.assertEqual(output["n_tokens"][i], len(output["input_ids"][i]))
 
 
+@unittest.skipUnless(
+    _HF_ASSETS_PATH, "HF_ASSETS_PATH not set — skipping Granite tokenizer tests"
+)
 class TestTruncateLastStrategyOrchestrator(unittest.TestCase):
     """Integration test: run the full pre-tokenization pipeline on a tiny JSONL."""
 
     def setUp(self):
-        self.tokenizer = HuggingFaceTokenizer(tokenizer_path=_TEST_TOKENIZER_PATH)
-        self.strategy = TruncateLastStrategy(_TEST_TOKENIZER_PATH)
+        self.tokenizer = HuggingFaceTokenizer(tokenizer_path=_HF_ASSETS_PATH)
+        self.strategy = TruncateLastStrategy(_HF_ASSETS_PATH)
 
     def test_jsonl_to_shard(self):
         from datasets import load_dataset, load_from_disk
@@ -330,13 +332,16 @@ class TestTruncateLastStrategyOrchestrator(unittest.TestCase):
                 self.assertEqual(row["labels"][-1], self.tokenizer.eos_id)
 
 
+@unittest.skipUnless(
+    _HF_ASSETS_PATH, "HF_ASSETS_PATH not set — skipping Granite tokenizer tests"
+)
 class TestTruncateLastStrategyFailureRecording(unittest.TestCase):
     """Tests that failures are flushed to failures_path after each batch."""
 
     def test_validation_error_written_to_jsonl(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "failures.jsonl")
-            strategy = TruncateLastStrategy(_TEST_TOKENIZER_PATH, failures_path=path)
+            strategy = TruncateLastStrategy(_HF_ASSETS_PATH, failures_path=path)
             bad = [{"role": "user", "content": "no assistant"}]
             good = [
                 {"role": "user", "content": "hello"},
@@ -358,7 +363,7 @@ class TestTruncateLastStrategyFailureRecording(unittest.TestCase):
         """Every bad example in a batch ends up in the file after __call__ returns."""
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "failures.jsonl")
-            strategy = TruncateLastStrategy(_TEST_TOKENIZER_PATH, failures_path=path)
+            strategy = TruncateLastStrategy(_HF_ASSETS_PATH, failures_path=path)
             bad1 = [{"role": "user", "content": "no assistant"}]
             bad2 = [{"role": "assistant", "content": "starts wrong"}]
             result = strategy({"messages": [bad1, bad2]})
