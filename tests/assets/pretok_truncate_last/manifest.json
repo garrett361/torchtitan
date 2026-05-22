@@ -10,11 +10,15 @@
   "chat_template_kwargs": {
     "truncate_history_thinking": true
   },
+  "input_files": {
+    "total": 1,
+    "paths": [],
+    "skipped": []
+  },
   "shards": {
     "completed": [
       "shard_0000"
-    ],
-    "total_expected": 1
+    ]
   },
   "stats": {
     "total_examples": 6,
@@ -29,6 +33,5 @@
     }
   },
   "created_at": "2026-01-01T00:00:00Z",
-  "input_dir": "tests/assets/pretok_test_input",
-  "input_files_sha256": {}
+  "input_dir": "tests/assets/pretok_test_input"
 }

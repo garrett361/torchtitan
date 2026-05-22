@@ -88,9 +88,13 @@ def _write_single_shard_asset() -> None:
             "chat_template_sha256": None,
         },
         "chat_template_kwargs": {"truncate_history_thinking": True},
+        "input_files": {
+            "total": 1,
+            "paths": [],
+            "skipped": [],
+        },
         "shards": {
             "completed": [shard_name],
-            "total_expected": 1,
         },
         "stats": {
             "total_examples": n,
@@ -106,7 +110,6 @@ def _write_single_shard_asset() -> None:
         },
         "created_at": "2026-01-01T00:00:00Z",
         "input_dir": "tests/assets/pretok_test_input",
-        "input_files_sha256": {},
     }
 
     with open(out_dir / "manifest.json", "w") as f:
@@ -217,9 +220,13 @@ def _write_multishard_asset() -> None:
             "chat_template_sha256": None,
         },
         "chat_template_kwargs": {"truncate_history_thinking": True},
+        "input_files": {
+            "total": len(shard_names),
+            "paths": [],
+            "skipped": [],
+        },
         "shards": {
             "completed": shard_names,
-            "total_expected": len(shard_names),
         },
         "stats": {
             "total_examples": total_examples,
@@ -231,7 +238,6 @@ def _write_multishard_asset() -> None:
         },
         "created_at": "2026-01-01T00:00:00Z",
         "input_dir": "tests/assets/pretok_test_input",
-        "input_files_sha256": {},
     }
 
     with open(out_dir / "manifest.json", "w") as f:

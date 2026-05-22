@@ -57,6 +57,7 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
             f.write(json.dumps(row) + "\n")
 
 
+@unittest.skipUnless(_HF_ASSETS_PATH, "HF_ASSETS_PATH not set")
 class TestProcessFileCrashWritesStats(unittest.TestCase):
     def test_missing_messages_key_writes_error_stats(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -74,7 +75,7 @@ class TestProcessFileCrashWritesStats(unittest.TestCase):
                 jsonl_path,
                 output_dir,
                 TruncateLastStrategy,
-                _TEST_TOKENIZER_PATH,
+                _HF_ASSETS_PATH,
                 shard_stem="bad",
                 input_dir=input_dir,
                 num_cpus=1,
@@ -96,6 +97,7 @@ class TestProcessFileCrashWritesStats(unittest.TestCase):
             self.assertFalse(shard_dir.exists())
 
 
+@unittest.skipUnless(_HF_ASSETS_PATH, "HF_ASSETS_PATH not set")
 class TestProcessFileBlankLines(unittest.TestCase):
     def test_blank_lines_are_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -117,7 +119,7 @@ class TestProcessFileBlankLines(unittest.TestCase):
                 jsonl_path,
                 output_dir,
                 TruncateLastStrategy,
-                _TEST_TOKENIZER_PATH,
+                _HF_ASSETS_PATH,
                 shard_stem="data",
                 input_dir=input_dir,
                 num_cpus=1,
@@ -133,6 +135,7 @@ class TestProcessFileBlankLines(unittest.TestCase):
             self.assertEqual(len(ds), 2)
 
 
+@unittest.skipUnless(_HF_ASSETS_PATH, "HF_ASSETS_PATH not set")
 class TestProcessFileAllDropped(unittest.TestCase):
     def test_all_invalid_writes_skipped_stats(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -149,7 +152,7 @@ class TestProcessFileAllDropped(unittest.TestCase):
                 jsonl_path,
                 output_dir,
                 TruncateLastStrategy,
-                _TEST_TOKENIZER_PATH,
+                _HF_ASSETS_PATH,
                 shard_stem="invalid",
                 input_dir=input_dir,
                 num_cpus=1,
@@ -171,6 +174,7 @@ class TestProcessFileAllDropped(unittest.TestCase):
             self.assertFalse(shard_dir.exists())
 
 
+@unittest.skipUnless(_HF_ASSETS_PATH, "HF_ASSETS_PATH not set")
 class TestNestedDirStructureEndToEnd(unittest.TestCase):
     def test_discovery_and_processing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -225,7 +229,7 @@ class TestNestedDirStructureEndToEnd(unittest.TestCase):
                     f,
                     output_dir,
                     TruncateLastStrategy,
-                    _TEST_TOKENIZER_PATH,
+                    _HF_ASSETS_PATH,
                     shard_stem=_shard_stem(f, input_dir),
                     input_dir=input_dir,
                     num_cpus=1,
@@ -332,6 +336,7 @@ class TestCompletedStemsSkipsExisting(unittest.TestCase):
             self.assertEqual(_completed_stems(shards_dir), set())
 
 
+@unittest.skipUnless(_HF_ASSETS_PATH, "HF_ASSETS_PATH not set")
 class TestTotalTrainedTokensStats(unittest.TestCase):
     def test_total_trained_tokens_matches_label_count(self):
         """Verify total_trained_tokens stat counts non-IGNORE_INDEX labels correctly.
@@ -354,7 +359,7 @@ class TestTotalTrainedTokensStats(unittest.TestCase):
                 jsonl_path,
                 output_dir,
                 TruncateLastStrategy,
-                _TEST_TOKENIZER_PATH,
+                _HF_ASSETS_PATH,
                 shard_stem="data",
                 input_dir=input_dir,
                 num_cpus=1,
@@ -377,6 +382,7 @@ class TestTotalTrainedTokensStats(unittest.TestCase):
             self.assertGreater(expected_trained, 0)
 
 
+@unittest.skipUnless(_HF_ASSETS_PATH, "HF_ASSETS_PATH not set")
 class TestProcessFileDropStats(unittest.TestCase):
     """Verify n_dropped is computed from actual failures, not n_lines - n_examples."""
 
@@ -397,7 +403,7 @@ class TestProcessFileDropStats(unittest.TestCase):
                 input_dir / "mixed.jsonl",
                 output_dir,
                 TruncateLastStrategy,
-                _TEST_TOKENIZER_PATH,
+                _HF_ASSETS_PATH,
                 shard_stem="mixed",
                 input_dir=input_dir,
                 num_cpus=1,
@@ -426,7 +432,7 @@ class TestProcessFileDropStats(unittest.TestCase):
                 input_dir / "good.jsonl",
                 output_dir,
                 TruncateLastStrategy,
-                _TEST_TOKENIZER_PATH,
+                _HF_ASSETS_PATH,
                 shard_stem="good",
                 input_dir=input_dir,
                 num_cpus=1,
@@ -504,7 +510,7 @@ class TestProcessFileDropStats(unittest.TestCase):
                 jsonl_path,
                 output_dir,
                 TruncateLastStrategy,
-                _TEST_TOKENIZER_PATH,
+                _HF_ASSETS_PATH,
                 shard_stem="data",
                 input_dir=input_dir,
                 num_cpus=1,
@@ -534,7 +540,7 @@ class TestProcessFileDropStats(unittest.TestCase):
                 input_dir / "bad.jsonl",
                 output_dir,
                 TruncateLastStrategy,
-                _TEST_TOKENIZER_PATH,
+                _HF_ASSETS_PATH,
                 shard_stem="bad",
                 input_dir=input_dir,
                 num_cpus=1,
@@ -565,7 +571,7 @@ class TestProcessFileDropStats(unittest.TestCase):
                 input_dir / "data.jsonl",
                 output_dir,
                 TruncateLastStrategy,
-                _TEST_TOKENIZER_PATH,
+                _HF_ASSETS_PATH,
                 shard_stem="data",
                 input_dir=input_dir,
                 num_cpus=1,

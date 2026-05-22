@@ -46,14 +46,17 @@ def _make_shard(
             "chat_template_sha256": None,
         },
         "chat_template_kwargs": {"truncate_history_thinking": True},
+        "input_files": {
+            "total": 1,
+            "paths": [],
+            "skipped": [],
+        },
         "shards": {
             "completed": [shard_name],
-            "total_expected": 1,
         },
         "stats": {},
         "created_at": "2026-01-01T00:00:00Z",
         "input_dir": "",
-        "input_files_sha256": {},
     }
     manifest_path = tmp_path / "manifest.json"
     with open(manifest_path, "w") as f:

@@ -477,7 +477,7 @@ class TestGraniteRealCheckpoint(unittest.TestCase):
 
         # Load HF model, run forward, then free — keeps peak VRAM at one float32 8B.
         hf_model = AutoModelForCausalLM.from_pretrained(
-            self.ckpt_path, dtype=torch.float32
+            self.ckpt_path, torch_dtype=torch.float32
         )
         hf_sd = hf_model.state_dict()  # CPU tensors; used below for TT conversion
         hf_model.to(device).eval()

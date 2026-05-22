@@ -645,7 +645,6 @@ class TestTruncateLastStrategyRealData(unittest.TestCase):
     """Smoke test on real data. Requires DATA_PATH_7M_BALANCED (dir of .jsonl) + HF_ASSETS_PATH."""
 
     _NUM_SAMPLES = 1000
-    _MAX_DROP_RATE = 0.01
 
     def setUp(self):
         self.tokenizer = HuggingFaceTokenizer(tokenizer_path=_HF_ASSETS_PATH)
@@ -665,30 +664,19 @@ class TestTruncateLastStrategyRealData(unittest.TestCase):
                 samples.append(json.loads(line)["messages"])
         return samples
 
-    def test_format_and_drop_rate(self):
+    def test_format_invariants(self):
         samples = self._load_samples()
-        valid = []
-        for msgs in samples:
-            try:
-                valid.append(self.strategy._tokenize_one(msgs))
-            except Exception:
-                pass
-
-        drop_rate = 1 - len(valid) / len(samples)
-        self.assertLess(
-            drop_rate,
-            self._MAX_DROP_RATE,
-            f"Drop rate {drop_rate:.1%} exceeds {self._MAX_DROP_RATE:.1%}",
-        )
+        results = [self.strategy._tokenize_one(msgs) for msgs in samples]
+        self.assertGreater(len(results), 0)
 
         eos_id = self.tokenizer.eos_id
-        for r in valid:
+        for r in results:
             self.assertEqual(r["n_tokens"], len(r["input_ids"]))
             self.assertEqual(len(r["labels"]), len(r["input_ids"]))
             self.assertEqual(r["labels"][-1], eos_id)
             masked = sum(1 for lbl in r["labels"] if lbl == IGNORE_INDEX)
-            self.assertGreater(masked, 0)
-            self.assertGreater(len(r["labels"]) - masked, 0)
+            self.assertGreater(masked, 0, "must have at least one masked position")
+            self.assertGreater(len(r["labels"]) - masked, 0, "must have at least one trained position")
 
 
 _MULTISHARD_MANIFEST = _REPO_ROOT / "tests" / "assets" / "pretok_multishard" / "manifest.json"

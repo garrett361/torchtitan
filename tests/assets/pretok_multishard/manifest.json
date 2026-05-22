@@ -10,13 +10,17 @@
   "chat_template_kwargs": {
     "truncate_history_thinking": true
   },
+  "input_files": {
+    "total": 3,
+    "paths": [],
+    "skipped": []
+  },
   "shards": {
     "completed": [
       "shard_0000",
       "shard_0001",
       "shard_0002"
-    ],
-    "total_expected": 3
+    ]
   },
   "stats": {
     "total_examples": 12,
@@ -27,6 +31,5 @@
     "trained_tokens_per_example": 2.2
   },
   "created_at": "2026-01-01T00:00:00Z",
-  "input_dir": "tests/assets/pretok_test_input",
-  "input_files_sha256": {}
+  "input_dir": "tests/assets/pretok_test_input"
 }
