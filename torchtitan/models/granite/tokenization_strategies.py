@@ -65,6 +65,52 @@ def _fix_empty_thinking(text: str) -> str:
     return text.replace("<think></think>", "<think>\n</think>\n")
 
 
+def _expand_empty_thinking_tokens(
+    full_tokens: list[int],
+    turn_think_positions: list[int],
+    tokenizer: HuggingFaceTokenizer,
+) -> tuple[list[int], list[int]]:
+    """Expand no-reasoning turns from <think></think> to <think>\\n</think>\\n in token space.
+
+    At inference the model receives <think>\\n as generation prompt and produces
+    </think>\\n before content. Text-level fixup followed by encoding causes BPE
+    merging across the boundary (e.g. \\n + \\n → single \\n\\n token). Operating
+    in token space avoids cross-boundary merges entirely.
+
+    Args:
+        full_tokens: BOS-prepended token sequence from a single encode call.
+        turn_think_positions: token indices of turn-level <think> tokens (from offset
+            lookup). Only these positions are checked — content-level <think></think>
+            occurrences are ignored.
+        tokenizer: for looking up special token IDs.
+
+    Returns:
+        (expanded_tokens, pos_map) where pos_map[original_idx] = expanded_idx.
+    """
+    end_think_id = tokenizer.tokenizer.token_to_id("</think>")
+    newline_id = tokenizer.encode("\n", add_bos=False, add_eos=False)[0]
+
+    expand_at: set[int] = set()
+    for pos in turn_think_positions:
+        if pos + 1 < len(full_tokens) and full_tokens[pos + 1] == end_think_id:
+            expand_at.add(pos)
+
+    if not expand_at:
+        return full_tokens, list(range(len(full_tokens)))
+
+    expanded: list[int] = []
+    pos_map: list[int] = []
+    for i, tok in enumerate(full_tokens):
+        pos_map.append(len(expanded))
+        expanded.append(tok)
+        if i in expand_at:
+            expanded.append(newline_id)
+        elif i - 1 in expand_at and tok == end_think_id:
+            expanded.append(newline_id)
+
+    return expanded, pos_map
+
+
 def _char_to_token_idx(token_starts: list[int], char_pos: int) -> int:
     """Map a character position to a token index in the BOS-prepended sequence.
 
@@ -165,7 +211,7 @@ def _tokenize_all_turns(
     tokenizer: HuggingFaceTokenizer,
     chat_template_kwargs: dict[str, Any],
     *,
-    fixup_fn: Callable[[str], str] | None = None,
+    expand_empty_thinking: bool = False,
 ) -> dict[str, list[int] | int]:
     """Tokenize a conversation labeling every assistant turn.
 
@@ -175,14 +221,24 @@ def _tokenize_all_turns(
     <|im_end|> is the final prediction target — it's outside input_ids.
 
     Uses a single encode + character-offset bisect for all boundary lookups.
+
+    When expand_empty_thinking=True (used with truncate_history_thinking=False),
+    no-reasoning turns (<think></think>) are expanded to <think>\\n</think>\\n in
+    token space after encoding. This matches inference where the model receives
+    <think>\\n as generation prompt and produces </think>\\n before content. The
+    expansion operates on tokens (not text) to prevent BPE from merging the
+    inserted \\n with content characters across the boundary.
     """
     effective, full_text, full_tokens, input_ids, label_ids = _prepare_full_sequence(
-        messages, tokenizer, chat_template_kwargs, fixup_fn=fixup_fn,
+        messages, tokenizer, chat_template_kwargs,
     )
     last_asst_idx = len(effective) - 1
 
     full_encoding = tokenizer.tokenizer.encode(full_text)
     token_starts = [o[0] for o in full_encoding.offsets]
+
+    boundaries: list[tuple[int, int | None]] = []
+    turn_think_positions: list[int] = []
 
     for i, msg in enumerate(effective):
         if msg["role"] != "assistant":
@@ -191,25 +247,43 @@ def _tokenize_all_turns(
         prefix_render = tokenizer.apply_chat_template(
             effective[:i], **chat_template_kwargs
         ).rstrip("\n")
-        if fixup_fn:
-            prefix_render = fixup_fn(prefix_render)
         prefix_end = len(prefix_render)
 
         think_pos = full_text.index("<think>", prefix_end)
-        start = _char_to_token_idx(token_starts, think_pos + len("<think>"))
+        think_token_pos = _char_to_token_idx(token_starts, think_pos)
+        turn_think_positions.append(think_token_pos)
 
         if i == last_asst_idx:
-            label_ids[start:] = full_tokens[start + 1:]
+            boundaries.append((think_token_pos, None))
         else:
             end_text = tokenizer.apply_chat_template(
                 effective[:i + 1], **chat_template_kwargs
             ).rstrip("\n")
-            if fixup_fn:
-                end_text = fixup_fn(end_text)
-            # Result equals len(encode(end_text)): -1 for length→index, -1 to skip <|im_end|>
             label_end = _char_to_token_idx(token_starts, len(end_text)) - 2
-            end = min(label_end + 1, len(input_ids))
-            label_ids[start:end] = full_tokens[start + 1 : end + 1]
+            boundaries.append((think_token_pos, label_end))
+
+    if expand_empty_thinking:
+        full_tokens, pos_map = _expand_empty_thinking_tokens(
+            full_tokens, turn_think_positions, tokenizer,
+        )
+        input_ids = full_tokens[:-1]
+        label_ids = [IGNORE_INDEX] * len(input_ids)
+
+        for think_tp, (_, end) in zip(turn_think_positions, boundaries):
+            start = pos_map[think_tp] + 1
+            if end is None:
+                label_ids[start:] = full_tokens[start + 1:]
+            else:
+                remapped_end = min(pos_map[end] + 1, len(input_ids))
+                label_ids[start:remapped_end] = full_tokens[start + 1 : remapped_end + 1]
+    else:
+        for think_tp, (_, end) in zip(turn_think_positions, boundaries):
+            start = think_tp + 1
+            if end is None:
+                label_ids[start:] = full_tokens[start + 1:]
+            else:
+                end_idx = min(end + 1, len(input_ids))
+                label_ids[start:end_idx] = full_tokens[start + 1 : end_idx + 1]
 
     return {"input_ids": input_ids, "labels": label_ids, "n_tokens": len(input_ids)}
 
@@ -562,9 +636,9 @@ class BackboneSuffixStrategy(TokenizationStrategy):
         all_suffix_labels: list[int] = []
         all_suffix_positions: list[int] = []
 
-        for bi in range(len(group_boundaries) - 1):
-            group_start = group_boundaries[bi] + 1
-            group_end = group_boundaries[bi + 1]
+        for boundary in range(len(group_boundaries) - 1):
+            group_start = group_boundaries[boundary] + 1
+            group_end = group_boundaries[boundary + 1]
 
             has_reasoning = any(
                 m["role"] == "assistant"
@@ -767,9 +841,9 @@ class FullThinkingStrategy(TruncateLastStrategy):
     Context fidelity:
         The chat template renders no-reasoning turns as <think></think>{content},
         but at inference the model receives <think>\\n from the generation prompt
-        and produces </think>\\n{content}. The _fix_empty_thinking fixup corrects
-        this before tokenization so that training context is token-for-token
-        identical to inference context.
+        and produces </think>\\n{content}. Token-level expansion (expand_empty_thinking)
+        inserts the missing \\n tokens directly, avoiding BPE merging artifacts that
+        text-level fixup would cause.
 
     Data provenance note:
         Training data may have been collected under truncate_history_thinking=True
@@ -785,7 +859,7 @@ class FullThinkingStrategy(TruncateLastStrategy):
     def _tokenize_one(self, messages: list[dict]) -> dict[str, list[int] | int]:
         return _tokenize_all_turns(
             messages, self.tokenizer, self.chat_template_kwargs,
-            fixup_fn=_fix_empty_thinking,
+            expand_empty_thinking=True,
         )
 
 

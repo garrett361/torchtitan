@@ -104,6 +104,100 @@ MIXED_REASONING_NO_TRAILING_USER = [
     {"role": "assistant", "content": "final answer", "reasoning_content": "done"},
 ]
 
+# BackboneSuffix finds label-end boundaries by rendering a sub-conversation up to
+# a given turn, measuring its character length, and using that as a position lookup
+# into the full conversation's token offset table. But the chat template internally
+# decides whether to truncate thinking based on the position of the last user
+# message in the rendered slice. When the slice is shorter than the full
+# conversation, the last-user position differs, the same turn may be rendered
+# through a different template branch (one that trims leading whitespace), and
+# the character lengths diverge. The result: the offset lookup overshoots,
+# labeling tokens from the next turn's header.
+
+LEADING_NEWLINE_NO_REASONING_BEFORE_REASONING = [
+    {"role": "user", "content": "Translate 'hello' to French."},
+    {"role": "assistant", "content": "\nBonjour."},
+    {"role": "user", "content": "Now translate 'goodbye'."},
+    {"role": "assistant", "content": "Au revoir.", "reasoning_content": "Simple translation."},
+]
+
+LEADING_DOUBLE_NEWLINE_TOOL_CHAIN = [
+    {"role": "user", "content": "What's the current BTC price?"},
+    {"role": "assistant", "content": "Let me look that up."},
+    {"role": "tool", "content": '{"price_usd": 67432.10, "change_24h": "+2.3%"}'},
+    {"role": "assistant", "content": "\n\nBitcoin is currently $67,432.10, up 2.3%."},
+    {"role": "user", "content": "Should I buy?"},
+    {"role": "assistant", "content": "I can't give financial advice.", "reasoning_content": "Must not provide investment recommendations."},
+]
+
+MULTIPLE_NO_REASONING_GROUPS_LEADING_WS = [
+    {"role": "user", "content": "What is 2+2?"},
+    {"role": "assistant", "content": "\n\nThe answer is 4."},
+    {"role": "user", "content": "Now explain why."},
+    {"role": "assistant", "content": "Addition is commutative.", "reasoning_content": "Thinking about commutativity."},
+    {"role": "user", "content": "What about 3+3?"},
+    {"role": "assistant", "content": "\n  The answer is 6."},
+    {"role": "user", "content": "Summarize everything."},
+    {"role": "assistant", "content": "We covered basic addition.", "reasoning_content": "Summarizing."},
+]
+
+ADJACENT_NO_REASONING_GROUPS_LEADING_WS = [
+    {"role": "user", "content": "Say hello."},
+    {"role": "assistant", "content": "\n\nHello there!"},
+    {"role": "user", "content": "Say goodbye."},
+    {"role": "assistant", "content": "\n  Goodbye!"},
+    {"role": "user", "content": "Now think about life."},
+    {"role": "assistant", "content": "Life is complex.", "reasoning_content": "Reflecting."},
+]
+
+MULTI_TURN_TOOL_CHAIN_MIDDLE_LEADING_WS = [
+    {"role": "user", "content": "Find the weather and convert to Fahrenheit."},
+    {"role": "assistant", "content": "Let me check the weather."},
+    {"role": "tool", "content": '{"temp_c": 20, "condition": "sunny"}'},
+    {"role": "assistant", "content": "\n\nNow converting 20C to Fahrenheit."},
+    {"role": "tool", "content": '{"temp_f": 68}'},
+    {"role": "assistant", "content": "\n It is 68F and sunny."},
+    {"role": "user", "content": "Thanks, what about tomorrow?"},
+    {"role": "assistant", "content": "No forecast data.", "reasoning_content": "No tool for forecasts."},
+]
+
+LEADING_TABS_AND_SPACES = [
+    {"role": "user", "content": "Help me write a config."},
+    {"role": "assistant", "content": "What format?", "reasoning_content": "Need to clarify."},
+    {"role": "user", "content": "YAML please."},
+    {"role": "assistant", "content": "\t  name: app\n\t  port: 8080"},
+    {"role": "user", "content": "Add a host field."},
+    {"role": "assistant", "content": "name: app\nport: 8080\nhost: localhost", "reasoning_content": "Adding host."},
+]
+
+REASONING_ONLY_WHITESPACE_WITH_LEADING_WS = [
+    {"role": "user", "content": "Solve x^2=4."},
+    {"role": "assistant", "content": "\n  x = 2 or x = -2", "reasoning_content": "  \n  "},
+    {"role": "user", "content": "Show your work."},
+    {"role": "assistant", "content": "x^2=4 means x=+-2.", "reasoning_content": "Factor or sqrt."},
+]
+
+CONTENT_WITH_THINK_TAGS = [
+    {"role": "user", "content": "How does the tokenizer handle <think> and </think> tags?"},
+    {"role": "assistant", "content": "They are special tokens with IDs 100274 and 100275.", "reasoning_content": "User asking about tokenizer internals."},
+    {"role": "user", "content": "What happens if </think> appears in the middle of content?"},
+    {"role": "assistant", "content": "The tokenizer encodes <think> and </think> atomically regardless of position."},
+]
+
+CONTENT_WITH_IM_TAGS = [
+    {"role": "user", "content": "Show me how <|im_start|> and <|im_end|> delimit messages."},
+    {"role": "assistant", "content": "Each message is wrapped: <|im_start|>role\\ncontent<|im_end|>\\n", "reasoning_content": "Explaining chat template structure."},
+    {"role": "user", "content": "Can <|im_end|> appear inside content?"},
+    {"role": "assistant", "content": "Yes, but it will be tokenized as the special token, which may break parsing."},
+]
+
+CONTENT_WITH_ALL_SPECIAL_TOKENS = [
+    {"role": "user", "content": "Write a function that strips <think></think> and <|im_start|>/<|im_end|> from text."},
+    {"role": "assistant", "content": "import re\ndef strip_special(text):\n    return re.sub(r'<think>|</think>|<\\|im_start\\|>|<\\|im_end\\|>', '', text)", "reasoning_content": "Writing a regex to remove all four special tokens."},
+    {"role": "user", "content": "Now test it with input containing <think>hello</think>."},
+    {"role": "assistant", "content": "strip_special('<think>hello</think>') returns 'hello'."},
+]
+
 ALL_CONVERSATIONS = [
     ("single_turn_reasoning", SINGLE_TURN_REASONING),
     ("single_turn_no_reasoning", SINGLE_TURN_NO_REASONING),
@@ -118,4 +212,14 @@ ALL_CONVERSATIONS = [
     ("multi_step_agent_no_trailing_user", MULTI_STEP_AGENT_NO_TRAILING_USER),
     ("no_reasoning_tool_chain_no_trailing_user", NO_REASONING_TOOL_CHAIN_NO_TRAILING_USER),
     ("mixed_reasoning_no_trailing_user", MIXED_REASONING_NO_TRAILING_USER),
+    ("leading_newline_no_reasoning_before_reasoning", LEADING_NEWLINE_NO_REASONING_BEFORE_REASONING),
+    ("leading_double_newline_tool_chain", LEADING_DOUBLE_NEWLINE_TOOL_CHAIN),
+    ("multiple_no_reasoning_groups_leading_ws", MULTIPLE_NO_REASONING_GROUPS_LEADING_WS),
+    ("adjacent_no_reasoning_groups_leading_ws", ADJACENT_NO_REASONING_GROUPS_LEADING_WS),
+    ("multi_turn_tool_chain_middle_leading_ws", MULTI_TURN_TOOL_CHAIN_MIDDLE_LEADING_WS),
+    ("leading_tabs_and_spaces", LEADING_TABS_AND_SPACES),
+    ("reasoning_only_whitespace_with_leading_ws", REASONING_ONLY_WHITESPACE_WITH_LEADING_WS),
+    ("content_with_think_tags", CONTENT_WITH_THINK_TAGS),
+    ("content_with_im_tags", CONTENT_WITH_IM_TAGS),
+    ("content_with_all_special_tokens", CONTENT_WITH_ALL_SPECIAL_TOKENS),
 ]
