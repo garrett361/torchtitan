@@ -329,6 +329,32 @@ class TestChatTemplate(unittest.TestCase):
         )
         self.assertNotIn("<think></think>", rendered)
 
+    def test_think_in_user_content_harmless(self):
+        """<think> in user content has no structural effect — rendered inside a user block."""
+        msgs = [
+            {"role": "user", "content": "What does <think> do?"},
+            {"role": "assistant", "content": "It opens reasoning.", "reasoning_content": "Explaining."},
+        ]
+        rendered = self._tokenizer.apply_chat_template(
+            msgs, truncate_history_thinking=True
+        )
+        self.assertIn("<|im_start|>user\nWhat does <think> do?<|im_end|>", rendered)
+        self.assertIn("<think>\nExplaining.\n</think>\nIt opens reasoning.", rendered)
+
+    def test_think_in_tool_content_harmless(self):
+        """<think> in tool response has no structural effect — tool is rendered as a user block."""
+        msgs = [
+            {"role": "user", "content": "Look it up."},
+            {"role": "assistant", "content": "Calling tool.", "reasoning_content": "Will search."},
+            {"role": "tool", "content": "Result: <think> is token 100274, </think> is 100275."},
+            {"role": "assistant", "content": "Found it.", "reasoning_content": "Got the IDs."},
+        ]
+        rendered = self._tokenizer.apply_chat_template(
+            msgs, truncate_history_thinking=True
+        )
+        self.assertIn("<think> is token 100274, </think> is 100275.", rendered)
+        self.assertIn("<think>\nGot the IDs.\n</think>\nFound it.", rendered)
+
     def test_think_in_content_truncation_corrupts(self):
         """Truncation path drops content before the last </think>."""
         msgs = [

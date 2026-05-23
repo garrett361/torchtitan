@@ -107,5 +107,32 @@ class TestStrategyPairwise:
         )
 
 
+@pytest.mark.parametrize("name,msgs", ALL_CONVERSATIONS, ids=[c[0] for c in ALL_CONVERSATIONS])
+class TestLabelStructure:
+    """Structural invariants on label tensors across all strategies."""
+
+    def test_shifted_label_invariant(self, name, msgs, full_thinking):
+        """labels[i] == input_ids[i+1] for every non-IGNORE position."""
+        result = full_thinking._tokenize_one(msgs)
+        input_ids = result["input_ids"]
+        labels = result["labels"]
+        full_tokens = input_ids + [full_thinking.tokenizer.eos_id]
+        for i, lbl in enumerate(labels):
+            if lbl != IGNORE_INDEX:
+                assert lbl == full_tokens[i + 1], (
+                    f"Position {i}: label={lbl}, expected={full_tokens[i + 1]}"
+                )
+
+    def test_intermediate_turn_predicts_im_end(self, name, msgs, full_thinking):
+        """Intermediate assistant turns include <|im_end|> as a prediction target."""
+        asst_count = sum(1 for m in msgs if m["role"] == "assistant")
+        if asst_count < 2:
+            pytest.skip("Single-turn — no intermediate turns")
+        result = full_thinking._tokenize_one(msgs)
+        labels = result["labels"]
+        im_end_id = full_thinking.tokenizer.token_to_id("<|im_end|>")
+        assert im_end_id in labels, "<|im_end|> must appear as a label target"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

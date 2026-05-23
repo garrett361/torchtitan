@@ -463,5 +463,63 @@ class TestSpecialTokenValidation(unittest.TestCase):
         _ = strategy.tokenizer
 
 
+@unittest.skipUnless(_HF_ASSETS_PATH, "HF_ASSETS_PATH not set")
+class TestMessageValidation(unittest.TestCase):
+    """Verify _validate_messages rejects structurally invalid conversations."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.strategy = TruncateEveryTurnStrategy(_HF_ASSETS_PATH)
+
+    def _assert_dropped(self, messages):
+        result = self.strategy({"messages": [messages]})
+        self.assertEqual(result["input_ids"], [], "Malformed sample should be dropped")
+
+    def test_empty_messages_dropped(self):
+        self._assert_dropped([])
+
+    def test_no_assistant_turn_dropped(self):
+        self._assert_dropped([{"role": "user", "content": "Q"}])
+
+    def test_first_role_tool_dropped(self):
+        self._assert_dropped([
+            {"role": "tool", "content": "result"},
+            {"role": "assistant", "content": "A"},
+        ])
+
+    def test_system_not_first_dropped(self):
+        self._assert_dropped([
+            {"role": "user", "content": "Q"},
+            {"role": "system", "content": "S"},
+            {"role": "assistant", "content": "A"},
+        ])
+
+    def test_trailing_tool_message_dropped(self):
+        base = [
+            {"role": "user", "content": "Q"},
+            {"role": "assistant", "content": "A"},
+        ]
+        with_trailing = base + [{"role": "tool", "content": "RESULT"}]
+        result_base = self.strategy({"messages": [base]})
+        result_trailing = self.strategy({"messages": [with_trailing]})
+        self.assertEqual(result_base["input_ids"], result_trailing["input_ids"])
+        self.assertEqual(result_base["labels"], result_trailing["labels"])
+
+    def test_empty_reasoning_content_treated_as_no_reasoning(self):
+        """reasoning_content: '' is equivalent to no reasoning_content."""
+        no_rc = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello!"},
+        ]
+        empty_rc = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello!", "reasoning_content": ""},
+        ]
+        result_no_rc = self.strategy({"messages": [no_rc]})
+        result_empty_rc = self.strategy({"messages": [empty_rc]})
+        self.assertEqual(result_no_rc["input_ids"], result_empty_rc["input_ids"])
+        self.assertEqual(result_no_rc["labels"], result_empty_rc["labels"])
+
+
 if __name__ == "__main__":
     unittest.main()

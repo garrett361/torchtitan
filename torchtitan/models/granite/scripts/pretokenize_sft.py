@@ -708,7 +708,8 @@ def main() -> None:
         default=[],
         help=(
             "Optional token groups to reject from message content. "
-            "<think>/</think> rejection is always active (correctness invariant)."
+            "<think>/</think> rejection in assistant content is always active "
+            "(correctness invariant); user/tool content is unaffected."
         ),
     )
     args = parser.parse_args()

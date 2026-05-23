@@ -13,11 +13,12 @@ logger = logging.getLogger(__name__)
 
 _VALID_MESSAGE_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
-# Think tags in content are a correctness invariant, not an optional filter: the chat
-# template's heuristic (`'<think>' not in content`) skips structural <think></think>
-# and the truncation path (`c.split('</think>')[-1]`) corrupts content. Per-turn encode
-# boundary detection assumes exactly one structural <think> per assistant turn.
-# Rejection is unconditional via _MANDATORY_FORBIDDEN_TOKENS below.
+# Think tags in assistant content are a correctness invariant, not an optional filter:
+# the chat template's heuristic (`'<think>' not in content`) skips structural
+# <think></think> and the truncation path (`c.split('</think>')[-1]`) corrupts content.
+# Per-turn encode boundary detection assumes exactly one structural <think> per assistant
+# turn. Rejection is unconditional via _MANDATORY_FORBIDDEN_TOKENS below.
+# User/tool messages are unaffected — they render verbatim into <|im_start|>user blocks.
 #
 # start_end is an optional quality filter for data-cleaning failures (code snippets etc).
 REJECT_TOKEN_GROUPS: dict[str, tuple[str, ...]] = {
@@ -232,6 +233,17 @@ def _tokenize_all_turns(
     )
     last_asst_idx = len(effective) - 1
 
+    if chat_template_kwargs.get("truncate_history_thinking", False):
+        for j in range(last_asst_idx):
+            if (
+                effective[j]["role"] == "assistant"
+                and effective[j].get("reasoning_content", "").strip()
+            ):
+                raise ValueError(
+                    "_tokenize_all_turns with truncate_history_thinking=True "
+                    "requires no historical turns with reasoning_content"
+                )
+
     boundaries: list[tuple[int, int | None]] = []
     turn_think_positions: list[int] = []
 
@@ -349,9 +361,21 @@ class TokenizationStrategy(ABC):
         ...
 
     def _check_forbidden_content(self, messages: list[dict]) -> None:
-        """Raise ValueError if any message contains forbidden tokens in content."""
-        check_tokens = _MANDATORY_FORBIDDEN_TOKENS + self.forbidden_content_tokens
+        """Raise ValueError if any message contains forbidden tokens in content.
+
+        Mandatory think-token rejection applies only to assistant messages.
+        The template's think heuristics (``'<think>' not in content`` prefix
+        skip and ``c.split('</think>')[-1]`` truncation) only execute inside
+        the ``message.role == "assistant"`` branch of the Jinja template.
+        User and tool messages are emitted verbatim into <|im_start|>user
+        blocks with no content inspection, so <think>/</think> in those
+        messages is harmless literal text.
+        """
         for i, msg in enumerate(messages):
+            if msg["role"] == "assistant":
+                check_tokens = _MANDATORY_FORBIDDEN_TOKENS + self.forbidden_content_tokens
+            else:
+                check_tokens = self.forbidden_content_tokens
             for field in ("content", "reasoning_content"):
                 text = msg.get(field)
                 if not isinstance(text, str):
