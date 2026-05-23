@@ -28,6 +28,7 @@ import multiprocessing
 import os
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
 from typing import Any
 
@@ -116,7 +117,7 @@ def _completed_stems(shards_dir: Path) -> set[str]:
 
 def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     """Write JSON via tmp+rename so concurrent readers never see a partial file."""
-    tmp = path.with_suffix(".tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
     tmp.rename(path)
@@ -537,62 +538,102 @@ def _shuffle_and_reshard(
         "[rank %d] writing %d/%d shuffled shards", rank, len(my_shards), num_shards
     )
 
-    for i in my_shards:
-        shard_name = f"shard_{i:04d}"
-        stats_path = shuffled_dir / f"{shard_name}_stats.json"
-        if stats_path.exists():
-            with open(stats_path) as f:
-                existing = json.load(f)
-            if "error" not in existing:
-                continue
-            logger.warning(
-                "[rank %d] Shard %s previously failed (%s); retrying",
-                rank,
-                shard_name,
-                existing["error"],
-            )
-            stats_path.unlink()
-            shard_dir = shuffled_dir / shard_name
-            if shard_dir.exists():
-                shutil.rmtree(shard_dir)
+    def _write_shard(shard: Dataset, shard_name: str, stats_path: Path) -> None:
+        """Write a single shuffled shard and its stats to disk."""
+        shard.save_to_disk(str(shuffled_dir / shard_name))
+        n_tokens_arr = np.array(shard["n_tokens"], dtype=np.int64)
+        labels_flat = shard.data.column("labels").combine_chunks().flatten()
+        total_trained = int(pc.sum(pc.not_equal(labels_flat, -100)).as_py())
+        stats: dict[str, Any] = {
+            "shard_stem": shard_name,
+            "n_examples": len(shard),
+            "total_tokens": int(n_tokens_arr.sum()),
+            "total_trained_tokens": total_trained,
+        }
+        _write_json_atomic(stats_path, stats)
 
+    pending_future: Future | None = None
+    pending_shard_name: str | None = None
+    pending_stats_path: Path | None = None
+
+    def _drain_pending() -> None:
+        """Wait for in-flight write; log success or record error stats."""
+        nonlocal pending_future, pending_shard_name, pending_stats_path
+        if pending_future is None:
+            return
         try:
-            start = i * examples_per_shard
-            end = (
-                (start + examples_per_shard) if i < num_shards - 1 else total_examples
-            )
-            indices = permutation[start:end].tolist()
-            shard = full_dataset.select(indices).flatten_indices()
-            shard.save_to_disk(str(shuffled_dir / shard_name))
-
-            n_tokens_arr = np.array(shard["n_tokens"], dtype=np.int64)
-            labels_flat = shard.data.column("labels").combine_chunks().flatten()
-            total_trained = int(pc.sum(pc.not_equal(labels_flat, -100)).as_py())
-            stats: dict[str, Any] = {
-                "shard_stem": shard_name,
-                "n_examples": len(shard),
-                "total_tokens": int(n_tokens_arr.sum()),
-                "total_trained_tokens": total_trained,
-            }
-            _write_json_atomic(stats_path, stats)
-
-            logger.info(
-                "[rank %d] Wrote shuffled shard %d/%d: %s (%d examples)",
-                rank, i + 1, num_shards, shard_name, len(shard),
-            )
+            pending_future.result()
+            logger.info("[rank %d] Wrote shuffled shard: %s", rank, pending_shard_name)
         except Exception as e:
             logger.error(
-                "[rank %d] shuffle shard %s crashed: %s",
-                rank, shard_name, e, exc_info=True,
+                "[rank %d] shuffle shard %s write failed: %s",
+                rank, pending_shard_name, e, exc_info=True,
             )
             error_stats: dict[str, Any] = {
-                "shard_stem": shard_name,
+                "shard_stem": pending_shard_name,
                 "n_examples": 0,
                 "total_tokens": 0,
                 "total_trained_tokens": 0,
                 "error": f"{type(e).__name__}: {e}",
             }
-            _write_json_atomic(stats_path, error_stats)
+            _write_json_atomic(pending_stats_path, error_stats)
+        finally:
+            pending_future = None
+            pending_shard_name = None
+            pending_stats_path = None
+
+    with ThreadPoolExecutor(max_workers=1) as io_pool:
+        for i in my_shards:
+            shard_name = f"shard_{i:04d}"
+            stats_path = shuffled_dir / f"{shard_name}_stats.json"
+            if stats_path.exists():
+                with open(stats_path) as f:
+                    existing = json.load(f)
+                if "error" not in existing:
+                    continue
+                logger.warning(
+                    "[rank %d] Shard %s previously failed (%s); retrying",
+                    rank,
+                    shard_name,
+                    existing["error"],
+                )
+                stats_path.unlink()
+                shard_dir = shuffled_dir / shard_name
+                if shard_dir.exists():
+                    shutil.rmtree(shard_dir)
+
+            _drain_pending()
+
+            try:
+                start = i * examples_per_shard
+                end = (
+                    (start + examples_per_shard)
+                    if i < num_shards - 1
+                    else total_examples
+                )
+                indices = permutation[start:end]
+                shard = full_dataset.select(indices)
+
+                pending_shard_name = shard_name
+                pending_stats_path = stats_path
+                pending_future = io_pool.submit(
+                    _write_shard, shard, shard_name, stats_path
+                )
+            except Exception as e:
+                logger.error(
+                    "[rank %d] shuffle shard %s crashed: %s",
+                    rank, shard_name, e, exc_info=True,
+                )
+                error_stats: dict[str, Any] = {
+                    "shard_stem": shard_name,
+                    "n_examples": 0,
+                    "total_tokens": 0,
+                    "total_trained_tokens": 0,
+                    "error": f"{type(e).__name__}: {e}",
+                }
+                _write_json_atomic(stats_path, error_stats)
+
+        _drain_pending()
 
     elapsed = time.monotonic() - t0
     logger.info("[rank %d] Shuffle write complete in %.1fs", rank, elapsed)
