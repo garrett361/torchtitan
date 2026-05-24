@@ -542,7 +542,7 @@ def _shuffle_and_reshard(
         """Write a single shuffled shard and its stats to disk."""
         shard.save_to_disk(str(shuffled_dir / shard_name))
         n_tokens_arr = np.array(shard["n_tokens"], dtype=np.int64)
-        labels_flat = shard.data.column("labels").combine_chunks().flatten()
+        labels_flat = pc.list_flatten(shard.data.column("labels"))
         total_trained = int(pc.sum(pc.not_equal(labels_flat, -100)).as_py())
         stats: dict[str, Any] = {
             "shard_stem": shard_name,
@@ -598,9 +598,10 @@ def _shuffle_and_reshard(
                     existing["error"],
                 )
                 stats_path.unlink()
-                shard_dir = shuffled_dir / shard_name
-                if shard_dir.exists():
-                    shutil.rmtree(shard_dir)
+
+            shard_dir = shuffled_dir / shard_name
+            if shard_dir.exists():
+                shutil.rmtree(shard_dir)
 
             _drain_pending()
 
