@@ -853,7 +853,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # Process each microbatch: move to GPU, forward/backward, then free
         self._rank_local_valid_tokens_per_step = 0
         accumulated_losses = []
-        for input_dict, labels in microbatches:
+        for i, (input_dict, labels) in enumerate(microbatches):
+            if parallel_dims.dp_replicate_enabled:
+                is_last = (i == len(microbatches) - 1)
+                for model in self.model_parts:
+                    model.set_requires_all_reduce(is_last)
+
             # Move tensors to GPU
             for k, v in input_dict.items():
                 if isinstance(v, torch.Tensor):
