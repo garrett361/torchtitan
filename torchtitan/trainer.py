@@ -881,8 +881,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             ep_enabled=parallel_dims.ep_enabled,
         )
         self.checkpointer.maybe_wait_for_staging()
-        self.optimizers.step()
-        self.lr_schedulers.step()
+        # NOTE: does not protect OptimizersInBackwardContainer (step fires in bwd hooks)
+        if torch.isfinite(grad_norm):
+            self.optimizers.step()
+            self.lr_schedulers.step()
+        else:
+            logger.warning(
+                f"Step {self.step}: non-finite grad_norm ({grad_norm.item():.4g}), "
+                "skipping optimizer step."
+            )
 
         # Reduce the data collected over gradient accumulation steps.
         loss = torch.sum(torch.stack(accumulated_losses))
