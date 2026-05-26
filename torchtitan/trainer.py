@@ -1012,6 +1012,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self._cached_epochs = epochs_logged
             if epochs_logged is not None:
                 extra_metrics["data/epochs"] = epochs_logged
+            dataset_mean_length = raw.get("dataset_mean_length")
+            if dataset_mean_length and n_examples > 0:
+                extra_metrics["dataset/bias_length_ratio"] = (
+                    n_total / n_examples / dataset_mean_length
+                )
         self.metrics_processor.log(
             self.step,
             global_avg_loss,

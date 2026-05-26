@@ -253,6 +253,24 @@ class PreTokenizedDataset(IterableDataset, Stateful):
         self._expose_all_costs: bool = False
         self._last_all_batch_costs: list[int] = []
 
+        self._precompute_dataset_stats()
+
+    # --- Dataset baseline statistics ---
+
+    def _precompute_dataset_stats(self) -> None:
+        """Compute population mean length from Arrow metadata.
+
+        This is the unbiased baseline for detecting packing strategy bias.
+        """
+        all_lengths = self._original_data.data.column("n_tokens").to_numpy()
+        valid = all_lengths[all_lengths <= self.seq_len].astype(np.int64)
+        if len(valid) == 0:
+            self._dataset_mean_length = 0.0
+            return
+        self._dataset_mean_length: float = float(valid.mean())
+        # TODO: Track dataset trained-token and cost baselines once
+        # n_trained_tokens is a scalar column in the Arrow schema.
+
     # --- Abstract primitives (subclass contract) ---
 
     _arrow_list_columns: tuple[str, ...] = ()
@@ -993,6 +1011,7 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
             "n_trained_tokens": self._consumed_n_trained_tokens,
             "n_examples_packed": self._consumed_n_examples_packed,
             "epochs": self._consumed_n_examples_packed / n_dataset,
+            "dataset_mean_length": self.dataset._dataset_mean_length,
         }
 
     def state_dict(self) -> dict[str, Any]:
