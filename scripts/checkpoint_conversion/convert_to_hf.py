@@ -10,6 +10,7 @@ from pathlib import Path
 
 import torch
 import torch.distributed.checkpoint as dcp
+import torchao.float8.fsdp_utils  # noqa: F401 — registers WeightWithDynamicFloat8CastTensor as safe global for DCP load
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config import TORCH_DTYPE_MAP
