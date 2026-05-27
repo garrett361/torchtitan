@@ -11,6 +11,7 @@ Usage:
 import json
 from pathlib import Path
 
+import numpy as np
 from datasets import Dataset
 
 EOS_ID = 2003  # tests/assets/tokenizer eos_id
@@ -59,13 +60,24 @@ def _write_single_shard_asset() -> None:
     examples = []
     for input_ids, labels in _EXAMPLES:
         assert len(input_ids) == len(labels), "input_ids / labels length mismatch"
-        examples.append({"input_ids": input_ids, "labels": labels, "n_tokens": len(input_ids)})
+        n = len(input_ids)
+        train_tokens = sum(1 for lbl in labels if lbl != IGNORE_INDEX)
+        attn_cost = n * (n + 1) // 2
+        examples.append({
+            "input_ids": input_ids,
+            "labels": labels,
+            "n_tokens": n,
+            "train_tokens": train_tokens,
+            "attn_cost": attn_cost,
+        })
 
     ds = Dataset.from_dict(
         {
             "input_ids": [ex["input_ids"] for ex in examples],
             "labels": [ex["labels"] for ex in examples],
             "n_tokens": [ex["n_tokens"] for ex in examples],
+            "train_tokens": [ex["train_tokens"] for ex in examples],
+            "attn_cost": [ex["attn_cost"] for ex in examples],
         }
     )
     shard_name = "shard_0000"
@@ -170,6 +182,11 @@ def _write_multishard_asset() -> None:
         input_ids_list = [inp for inp, _ in examples]
         labels_list = [lbl for _, lbl in examples]
         n_tokens_list = [len(inp) for inp in input_ids_list]
+        train_tokens_list = [
+            sum(1 for lbl in labels if lbl != IGNORE_INDEX)
+            for _, labels in examples
+        ]
+        attn_cost_list = [n * (n + 1) // 2 for n in n_tokens_list]
         all_n_tokens.extend(n_tokens_list)
 
         for inp, lbl in examples:
@@ -180,12 +197,11 @@ def _write_multishard_asset() -> None:
                 "input_ids": input_ids_list,
                 "labels": labels_list,
                 "n_tokens": n_tokens_list,
+                "train_tokens": train_tokens_list,
+                "attn_cost": attn_cost_list,
             }
         )
         ds.save_to_disk(str(shards_dir / shard_name))
-
-        # Write stats sidecar (required for shuffle resumability)
-        import numpy as np
 
         n_tokens_arr = np.array(n_tokens_list, dtype=np.int64)
         stats = {
@@ -193,10 +209,8 @@ def _write_multishard_asset() -> None:
             "n_examples": len(examples),
             "n_dropped": 0,
             "total_tokens": int(n_tokens_arr.sum()),
-            "total_trained_tokens": sum(
-                sum(1 for lbl in labels if lbl != IGNORE_INDEX)
-                for _, labels in examples
-            ),
+            "total_trained_tokens": sum(train_tokens_list),
+            "total_attn_cost": sum(attn_cost_list),
         }
         with open(shards_dir / f"{shard_name}_stats.json", "w") as f:
             json.dump(stats, f, indent=2)
@@ -209,6 +223,7 @@ def _write_multishard_asset() -> None:
         for shard in shard_examples
         for _, labels in shard
     )
+    total_attn_cost = sum(n * (n + 1) // 2 for n in all_n_tokens)
 
     manifest = {
         "version": 1,
@@ -233,6 +248,7 @@ def _write_multishard_asset() -> None:
             "examples_dropped": 0,
             "total_tokens": total_tokens,
             "total_trained_tokens": trained_tokens,
+            "total_attn_cost": total_attn_cost,
             "tokens_per_example": round(total_tokens / total_examples, 1),
             "trained_tokens_per_example": round(trained_tokens / total_examples, 1),
         },

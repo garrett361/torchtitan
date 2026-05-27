@@ -3,5 +3,6 @@
   "n_examples": 4,
   "n_dropped": 0,
   "total_tokens": 20,
-  "total_trained_tokens": 9
+  "total_trained_tokens": 9,
+  "total_attn_cost": 61
 }

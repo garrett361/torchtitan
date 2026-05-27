@@ -27,6 +27,7 @@
     "examples_dropped": 0,
     "total_tokens": 59,
     "total_trained_tokens": 26,
+    "total_attn_cost": 180,
     "tokens_per_example": 4.9,
     "trained_tokens_per_example": 2.2
   },

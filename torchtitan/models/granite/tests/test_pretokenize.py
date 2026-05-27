@@ -1177,5 +1177,156 @@ class TestPyarrowTotalTrained(unittest.TestCase):
         self.assertEqual(pyarrow_total, 7)
 
 
+class TestVectorizedStats(unittest.TestCase):
+    """Tests for _compute_train_tokens and _compute_attn_cost vectorized helpers."""
+
+    def _make_dataset(self, columns: dict) -> "Dataset":
+        import pyarrow as pa
+        from datasets import Dataset
+
+        arrays = {}
+        for name, values in columns.items():
+            if name in ("suffix_starts", "insertion_limits"):
+                arrays[name] = pa.array(values, type=pa.list_(pa.int32()))
+            else:
+                arrays[name] = pa.array(values)
+        return Dataset(pa.table(arrays))
+
+    def test_compute_train_tokens(self):
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _compute_train_tokens,
+        )
+
+        ds = self._make_dataset({
+            "labels": [
+                [-100, -100, 5, 6, 7],
+                [1, 2, 3],
+                [-100, -100, -100],
+                [10],
+            ],
+        })
+        result = _compute_train_tokens(ds)
+        np.testing.assert_array_equal(result, [3, 3, 0, 1])
+
+    def test_compute_train_tokens_all_masked(self):
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _compute_train_tokens,
+        )
+
+        ds = self._make_dataset({"labels": [[-100, -100], [-100]]})
+        result = _compute_train_tokens(ds)
+        np.testing.assert_array_equal(result, [0, 0])
+
+    def test_compute_attn_cost_simple(self):
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _compute_attn_cost,
+        )
+
+        ds = self._make_dataset({"n_tokens": [1, 4, 8, 16]})
+        result = _compute_attn_cost(ds, is_backbone_suffix=False)
+        np.testing.assert_array_equal(result, [1, 10, 36, 136])
+
+    def test_compute_attn_cost_backbone_suffix_no_suffixes(self):
+        """n=6, no suffixes → 6*7//2 = 21."""
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _compute_attn_cost,
+        )
+
+        ds = self._make_dataset({
+            "n_tokens": [6],
+            "suffix_starts": [[]],
+            "insertion_limits": [[]],
+        })
+        result = _compute_attn_cost(ds, is_backbone_suffix=True)
+        np.testing.assert_array_equal(result, [21])
+
+    def test_compute_attn_cost_backbone_suffix_single(self):
+        """B=4, one suffix len=3, ins_limit=2.
+
+        backbone: 4*5//2 = 10
+        suffix self: 3*4//2 = 6
+        suffix→backbone: 3*(2+1) = 9
+        total: 25
+        """
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _compute_attn_cost,
+        )
+
+        ds = self._make_dataset({
+            "n_tokens": [7],
+            "suffix_starts": [[4]],
+            "insertion_limits": [[2]],
+        })
+        result = _compute_attn_cost(ds, is_backbone_suffix=True)
+        np.testing.assert_array_equal(result, [25])
+
+    def test_compute_attn_cost_backbone_suffix_multiple(self):
+        """B=3, S1=2 (ins=1), S2=2 (ins=2).
+
+        backbone: 3*4//2 = 6
+        S1 self: 2*3//2 = 3, S1→backbone: 2*(1+1) = 4
+        S2 self: 2*3//2 = 3, S2→backbone: 2*(2+1) = 6
+        total: 22
+        """
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _compute_attn_cost,
+        )
+
+        ds = self._make_dataset({
+            "n_tokens": [7],
+            "suffix_starts": [[3, 5]],
+            "insertion_limits": [[1, 2]],
+        })
+        result = _compute_attn_cost(ds, is_backbone_suffix=True)
+        np.testing.assert_array_equal(result, [22])
+
+    def test_compute_attn_cost_backbone_suffix_mixed_batch(self):
+        """Batch with varying suffix counts: 0, 1, and 2 suffixes."""
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _compute_attn_cost,
+        )
+
+        ds = self._make_dataset({
+            "n_tokens": [6, 7, 7],
+            "suffix_starts": [[], [4], [3, 5]],
+            "insertion_limits": [[], [2], [1, 2]],
+        })
+        result = _compute_attn_cost(ds, is_backbone_suffix=True)
+        np.testing.assert_array_equal(result, [21, 25, 22])
+
+    def test_compute_attn_cost_backbone_suffix_zero_backbone(self):
+        """Suffix spanning entire sequence (backbone_len=0, ins_limit=0).
+
+        backbone: 0*1//2 = 0
+        suffix self: 5*6//2 = 15
+        suffix→backbone: 5*(0+1) = 5
+        total: 20
+        """
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _compute_attn_cost,
+        )
+
+        ds = self._make_dataset({
+            "n_tokens": [5],
+            "suffix_starts": [[0]],
+            "insertion_limits": [[0]],
+        })
+        result = _compute_attn_cost(ds, is_backbone_suffix=True)
+        np.testing.assert_array_equal(result, [20])
+
+    def test_compute_attn_cost_simple_large_values(self):
+        """Values large enough to overflow int32, verifying int64 dtype."""
+        from torchtitan.models.granite.scripts.pretokenize_sft import (
+            _compute_attn_cost,
+        )
+
+        ds = self._make_dataset({"n_tokens": [65536]})
+        result = _compute_attn_cost(ds, is_backbone_suffix=False)
+        expected = 65536 * 65537 // 2
+        self.assertGreater(expected, 2**31)
+        np.testing.assert_array_equal(result, [expected])
+        self.assertEqual(result.dtype, np.int64)
+
+
 if __name__ == "__main__":
     unittest.main()

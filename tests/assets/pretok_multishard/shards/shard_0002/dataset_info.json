@@ -19,6 +19,14 @@
     "n_tokens": {
       "dtype": "int64",
       "_type": "Value"
+    },
+    "train_tokens": {
+      "dtype": "int64",
+      "_type": "Value"
+    },
+    "attn_cost": {
+      "dtype": "int64",
+      "_type": "Value"
     }
   },
   "homepage": "",

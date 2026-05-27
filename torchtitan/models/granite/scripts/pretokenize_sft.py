@@ -45,6 +45,7 @@ from datasets import (
 
 from filelock import FileLock
 
+from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.models.granite.tokenization_strategies import (
     REJECT_TOKEN_GROUPS,
@@ -56,6 +57,56 @@ from torchtitan.models.granite.tokenization_strategies import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _compute_train_tokens(ds: Dataset) -> np.ndarray:
+    """Vectorized per-example count of unmasked labels."""
+    arr = ds.data.column("labels").combine_chunks()
+    offsets = arr.offsets.to_numpy().astype(np.int64)
+    flat = arr.flatten().to_numpy()
+    not_masked = (flat != IGNORE_INDEX).astype(np.int64)
+    cs = np.zeros(len(flat) + 1, dtype=np.int64)
+    np.cumsum(not_masked, out=cs[1:])
+    return cs[offsets[1:]] - cs[offsets[:-1]]
+
+
+def _compute_attn_cost(ds: Dataset, *, is_backbone_suffix: bool) -> np.ndarray:
+    """Vectorized per-example attention cost (sum of causal mask entries)."""
+    n_tokens_arr = np.array(ds["n_tokens"], dtype=np.int64)
+    if not is_backbone_suffix:
+        return n_tokens_arr * (n_tokens_arr + 1) // 2
+
+    ss_arr = ds.data.column("suffix_starts").combine_chunks()
+    il_arr = ds.data.column("insertion_limits").combine_chunks()
+    ss_offsets = ss_arr.offsets.to_numpy().astype(np.int64)
+    ss_flat = ss_arr.flatten().to_numpy().astype(np.int64)
+    il_flat = il_arr.flatten().to_numpy().astype(np.int64)
+
+    num_suffixes = ss_offsets[1:] - ss_offsets[:-1]
+    has_suffixes = num_suffixes > 0
+    n_examples = len(ds)
+
+    backbone_len = n_tokens_arr.copy()
+    backbone_len[has_suffixes] = ss_flat[ss_offsets[:-1][has_suffixes]]
+    backbone_cost = backbone_len * (backbone_len + 1) // 2
+
+    example_indices = np.repeat(np.arange(n_examples), num_suffixes)
+    is_last = np.zeros(len(ss_flat), dtype=bool)
+    is_last[ss_offsets[1:][has_suffixes] - 1] = True
+
+    s_end = np.empty(len(ss_flat), dtype=np.int64)
+    s_end[~is_last] = ss_flat[np.where(~is_last)[0] + 1]
+    s_end[is_last] = n_tokens_arr[example_indices[is_last]]
+
+    s_len = s_end - ss_flat
+    per_suffix_cost = s_len * (s_len + 1) // 2 + s_len * (il_flat + 1)
+
+    suffix_cs = np.zeros(len(per_suffix_cost) + 1, dtype=np.int64)
+    np.cumsum(per_suffix_cost, out=suffix_cs[1:])
+    suffix_total = suffix_cs[ss_offsets[1:]] - suffix_cs[ss_offsets[:-1]]
+
+    return backbone_cost + suffix_total
+
 
 _STRATEGIES: dict[str, type[TokenizationStrategy]] = {
     "truncate_last": TruncateLastStrategy,
@@ -187,6 +238,7 @@ def _process_file(
             "n_dropped": 0,
             "total_tokens": 0,
             "total_trained_tokens": 0,
+            "total_attn_cost": 0,
             "elapsed_seconds": 0.0,
             "examples_per_second": 0.0,
             "skipped": True,
@@ -247,6 +299,7 @@ def _tokenize_file(
             "n_dropped": n_dropped,
             "total_tokens": 0,
             "total_trained_tokens": 0,
+            "total_attn_cost": 0,
             "elapsed_seconds": round(elapsed, 2),
             "examples_per_second": 0.0,
             "skipped": True,
@@ -254,14 +307,20 @@ def _tokenize_file(
         _write_json_atomic(stats_path, stats)
         return
 
+    is_backbone_suffix = isinstance(strategy, BackboneSuffixStrategy)
+    train_tokens_arr = _compute_train_tokens(ds)
+    attn_cost_arr = _compute_attn_cost(ds, is_backbone_suffix=is_backbone_suffix)
+    ds = ds.add_column("train_tokens", pa.array(train_tokens_arr, type=pa.int64()))
+    ds = ds.add_column("attn_cost", pa.array(attn_cost_arr, type=pa.int64()))
+
     ds.save_to_disk(str(final_path))
     elapsed = time.monotonic() - t0
 
     n_examples = len(ds)
     n_tokens_arr = np.array(ds["n_tokens"], dtype=np.int64)
     total_tokens = int(n_tokens_arr.sum())
-    labels_flat = pc.list_flatten(ds.data.column("labels"))
-    total_trained = int(pc.sum(pc.not_equal(labels_flat, -100)).as_py())
+    total_trained = int(train_tokens_arr.sum())
+    total_attn_cost = int(attn_cost_arr.sum())
 
     stats: dict[str, Any] = {
         "input_file": str(input_file.relative_to(input_dir)),
@@ -271,6 +330,7 @@ def _tokenize_file(
         "n_dropped": n_dropped,
         "total_tokens": total_tokens,
         "total_trained_tokens": total_trained,
+        "total_attn_cost": total_attn_cost,
         "elapsed_seconds": round(elapsed, 2),
         "examples_per_second": round(n_examples / max(elapsed, 1e-6), 1),
     }
@@ -313,6 +373,7 @@ def _write_manifest(
     total_dropped = sum(s["n_dropped"] for s in all_stats)
     total_tokens = sum(s["total_tokens"] for s in all_stats)
     total_trained = sum(s["total_trained_tokens"] for s in all_stats)
+    total_attn_cost = sum(s["total_attn_cost"] for s in all_stats)
 
     completed_shards = sorted(
         d.name
@@ -325,20 +386,26 @@ def _write_manifest(
     if jinja_path.exists():
         chat_template_sha256 = _sha256_file(str(jinja_path))
 
-    # Compute length distribution stats from the concatenated shards
     all_n_tokens = []
+    all_train_tokens = []
+    all_attn_cost = []
     for shard_name in completed_shards:
         shard_ds = load_from_disk(str(shards_dir / shard_name))
         all_n_tokens.extend(shard_ds["n_tokens"])
+        all_train_tokens.extend(shard_ds["train_tokens"])
+        all_attn_cost.extend(shard_ds["attn_cost"])
 
     if total_examples > 0:
         n_tokens_arr = np.array(all_n_tokens, dtype=np.int64)
+        train_tokens_arr = np.array(all_train_tokens, dtype=np.int64)
+        attn_cost_arr = np.array(all_attn_cost, dtype=np.int64)
         stats_block: dict[str, Any] = {
             "total_input_conversations": total_input_conversations,
             "total_examples": total_examples,
             "examples_dropped": total_dropped,
             "total_tokens": total_tokens,
             "total_trained_tokens": total_trained,
+            "total_attn_cost": total_attn_cost,
             "tokens_per_example": round(total_tokens / total_examples, 1),
             "trained_tokens_per_example": round(total_trained / total_examples, 1),
             "trained_to_total_tokens_ratio": total_trained / total_tokens,
@@ -351,6 +418,22 @@ def _write_manifest(
             "std": round(float(n_tokens_arr.std()), 1),
             "p95": int(np.percentile(n_tokens_arr, 95)),
         }
+        train_tokens_stats_block: dict[str, Any] = {
+            "min": int(train_tokens_arr.min()),
+            "max": int(train_tokens_arr.max()),
+            "mean": round(float(train_tokens_arr.mean()), 1),
+            "median": int(np.median(train_tokens_arr)),
+            "std": round(float(train_tokens_arr.std()), 1),
+            "p95": int(np.percentile(train_tokens_arr, 95)),
+        }
+        attn_cost_stats_block: dict[str, Any] = {
+            "min": int(attn_cost_arr.min()),
+            "max": int(attn_cost_arr.max()),
+            "mean": round(float(attn_cost_arr.mean()), 1),
+            "median": int(np.median(attn_cost_arr)),
+            "std": round(float(attn_cost_arr.std()), 1),
+            "p95": int(np.percentile(attn_cost_arr, 95)),
+        }
     else:
         stats_block = {
             "total_input_conversations": total_input_conversations,
@@ -358,11 +441,14 @@ def _write_manifest(
             "examples_dropped": total_dropped,
             "total_tokens": 0,
             "total_trained_tokens": 0,
+            "total_attn_cost": 0,
             "tokens_per_example": 0.0,
             "trained_tokens_per_example": 0.0,
             "trained_to_total_tokens_ratio": 0.0,
         }
         length_stats_block = {}
+        train_tokens_stats_block = {}
+        attn_cost_stats_block = {}
 
     manifest: dict[str, Any] = {
         "version": 1,
@@ -384,6 +470,8 @@ def _write_manifest(
         },
         "stats": stats_block,
         "length_stats": length_stats_block,
+        "train_tokens_stats": train_tokens_stats_block,
+        "attn_cost_stats": attn_cost_stats_block,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "input_dir": str(input_dir),
     }
@@ -542,13 +630,14 @@ def _shuffle_and_reshard(
         """Write a single shuffled shard and its stats to disk."""
         shard.save_to_disk(str(shuffled_dir / shard_name))
         n_tokens_arr = np.array(shard["n_tokens"], dtype=np.int64)
-        labels_flat = pc.list_flatten(shard.data.column("labels"))
-        total_trained = int(pc.sum(pc.not_equal(labels_flat, -100)).as_py())
+        train_tokens_arr = np.array(shard["train_tokens"], dtype=np.int64)
+        attn_cost_arr = np.array(shard["attn_cost"], dtype=np.int64)
         stats: dict[str, Any] = {
             "shard_stem": shard_name,
             "n_examples": len(shard),
             "total_tokens": int(n_tokens_arr.sum()),
-            "total_trained_tokens": total_trained,
+            "total_trained_tokens": int(train_tokens_arr.sum()),
+            "total_attn_cost": int(attn_cost_arr.sum()),
         }
         _write_json_atomic(stats_path, stats)
 
@@ -574,6 +663,7 @@ def _shuffle_and_reshard(
                 "n_examples": 0,
                 "total_tokens": 0,
                 "total_trained_tokens": 0,
+                "total_attn_cost": 0,
                 "error": f"{type(e).__name__}: {e}",
             }
             _write_json_atomic(pending_stats_path, error_stats)
@@ -630,6 +720,7 @@ def _shuffle_and_reshard(
                     "n_examples": 0,
                     "total_tokens": 0,
                     "total_trained_tokens": 0,
+                    "total_attn_cost": 0,
                     "error": f"{type(e).__name__}: {e}",
                 }
                 _write_json_atomic(stats_path, error_stats)
