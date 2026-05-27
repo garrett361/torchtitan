@@ -774,14 +774,18 @@ def main() -> None:
 
     num_cpus: int = args.num_cpus or (multiprocessing.cpu_count() // 2)
 
-    # Exclude output dirs from prior runs (identified by run_config.json) and
-    # the current run's output_dir (which may not have run_config.json yet).
+    # Exclude output dirs from prior runs (identified by run_config.json),
+    # the current run's output_dir, and any removed_examples/ dirs from filtering.
     pretok_dirs = {p.parent for p in input_dir.rglob(_RUN_CONFIG_FILENAME)}
     pretok_dirs.add(output_dir)
+    removed_dirs = {p for p in input_dir.rglob("removed_examples") if p.is_dir()}
+    if removed_dirs:
+        logger.info("Excluding %d removed_examples/ dir(s)", len(removed_dirs))
+    excluded_dirs = pretok_dirs | removed_dirs
     input_files = sorted(
         f
         for f in input_dir.rglob("*.jsonl")
-        if not any(f.is_relative_to(d) for d in pretok_dirs)
+        if not any(f.is_relative_to(d) for d in excluded_dirs)
     )
     if not input_files:
         raise ValueError(f"No .jsonl files found in {input_dir} (searched recursively)")
