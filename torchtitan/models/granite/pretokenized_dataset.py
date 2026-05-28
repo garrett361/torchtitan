@@ -617,7 +617,8 @@ class PreTokenizedDataset(IterableDataset, Stateful):
                     f"dataset shard configuration."
                 )
 
-        table_slice = self._data.data.table.take(row_indices)
+        needed_cols = list(self._arrow_scalar_columns) + list(self._cost_list_columns)
+        table_slice = self._data.data.table.select(needed_cols).take(row_indices)
 
         scalars: dict[str, np.ndarray] = {}
         for col_name in self._arrow_scalar_columns:

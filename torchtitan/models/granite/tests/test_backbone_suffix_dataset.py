@@ -658,5 +658,73 @@ class TestBackboneSuffixEpochBoundary(unittest.TestCase):
         self.assertGreater(ds._epoch, 0)
 
 
+class TestReconstructBufferColumnSelection(unittest.TestCase):
+    """_reconstruct_buffer selects only metadata columns, avoiding int32 overflow
+    on large list columns like input_ids."""
+
+    def setUp(self):
+        import tempfile
+        import shutil
+
+        self._tmpdir = tempfile.mkdtemp()
+        self._tmp = Path(self._tmpdir)
+        self._cleanup = lambda: shutil.rmtree(self._tmpdir)
+
+    def tearDown(self):
+        self._cleanup()
+
+    def test_restore_produces_identical_buffer(self):
+        from torchtitan.models.granite.pretokenized_dataset import BackboneSuffixDataset
+
+        examples = [_example_one_suffix() for _ in range(8)]
+        manifest_path = _make_backbone_suffix_shard(self._tmp, examples)
+
+        ds1 = BackboneSuffixDataset(
+            manifest_path, seq_len=32, infinite=False, buffer_size=8
+        )
+        it1 = iter(ds1)
+        next(it1)
+        state = ds1.state_dict()
+
+        ds2 = BackboneSuffixDataset(
+            manifest_path, seq_len=32, infinite=False, buffer_size=8
+        )
+        ds2.load_state_dict(state)
+        ds2._prepare_iter()
+
+        self.assertEqual(sorted(ds2._row_indices), sorted(ds1._row_indices))
+        self.assertEqual(sorted(ds2._lengths), sorted(ds1._lengths))
+
+    def test_iteration_matches_after_restore(self):
+        from torchtitan.models.granite.pretokenized_dataset import BackboneSuffixDataset
+
+        examples = [
+            _example_no_suffix(),
+            _example_one_suffix(),
+            _example_two_suffixes(),
+        ] * 4
+        manifest_path = _make_backbone_suffix_shard(self._tmp, examples)
+
+        ds1 = BackboneSuffixDataset(
+            manifest_path, seq_len=32, infinite=False, buffer_size=6,
+            packing="buffer_shuffle",
+        )
+        it1 = iter(ds1)
+        next(it1)
+        state = ds1.state_dict()
+        remaining1 = list(it1)
+
+        ds2 = BackboneSuffixDataset(
+            manifest_path, seq_len=32, infinite=False, buffer_size=6,
+            packing="buffer_shuffle",
+        )
+        ds2.load_state_dict(state)
+        remaining2 = list(ds2)
+
+        self.assertEqual(len(remaining1), len(remaining2))
+        for b1, b2 in zip(remaining1, remaining2):
+            self.assertTrue(b1[0]["input"].equal(b2[0]["input"]))
+
+
 if __name__ == "__main__":
     unittest.main()
