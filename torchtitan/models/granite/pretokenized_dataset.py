@@ -873,6 +873,301 @@ class BackboneSuffixDataset(PreTokenizedDataset):
 
 
 # ---------------------------------------------------------------------------
+# Planned (offline) packing dataset
+# ---------------------------------------------------------------------------
+
+
+class PlannedPackingDataset(IterableDataset, Stateful):
+    """Dataset that reads a pre-computed pack plan for cost-balanced batching.
+
+    Instead of online packing (buffer-based, sequential), this class loads a
+    pack plan (produced by plan_packing.py) and iterates through cost-sorted
+    chunks of dp_degree packs. All FSDP ranks in a global batch get packs with
+    near-identical attention cost, minimizing synchronization idle time.
+
+    The iteration is fully deterministic from (seed, epoch, dp_degree): on
+    resume, just recompute the epoch ordering and seek to the saved step.
+    """
+
+    def __init__(
+        self,
+        *,
+        pack_plan_path: str | Path,
+        seq_len: int,
+        dp_rank: int = 0,
+        dp_world_size: int = 1,
+        infinite: bool = False,
+        seed: int = 42,
+    ) -> None:
+        import pyarrow.ipc as ipc
+
+        pack_plan_path = Path(pack_plan_path)
+
+        plan_metadata_path = pack_plan_path / "metadata.json"
+        with open(plan_metadata_path) as f:
+            plan_meta = json.load(f)
+        if plan_meta["seq_len"] != seq_len:
+            raise ValueError(
+                f"Pack plan was built for seq_len={plan_meta['seq_len']} but "
+                f"training seq_len={seq_len}. Regenerate the plan."
+            )
+
+        source_pretok_dir = Path(plan_meta["source_pretok_dir"])
+        if not source_pretok_dir.exists():
+            raise FileNotFoundError(
+                f"Pack plan references source_pretok_dir={source_pretok_dir} "
+                f"which does not exist. Was the dataset moved?"
+            )
+
+        manifest_path = source_pretok_dir / "manifest.json"
+        manifest = _load_manifest(manifest_path)
+        self._data = _load_shards(manifest, source_pretok_dir / "shards")
+
+        plan_arrow_path = pack_plan_path / "pack_plan.arrow"
+        import pyarrow as pa
+
+        with pa.memory_map(str(plan_arrow_path), "r") as f:
+            reader = ipc.open_stream(f)
+            plan_table = reader.read_all()
+
+        self._example_indices: list[list[int]] = [
+            row.as_py() for row in plan_table.column("example_indices")
+        ]
+        self._pack_costs: np.ndarray = plan_table.column("attn_cost").to_numpy()
+        self._pack_total_tokens: np.ndarray = (
+            plan_table.column("total_tokens").to_numpy()
+        )
+
+        if "strategy" not in manifest:
+            raise ValueError(
+                f"Manifest at {manifest_path} missing required 'strategy' field."
+            )
+        self._strategy = manifest["strategy"]
+        self._eos_id: int = manifest["tokenizer"]["eos_token_id"]
+        self.seq_len = seq_len
+        self._dp_rank = dp_rank
+        self._dp_world_size = dp_world_size
+        self.infinite = infinite
+        self._seed = seed
+
+        self._epoch: int = 0
+        self._step: int = 0
+
+        # Dataloader compatibility
+        stats = manifest.get("stats", {})
+        length_stats = manifest.get("length_stats", {})
+        self._dataset_mean_length: float = float(
+            length_stats.get("mean", stats.get("tokens_per_example", 0.0))
+        )
+
+    @property
+    def num_examples(self) -> int:
+        return len(self._example_indices)
+
+    def _epoch_setup(
+        self, epoch: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Compute the chunk ordering for a given epoch.
+
+        Returns (chunk_pack_indices, chunk_order) where chunk_pack_indices is
+        the array of pack indices (into self._example_indices) after dropping
+        the remainder, reshaped into (n_chunks, dp_world_size), and chunk_order
+        is the permutation of chunk indices for this epoch.
+        """
+        n_packs = len(self._example_indices)
+        dp = self._dp_world_size
+        remainder = n_packs % dp
+
+        rng = np.random.default_rng(self._seed + epoch)
+
+        if remainder > 0:
+            drop_indices = rng.choice(n_packs, size=remainder, replace=False)
+            keep_mask = np.ones(n_packs, dtype=bool)
+            keep_mask[drop_indices] = False
+            pack_indices = np.where(keep_mask)[0]
+        else:
+            pack_indices = np.arange(n_packs)
+
+        n_chunks = len(pack_indices) // dp
+        chunk_pack_indices = pack_indices.reshape(n_chunks, dp)
+        rng.shuffle(chunk_pack_indices)
+        return chunk_pack_indices
+
+    def _materialize_and_pack(self, pack_idx: int) -> tuple[
+        dict[str, torch.Tensor], torch.Tensor, dict[str, int]
+    ]:
+        """Fetch all examples for a pack, assemble into a padded batch."""
+        example_indices = self._example_indices[pack_idx]
+        pack_cost = int(self._pack_costs[pack_idx])
+
+        if self._strategy == "backbone_suffix":
+            return self._pack_backbone_suffix(example_indices, pack_cost)
+        else:
+            return self._pack_standard(example_indices, pack_cost)
+
+    def _pack_standard(self, example_indices: list[int], pack_cost: int) -> tuple[
+        dict[str, torch.Tensor], torch.Tensor, dict[str, int]
+    ]:
+        inputs = np.full(self.seq_len, self._eos_id, dtype=np.int32)
+        labels = np.full(self.seq_len, IGNORE_INDEX, dtype=np.int32)
+        positions = np.zeros(self.seq_len, dtype=np.int32)
+        offset = 0
+        n_trained = 0
+
+        for row_idx in example_indices:
+            table_slice = self._data.data.slice(row_idx, 1)
+            col = table_slice.column("input_ids").combine_chunks()
+            offsets = col.offsets.to_numpy()
+            input_ids = col.values.to_numpy()[offsets[0]:offsets[1]]
+
+            col = table_slice.column("labels").combine_chunks()
+            offsets = col.offsets.to_numpy()
+            item_labels = col.values.to_numpy()[offsets[0]:offsets[1]]
+
+            n = len(input_ids)
+            inputs[offset:offset + n] = input_ids
+            labels[offset:offset + n] = item_labels
+            positions[offset:offset + n] = np.arange(n, dtype=np.int32)
+            n_trained += int(np.count_nonzero(item_labels != IGNORE_INDEX))
+            offset += n
+
+        # Pad positions for remainder
+        pad_len = self.seq_len - offset
+        if pad_len > 0:
+            positions[offset:] = np.arange(pad_len, dtype=np.int32)
+
+        stats = {
+            "n_total_tokens": offset,
+            "n_trained_tokens": n_trained,
+            "n_examples_packed": len(example_indices),
+        }
+        return (
+            {
+                "input": torch.from_numpy(inputs.astype(np.int64)),
+                "positions": torch.from_numpy(positions.astype(np.int64)),
+                "attn_cost": torch.tensor(pack_cost, dtype=torch.int64),
+            },
+            torch.from_numpy(labels.astype(np.int64)),
+            stats,
+        )
+
+    def _pack_backbone_suffix(self, example_indices: list[int], pack_cost: int) -> tuple[
+        dict[str, torch.Tensor], torch.Tensor, dict[str, int]
+    ]:
+        inputs = np.full(self.seq_len, self._eos_id, dtype=np.int32)
+        labels = np.full(self.seq_len, IGNORE_INDEX, dtype=np.int32)
+        positions = np.zeros(self.seq_len, dtype=np.int32)
+        conv_ids = np.zeros(self.seq_len, dtype=np.int32)
+        suffix_ids = np.zeros(self.seq_len, dtype=np.int32)
+        insertion_limits = np.full(self.seq_len, -1, dtype=np.int32)
+        offset = 0
+        n_trained = 0
+        conv_counter = 1
+        suffix_counter = 1
+
+        def _read_list(table_slice: "pa.Table", col_name: str) -> np.ndarray:
+            col = table_slice.column(col_name).combine_chunks()
+            offs = col.offsets.to_numpy()
+            if offs[0] == offs[1]:
+                return np.array([], dtype=np.int32)
+            return col.values.to_numpy()[offs[0]:offs[1]].copy()
+
+        for row_idx in example_indices:
+            table_slice = self._data.data.slice(row_idx, 1)
+
+            input_ids = _read_list(table_slice, "input_ids")
+            item_labels = _read_list(table_slice, "labels")
+            item_positions = _read_list(table_slice, "positions")
+            suffix_starts = _read_list(table_slice, "suffix_starts")
+            ins_limits = _read_list(table_slice, "insertion_limits")
+
+            n = len(input_ids)
+            backbone_len = int(suffix_starts[0]) if len(suffix_starts) > 0 else n
+
+            inputs[offset:offset + n] = input_ids
+            labels[offset:offset + n] = item_labels
+            positions[offset:offset + n] = item_positions
+            conv_ids[offset:offset + n] = conv_counter
+
+            # suffix_ids
+            for k in range(len(suffix_starts)):
+                s_start = int(suffix_starts[k])
+                s_end = (
+                    int(suffix_starts[k + 1]) if k + 1 < len(suffix_starts) else n
+                )
+                suffix_ids[offset + s_start:offset + s_end] = suffix_counter
+                suffix_counter += 1
+
+            # insertion_limits
+            backbone_limit = offset + backbone_len - 1
+            insertion_limits[offset:offset + backbone_len] = backbone_limit
+            for k in range(len(suffix_starts)):
+                s_start = int(suffix_starts[k])
+                s_end = (
+                    int(suffix_starts[k + 1]) if k + 1 < len(suffix_starts) else n
+                )
+                insertion_limits[offset + s_start:offset + s_end] = (
+                    offset + int(ins_limits[k])
+                )
+
+            n_trained += int(
+                np.count_nonzero(labels[offset:offset + n] != IGNORE_INDEX)
+            )
+            offset += n
+            conv_counter += 1
+
+        # Pad positions
+        pad_len = self.seq_len - offset
+        if pad_len > 0:
+            positions[offset:] = np.arange(pad_len, dtype=np.int32)
+
+        stats = {
+            "n_total_tokens": offset,
+            "n_trained_tokens": n_trained,
+            "n_examples_packed": len(example_indices),
+        }
+        return (
+            {
+                "input": torch.from_numpy(inputs.astype(np.int64)),
+                "positions": torch.from_numpy(positions.astype(np.int64)),
+                "conv_ids": torch.from_numpy(conv_ids.astype(np.int64)),
+                "suffix_ids": torch.from_numpy(suffix_ids.astype(np.int64)),
+                "insertion_limits": torch.from_numpy(
+                    insertion_limits.astype(np.int64)
+                ),
+                "attn_cost": torch.tensor(pack_cost, dtype=torch.int64),
+            },
+            torch.from_numpy(labels.astype(np.int64)),
+            stats,
+        )
+
+    def __iter__(self):
+        epoch = self._epoch
+        while True:
+            chunk_pack_indices = self._epoch_setup(epoch)
+            start_step = self._step if epoch == self._epoch else 0
+
+            for step_idx in range(start_step, len(chunk_pack_indices)):
+                pack_idx = int(chunk_pack_indices[step_idx, self._dp_rank])
+                self._step = step_idx + 1
+                yield self._materialize_and_pack(pack_idx)
+
+            epoch += 1
+            self._epoch = epoch
+            self._step = 0
+
+            if not self.infinite:
+                break
+
+    def state_dict(self) -> dict[str, Any]:
+        return {"epoch": self._epoch, "step": self._step}
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        self._epoch = state_dict["epoch"]
+        self._step = state_dict["step"]
+
+
+# ---------------------------------------------------------------------------
 # Dataset registry + DataLoader
 # ---------------------------------------------------------------------------
 
@@ -905,15 +1200,22 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         infinite: bool = True
         """Loop the dataset indefinitely."""
 
-        packing: Literal["longest", "buffer_shuffle", "attn_balanced"] = "buffer_shuffle"
+        packing: Literal[
+            "longest", "buffer_shuffle", "attn_balanced", "prepacked"
+        ] = "buffer_shuffle"
         """Packing algorithm. 'longest' picks longest fitting item from buffer
         (deterministic, ~99.9% efficiency at 128k seq_len). 'buffer_shuffle'
         picks random fitting item (deterministic RNG across ranks).
         'attn_balanced' targets cross-rank attention cost balance by selecting
-        items that close the gap between cheapest and most expensive rank."""
+        items that close the gap between cheapest and most expensive rank.
+        'prepacked' uses offline pack plan from {pretok_dir}/pack_plans/seqlen_{seq_len}/
+        (produced by plan_packing.py); 'buffer_size' is ignored in this mode."""
 
         buffer_size: int = 512
         """Number of examples held in the lookahead buffer (per worker)."""
+
+        seed: int = 42
+        """RNG seed for epoch shuffling in planned packing mode."""
 
         snapshot_every_n_steps: int = 16
         """How often StatefulDataLoader snapshots worker state for checkpointing.
@@ -952,35 +1254,52 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
                 path = path / "manifest.json"
             manifest_paths.append(path)
 
-        if len(manifest_paths) > 1:
-            manifest, full_dataset = _load_and_merge_manifests(manifest_paths)
-            dataset_id = f"pretok:merged[{','.join(p.parent.parent.name for p in manifest_paths)}]"
-        else:
-            manifest = _load_manifest(manifest_paths[0])
-            full_dataset = None
-            dataset_id = None
-
-        strategy = manifest.get("strategy")
-        if strategy not in _DATASET_CLASSES:
-            raise ValueError(
-                f"Unsupported strategy {strategy!r} in {config.dataset_path}. "
-                f"Supported: {sorted(_DATASET_CLASSES)}"
+        if config.packing == "prepacked":
+            if len(manifest_paths) > 1:
+                raise ValueError(
+                    "packing='prepacked' cannot be used with multiple dataset_path "
+                    "entries. Generate a plan from the merged pretok dir instead."
+                )
+            pretok_dir = manifest_paths[0].parent
+            pack_plan_path = pretok_dir / "pack_plans" / f"seqlen_{seq_len}"
+            dataset = PlannedPackingDataset(
+                pack_plan_path=pack_plan_path,
+                seq_len=seq_len,
+                dp_rank=dp_rank,
+                dp_world_size=dp_world_size,
+                infinite=config.infinite,
+                seed=config.seed,
             )
+        else:
+            if len(manifest_paths) > 1:
+                manifest, full_dataset = _load_and_merge_manifests(manifest_paths)
+                dataset_id = f"pretok:merged[{','.join(p.parent.parent.name for p in manifest_paths)}]"
+            else:
+                manifest = _load_manifest(manifest_paths[0])
+                full_dataset = None
+                dataset_id = None
 
-        dataset = _DATASET_CLASSES[strategy](
-            manifest_path=str(manifest_paths[0]),
-            seq_len=seq_len,
-            dp_rank=dp_rank,
-            dp_world_size=dp_world_size,
-            cp_rank=cp_rank,
-            infinite=config.infinite,
-            tokenizer=tokenizer,
-            packing=config.packing,
-            buffer_size=config.buffer_size,
-            _manifest=manifest,
-            _full_dataset=full_dataset,
-            _dataset_id=dataset_id,
-        )
+            strategy = manifest.get("strategy")
+            if strategy not in _DATASET_CLASSES:
+                raise ValueError(
+                    f"Unsupported strategy {strategy!r} in {config.dataset_path}. "
+                    f"Supported: {sorted(_DATASET_CLASSES)}"
+                )
+
+            dataset = _DATASET_CLASSES[strategy](
+                manifest_path=str(manifest_paths[0]),
+                seq_len=seq_len,
+                dp_rank=dp_rank,
+                dp_world_size=dp_world_size,
+                cp_rank=cp_rank,
+                infinite=config.infinite,
+                tokenizer=tokenizer,
+                packing=config.packing,
+                buffer_size=config.buffer_size,
+                _manifest=manifest,
+                _full_dataset=full_dataset,
+                _dataset_id=dataset_id,
+            )
 
         self._consumed_n_total_tokens: int = 0
         self._consumed_n_trained_tokens: int = 0
