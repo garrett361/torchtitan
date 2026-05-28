@@ -692,6 +692,9 @@ def _shuffle_and_reshard(
             shard_dir = shuffled_dir / shard_name
             if shard_dir.exists():
                 shutil.rmtree(shard_dir)
+            tmp_dir = shuffled_dir / f".tmp_{shard_name}"
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir)
 
             _drain_pending()
 
@@ -703,7 +706,19 @@ def _shuffle_and_reshard(
                     else total_examples
                 )
                 indices = permutation[start:end]
-                shard = full_dataset.select(indices)
+
+                # Sort indices for sequential mmap reads, then restore
+                # permutation order for correct shuffle output.
+                sorted_indices = np.sort(indices)
+                restore_order = np.argsort(np.argsort(indices))
+
+                full_dataset.select(sorted_indices).save_to_disk(
+                    str(tmp_dir)
+                )
+                shard = load_from_disk(
+                    str(tmp_dir), keep_in_memory=True
+                ).select(restore_order)
+                shutil.rmtree(tmp_dir)
 
                 pending_shard_name = shard_name
                 pending_stats_path = stats_path
