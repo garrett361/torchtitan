@@ -264,7 +264,15 @@ class TestPlanPackingEndToEnd(unittest.TestCase):
 class TestPlannedPackingDataset(unittest.TestCase):
     """Tests for the PlannedPackingDataset iteration logic."""
 
-    def _make_dataset(self, n_examples=200, seq_len=8192, dp_rank=0, dp_world_size=4, seed=42):
+    def _make_dataset(
+        self,
+        n_examples=200,
+        seq_len=8192,
+        dp_rank=0,
+        dp_world_size=4,
+        seed=42,
+        packing="prepacked_attn_grouped",
+    ):
         from torchtitan.models.granite.pretokenized_dataset import (
             PlannedPackingDataset,
         )
@@ -278,6 +286,7 @@ class TestPlannedPackingDataset(unittest.TestCase):
         ds = PlannedPackingDataset(
             pack_plan_path=str(output_dir),
             seq_len=seq_len,
+            packing=packing,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
             infinite=False,
@@ -347,6 +356,7 @@ class TestPlannedPackingDataset(unittest.TestCase):
             PlannedPackingDataset(
                 pack_plan_path=str(output_dir),
                 seq_len=4096,
+                packing="prepacked_attn_grouped",
             )
 
 
@@ -413,11 +423,13 @@ class TestSeedConfig(unittest.TestCase):
             ds1 = PlannedPackingDataset(
                 pack_plan_path=str(output_dir),
                 seq_len=8192,
+                packing="prepacked_attn_grouped",
                 seed=1,
             )
             ds2 = PlannedPackingDataset(
                 pack_plan_path=str(output_dir),
                 seq_len=8192,
+                packing="prepacked_attn_grouped",
                 seed=2,
             )
             chunks1 = ds1._epoch_setup(0)
@@ -437,20 +449,61 @@ class TestSeedConfig(unittest.TestCase):
             ds1 = PlannedPackingDataset(
                 pack_plan_path=str(output_dir),
                 seq_len=8192,
+                packing="prepacked_attn_grouped",
                 seed=42,
             )
             ds2 = PlannedPackingDataset(
                 pack_plan_path=str(output_dir),
                 seq_len=8192,
+                packing="prepacked_attn_grouped",
                 seed=42,
             )
             chunks1 = ds1._epoch_setup(0)
             chunks2 = ds2._epoch_setup(0)
             self.assertTrue(np.array_equal(chunks1, chunks2))
 
+    def test_random_mode_breaks_cost_contiguity(self):
+        from torchtitan.models.granite.pretokenized_dataset import (
+            PlannedPackingDataset,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pretok_dir = _create_test_pretok_dir(Path(tmp), n_examples=200)
+            output_dir = Path(tmp) / "plan"
+            plan_packing(pretok_dir, seq_len=8192, output_dir=output_dir)
+
+            ds_grouped = PlannedPackingDataset(
+                pack_plan_path=str(output_dir),
+                seq_len=8192,
+                packing="prepacked_attn_grouped",
+                dp_world_size=4,
+                seed=42,
+            )
+            ds_random = PlannedPackingDataset(
+                pack_plan_path=str(output_dir),
+                seq_len=8192,
+                packing="prepacked_random",
+                dp_world_size=4,
+                seed=42,
+            )
+            chunks_grouped = ds_grouped._epoch_setup(0)
+            chunks_random = ds_random._epoch_setup(0)
+
+            self.assertEqual(chunks_grouped.shape, chunks_random.shape)
+            self.assertFalse(np.array_equal(chunks_grouped, chunks_random))
+
+            # In attn_grouped mode, each row contains contiguous indices
+            # (adjacent in cost-sorted order). In random mode, they don't.
+            row_spans_grouped = chunks_grouped.max(axis=1) - chunks_grouped.min(axis=1)
+            row_spans_random = chunks_random.max(axis=1) - chunks_random.min(axis=1)
+            self.assertGreater(
+                row_spans_random.mean(), row_spans_grouped.mean() * 2,
+                "Random mode should have much larger within-chunk index spread",
+            )
+
 
 class TestDataLoaderE2E(unittest.TestCase):
-    """End-to-end test through GranitePreTokenizedDataLoader with packing='prepacked'."""
+    """End-to-end test through GranitePreTokenizedDataLoader with prepacked modes."""
 
     def setUp(self):
         self._tmp = Path(tempfile.mkdtemp())
@@ -472,7 +525,7 @@ class TestDataLoaderE2E(unittest.TestCase):
         loader = GranitePreTokenizedDataLoader(
             GranitePreTokenizedDataLoader.Config(
                 dataset_path=str(pretok_dir),
-                packing="prepacked",
+                packing="prepacked_attn_grouped",
                 infinite=False,
             ),
             dp_world_size=2,
@@ -509,7 +562,7 @@ class TestDataLoaderE2E(unittest.TestCase):
             return GranitePreTokenizedDataLoader(
                 GranitePreTokenizedDataLoader.Config(
                     dataset_path=str(pretok_dir),
-                    packing="prepacked",
+                    packing="prepacked_attn_grouped",
                     infinite=False,
                 ),
                 dp_world_size=2,
@@ -546,7 +599,7 @@ class TestDataLoaderE2E(unittest.TestCase):
             self.assertTrue(torch.equal(rl, el), "labels mismatch after resume")
 
     def test_multi_dataset_with_plan_raises(self):
-        """packing='prepacked' with multiple dataset_path entries is rejected."""
+        """prepacked modes with multiple dataset_path entries are rejected."""
         from torchtitan.components.tokenizer import HuggingFaceTokenizer
         from torchtitan.models.granite.pretokenized_dataset import (
             GranitePreTokenizedDataLoader,
@@ -561,7 +614,7 @@ class TestDataLoaderE2E(unittest.TestCase):
             GranitePreTokenizedDataLoader(
                 GranitePreTokenizedDataLoader.Config(
                     dataset_path=f"{pretok_dir},{pretok_dir}",
-                    packing="prepacked",
+                    packing="prepacked_attn_grouped",
                     infinite=False,
                 ),
                 dp_world_size=1,

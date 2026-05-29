@@ -894,6 +894,7 @@ class PlannedPackingDataset(IterableDataset, Stateful):
         *,
         pack_plan_path: str | Path,
         seq_len: int,
+        packing: Literal["prepacked_attn_grouped", "prepacked_random"],
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
@@ -943,6 +944,7 @@ class PlannedPackingDataset(IterableDataset, Stateful):
                 f"Manifest at {manifest_path} missing required 'strategy' field."
             )
         self._strategy = manifest["strategy"]
+        self._packing = packing
         self._eos_id: int = manifest["tokenizer"]["eos_token_id"]
         self.seq_len = seq_len
         self._dp_rank = dp_rank
@@ -964,15 +966,11 @@ class PlannedPackingDataset(IterableDataset, Stateful):
     def num_examples(self) -> int:
         return len(self._example_indices)
 
-    def _epoch_setup(
-        self, epoch: int
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Compute the chunk ordering for a given epoch.
+    def _epoch_setup(self, epoch: int) -> np.ndarray:
+        """Compute the chunk-to-pack assignment for a given epoch.
 
-        Returns (chunk_pack_indices, chunk_order) where chunk_pack_indices is
-        the array of pack indices (into self._example_indices) after dropping
-        the remainder, reshaped into (n_chunks, dp_world_size), and chunk_order
-        is the permutation of chunk indices for this epoch.
+        Returns chunk_pack_indices: shape (n_chunks, dp_world_size), where each
+        row contains the pack indices assigned to dp ranks for that chunk/step.
         """
         n_packs = len(self._example_indices)
         dp = self._dp_world_size
@@ -989,8 +987,14 @@ class PlannedPackingDataset(IterableDataset, Stateful):
             pack_indices = np.arange(n_packs)
 
         n_chunks = len(pack_indices) // dp
-        chunk_pack_indices = pack_indices.reshape(n_chunks, dp)
-        rng.shuffle(chunk_pack_indices)
+        if self._packing == "prepacked_attn_grouped":
+            chunk_pack_indices = pack_indices.reshape(n_chunks, dp)
+            rng.shuffle(chunk_pack_indices)
+        elif self._packing == "prepacked_random":
+            rng.shuffle(pack_indices)
+            chunk_pack_indices = pack_indices.reshape(n_chunks, dp)
+        else:
+            raise ValueError(f"Unknown prepacked mode: {self._packing!r}")
         return chunk_pack_indices
 
     def _materialize_and_pack(self, pack_idx: int) -> tuple[
@@ -1201,15 +1205,23 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         """Loop the dataset indefinitely."""
 
         packing: Literal[
-            "longest", "buffer_shuffle", "attn_balanced", "prepacked"
+            "longest",
+            "buffer_shuffle",
+            "attn_balanced",
+            "prepacked_attn_grouped",
+            "prepacked_random",
         ] = "buffer_shuffle"
         """Packing algorithm. 'longest' picks longest fitting item from buffer
         (deterministic, ~99.9% efficiency at 128k seq_len). 'buffer_shuffle'
         picks random fitting item (deterministic RNG across ranks).
         'attn_balanced' targets cross-rank attention cost balance by selecting
         items that close the gap between cheapest and most expensive rank.
-        'prepacked' uses offline pack plan from {pretok_dir}/pack_plans/seqlen_{seq_len}/
-        (produced by plan_packing.py); 'buffer_size' is ignored in this mode."""
+        'prepacked_attn_grouped' uses offline pack plan with cost-balanced chunk
+        assignment (packs grouped by attn_cost for sync efficiency).
+        'prepacked_random' uses offline pack plan with random chunk assignment
+        (smoother loss at the cost of sync efficiency).
+        Both prepacked modes read from {pretok_dir}/pack_plans/seqlen_{seq_len}/
+        (produced by plan_packing.py); 'buffer_size' is ignored."""
 
         buffer_size: int = 512
         """Number of examples held in the lookahead buffer (per worker)."""
@@ -1254,17 +1266,19 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
                 path = path / "manifest.json"
             manifest_paths.append(path)
 
-        if config.packing == "prepacked":
+        if config.packing in ("prepacked_attn_grouped", "prepacked_random"):
             if len(manifest_paths) > 1:
                 raise ValueError(
-                    "packing='prepacked' cannot be used with multiple dataset_path "
-                    "entries. Generate a plan from the merged pretok dir instead."
+                    f"packing={config.packing!r} cannot be used with multiple "
+                    "dataset_path entries. Generate a plan from the merged "
+                    "pretok dir instead."
                 )
             pretok_dir = manifest_paths[0].parent
             pack_plan_path = pretok_dir / "pack_plans" / f"seqlen_{seq_len}"
             dataset = PlannedPackingDataset(
                 pack_plan_path=pack_plan_path,
                 seq_len=seq_len,
+                packing=config.packing,
                 dp_rank=dp_rank,
                 dp_world_size=dp_world_size,
                 infinite=config.infinite,
