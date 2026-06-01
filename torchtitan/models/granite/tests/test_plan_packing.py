@@ -12,9 +12,15 @@ import pyarrow.ipc as ipc
 import torch
 from datasets import Dataset as HFDataset
 
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.models.granite.pretokenized_dataset import (
+    GranitePreTokenizedDataLoader,
+    PlannedPackingDataset,
+    _load_shards,
+)
 from torchtitan.models.granite.scripts.plan_packing import (
-    _pre_pack,
     _load_metadata_columns,
+    _pre_pack,
     plan_packing,
 )
 
@@ -273,9 +279,6 @@ class TestPlannedPackingDataset(unittest.TestCase):
         seed=42,
         packing="prepacked_attn_grouped",
     ):
-        from torchtitan.models.granite.pretokenized_dataset import (
-            PlannedPackingDataset,
-        )
 
         tmp_dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, str(tmp_dir), ignore_errors=True)
@@ -343,9 +346,6 @@ class TestPlannedPackingDataset(unittest.TestCase):
         self.assertEqual(results_full[5:], results_resumed)
 
     def test_seq_len_mismatch_raises(self):
-        from torchtitan.models.granite.pretokenized_dataset import (
-            PlannedPackingDataset,
-        )
 
         tmp_dir = Path(tempfile.mkdtemp())
         pretok_dir = _create_test_pretok_dir(tmp_dir, n_examples=50)
@@ -365,7 +365,6 @@ class TestIndexAlignment(unittest.TestCase):
 
     def test_plan_indices_match_dataset_rows(self):
         """Pack plan indices point to correct rows when loaded via _load_shards."""
-        from torchtitan.models.granite.pretokenized_dataset import _load_shards
 
         with tempfile.TemporaryDirectory() as tmp:
             pretok_dir = _create_test_pretok_dir(
@@ -389,7 +388,6 @@ class TestIndexAlignment(unittest.TestCase):
 
     def test_multi_shard_total_examples_preserved(self):
         """All examples are accessible across multiple shards."""
-        from torchtitan.models.granite.pretokenized_dataset import _load_shards
 
         with tempfile.TemporaryDirectory() as tmp:
             pretok_dir = _create_test_pretok_dir(
@@ -411,9 +409,6 @@ class TestSeedConfig(unittest.TestCase):
     """Verify seed controls epoch shuffling."""
 
     def test_different_seeds_different_orderings(self):
-        from torchtitan.models.granite.pretokenized_dataset import (
-            PlannedPackingDataset,
-        )
 
         with tempfile.TemporaryDirectory() as tmp:
             pretok_dir = _create_test_pretok_dir(Path(tmp), n_examples=100)
@@ -437,9 +432,6 @@ class TestSeedConfig(unittest.TestCase):
             self.assertFalse(np.array_equal(chunks1, chunks2))
 
     def test_same_seed_same_ordering(self):
-        from torchtitan.models.granite.pretokenized_dataset import (
-            PlannedPackingDataset,
-        )
 
         with tempfile.TemporaryDirectory() as tmp:
             pretok_dir = _create_test_pretok_dir(Path(tmp), n_examples=100)
@@ -463,9 +455,6 @@ class TestSeedConfig(unittest.TestCase):
             self.assertTrue(np.array_equal(chunks1, chunks2))
 
     def test_random_mode_breaks_cost_contiguity(self):
-        from torchtitan.models.granite.pretokenized_dataset import (
-            PlannedPackingDataset,
-        )
 
         with tempfile.TemporaryDirectory() as tmp:
             pretok_dir = _create_test_pretok_dir(Path(tmp), n_examples=200)
@@ -511,11 +500,6 @@ class TestDataLoaderE2E(unittest.TestCase):
 
     def test_backbone_suffix_planned_packing(self):
         """Full dataloader path: config → PlannedPackingDataset → iteration."""
-        from torchtitan.components.tokenizer import HuggingFaceTokenizer
-        from torchtitan.models.granite.pretokenized_dataset import (
-            GranitePreTokenizedDataLoader,
-            PlannedPackingDataset,
-        )
 
         seq_len = 8192
         pretok_dir = _create_test_pretok_dir(self._tmp, n_examples=200)
@@ -547,10 +531,6 @@ class TestDataLoaderE2E(unittest.TestCase):
 
     def test_planned_packing_state_dict_through_dataloader(self):
         """Dataloader state_dict/load_state_dict produces consistent resumption."""
-        from torchtitan.components.tokenizer import HuggingFaceTokenizer
-        from torchtitan.models.granite.pretokenized_dataset import (
-            GranitePreTokenizedDataLoader,
-        )
 
         seq_len = 8192
         pretok_dir = _create_test_pretok_dir(self._tmp, n_examples=200)
@@ -600,10 +580,6 @@ class TestDataLoaderE2E(unittest.TestCase):
 
     def test_multi_dataset_with_plan_raises(self):
         """prepacked modes with multiple dataset_path entries are rejected."""
-        from torchtitan.components.tokenizer import HuggingFaceTokenizer
-        from torchtitan.models.granite.pretokenized_dataset import (
-            GranitePreTokenizedDataLoader,
-        )
 
         pretok_dir = _create_test_pretok_dir(self._tmp, n_examples=50)
         seq_len = 8192
@@ -623,6 +599,226 @@ class TestDataLoaderE2E(unittest.TestCase):
                 seq_len=seq_len,
                 local_batch_size=1,
             )
+
+
+class TestPrepackedRandomBalanced(unittest.TestCase):
+    """Tests for the prepacked_random_balanced packing mode."""
+
+    def _make_dataset(
+        self,
+        n_examples=200,
+        seq_len=8192,
+        dp_rank=0,
+        dp_world_size=4,
+        accum_steps=2,
+        seed=42,
+    ):
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(tmp_dir), ignore_errors=True)
+        pretok_dir = _create_test_pretok_dir(tmp_dir, n_examples=n_examples)
+        output_dir = tmp_dir / "plan"
+        plan_packing(pretok_dir, seq_len=seq_len, output_dir=output_dir)
+
+        ds = PlannedPackingDataset(
+            pack_plan_path=str(output_dir),
+            seq_len=seq_len,
+            packing="prepacked_random_balanced",
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            accum_steps=accum_steps,
+            infinite=False,
+            seed=seed,
+        )
+        return ds, tmp_dir
+
+    def test_rows_strictly_cost_ordered(self):
+        """Within each optimizer step window, rows are ordered by cost: row i
+        contains cheaper packs than row i+1 (argsort + reshape guarantees this)."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pretok_dir = _create_test_pretok_dir(Path(tmp), n_examples=500)
+            output_dir = Path(tmp) / "plan"
+            plan_packing(pretok_dir, seq_len=8192, output_dir=output_dir)
+
+            dp = 8
+            accum = 4
+            ds = PlannedPackingDataset(
+                pack_plan_path=str(output_dir),
+                seq_len=8192,
+                packing="prepacked_random_balanced",
+                dp_world_size=dp,
+                accum_steps=accum,
+                seed=42,
+            )
+            chunks = ds._epoch_setup(0)
+            costs = ds._pack_costs
+
+            # chunks shape: (n_windows * accum, dp). Each consecutive `accum`
+            # rows form one optimizer step window. Within each window, row k
+            # should contain packs with costs <= row k+1 (element-wise after sort).
+            n_windows = len(chunks) // accum
+            for w in range(n_windows):
+                window_rows = chunks[w * accum : (w + 1) * accum]
+                row_max_costs = costs[window_rows].max(axis=1)
+                # Row max costs should be non-decreasing across the window
+                self.assertTrue(
+                    np.all(row_max_costs[1:] >= row_max_costs[:-1]),
+                    f"Window {w}: row max costs not non-decreasing: {row_max_costs}",
+                )
+
+    def test_cost_homogeneity_within_rows(self):
+        """Within each micro-batch row, cost variance should be lower than random."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pretok_dir = _create_test_pretok_dir(Path(tmp), n_examples=500)
+            output_dir = Path(tmp) / "plan"
+            plan_packing(pretok_dir, seq_len=8192, output_dir=output_dir)
+
+            dp = 8
+            accum = 2
+            ds_balanced = PlannedPackingDataset(
+                pack_plan_path=str(output_dir),
+                seq_len=8192,
+                packing="prepacked_random_balanced",
+                dp_world_size=dp,
+                accum_steps=accum,
+                seed=42,
+            )
+            ds_random = PlannedPackingDataset(
+                pack_plan_path=str(output_dir),
+                seq_len=8192,
+                packing="prepacked_random",
+                dp_world_size=dp,
+                seed=42,
+            )
+
+            chunks_balanced = ds_balanced._epoch_setup(0)
+            chunks_random = ds_random._epoch_setup(0)
+
+            costs = ds_balanced._pack_costs
+            row_stds_balanced = np.array([
+                costs[chunks_balanced[i]].std()
+                for i in range(len(chunks_balanced))
+            ])
+            row_stds_random = np.array([
+                costs[chunks_random[i]].std()
+                for i in range(min(len(chunks_random), len(chunks_balanced)))
+            ])
+            self.assertLess(
+                row_stds_balanced.mean(),
+                row_stds_random.mean(),
+                "Balanced mode should have lower within-row cost variance",
+            )
+
+    def test_different_epochs_different_orderings(self):
+        ds, _ = self._make_dataset(n_examples=200, dp_world_size=4, accum_steps=2)
+        chunks_e0 = ds._epoch_setup(0)
+        chunks_e1 = ds._epoch_setup(1)
+        self.assertFalse(np.array_equal(chunks_e0, chunks_e1))
+
+    def test_global_batch_invariant(self):
+        """For fixed GBS (= dp * accum), the SET of packs per optimizer step is
+        identical regardless of how dp and accum are decomposed."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pretok_dir = _create_test_pretok_dir(Path(tmp), n_examples=500)
+            output_dir = Path(tmp) / "plan"
+            plan_packing(pretok_dir, seq_len=8192, output_dir=output_dir)
+
+            gbs = 16  # window_size = gbs in both cases
+            # Setup A: dp=16, accum=1 (one micro-batch per step)
+            ds_a = PlannedPackingDataset(
+                pack_plan_path=str(output_dir),
+                seq_len=8192,
+                packing="prepacked_random_balanced",
+                dp_world_size=gbs,
+                accum_steps=1,
+                seed=42,
+            )
+            # Setup B: dp=8, accum=2 (two micro-batches per step)
+            ds_b = PlannedPackingDataset(
+                pack_plan_path=str(output_dir),
+                seq_len=8192,
+                packing="prepacked_random_balanced",
+                dp_world_size=gbs // 2,
+                accum_steps=2,
+                seed=42,
+            )
+
+            chunks_a = ds_a._epoch_setup(0)  # shape: (n_steps, 16)
+            chunks_b = ds_b._epoch_setup(0)  # shape: (n_steps*2, 8)
+
+            # Both have window_size=16. Same seed → same drop (n_packs % 16),
+            # same RNG state → same shuffle → same windows of 16 packs.
+            # A reshapes each window to (1, 16). B reshapes to (2, 8).
+            # The SET of 16 packs per optimizer step must be identical.
+            n_steps = min(len(chunks_a), len(chunks_b) // 2)
+            for step in range(n_steps):
+                set_a = set(chunks_a[step].tolist())
+                set_b = set(chunks_b[step * 2].tolist()) | set(
+                    chunks_b[step * 2 + 1].tolist()
+                )
+                self.assertEqual(
+                    set_a,
+                    set_b,
+                    f"Step {step}: pack sets differ between dp=16/accum=1 and "
+                    f"dp=8/accum=2",
+                )
+
+    def test_state_dict_resume(self):
+        ds, _ = self._make_dataset(n_examples=300, dp_world_size=4, accum_steps=2)
+        results_full = [(d["attn_cost"].item(), s["n_total_tokens"]) for d, _, s in ds]
+
+        ds2, _ = self._make_dataset(n_examples=300, dp_world_size=4, accum_steps=2)
+        it = iter(ds2)
+        for _ in range(5):
+            next(it)
+        state = ds2.state_dict()
+
+        ds3, _ = self._make_dataset(n_examples=300, dp_world_size=4, accum_steps=2)
+        ds3.load_state_dict(state)
+        results_resumed = [(d["attn_cost"].item(), s["n_total_tokens"]) for d, _, s in ds3]
+
+        self.assertEqual(results_full[5:], results_resumed)
+
+    def test_accum_steps_change_on_resume(self):
+        """Changing accum_steps on resume should not crash."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pretok_dir = _create_test_pretok_dir(Path(tmp), n_examples=200)
+            output_dir = Path(tmp) / "plan"
+            plan_packing(pretok_dir, seq_len=8192, output_dir=output_dir)
+
+            ds1 = PlannedPackingDataset(
+                pack_plan_path=str(output_dir),
+                seq_len=8192,
+                packing="prepacked_random_balanced",
+                dp_world_size=4,
+                accum_steps=2,
+                seed=42,
+                infinite=False,
+            )
+            it = iter(ds1)
+            for _ in range(5):
+                next(it)
+            state = ds1.state_dict()
+            self.assertEqual(state["accum_steps"], 2)
+
+            # Resume with different accum_steps — should not raise
+            ds2 = PlannedPackingDataset(
+                pack_plan_path=str(output_dir),
+                seq_len=8192,
+                packing="prepacked_random_balanced",
+                dp_world_size=4,
+                accum_steps=4,
+                seed=42,
+                infinite=False,
+            )
+            ds2.load_state_dict(state)
+            # Should be able to iterate
+            results = list(ds2)
+            self.assertGreater(len(results), 0)
 
 
 if __name__ == "__main__":

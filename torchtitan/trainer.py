@@ -239,13 +239,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             if parallel_dims.cp_enabled
             else 0
         )
+        gbs = config.training.global_batch_size
+        lbs = config.training.local_batch_size
+        accum_steps = 1 if gbs < 0 else gbs // (lbs * batch_degree)
         self.dataloader = config.dataloader.build(
             dp_world_size=batch_degree,
             dp_rank=batch_rank,
             tokenizer=self.tokenizer,
             seq_len=config.training.seq_len,
-            local_batch_size=config.training.local_batch_size,
+            local_batch_size=lbs,
             cp_rank=cp_rank,
+            accum_steps=accum_steps,
         )
 
         # build model (using meta init)

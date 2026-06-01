@@ -894,9 +894,12 @@ class PlannedPackingDataset(IterableDataset, Stateful):
         *,
         pack_plan_path: str | Path,
         seq_len: int,
-        packing: Literal["prepacked_attn_grouped", "prepacked_random"],
+        packing: Literal[
+            "prepacked_attn_grouped", "prepacked_random", "prepacked_random_balanced"
+        ],
         dp_rank: int = 0,
         dp_world_size: int = 1,
+        accum_steps: int = 1,
         infinite: bool = False,
         seed: int = 42,
     ) -> None:
@@ -945,12 +948,19 @@ class PlannedPackingDataset(IterableDataset, Stateful):
             )
         self._strategy = manifest["strategy"]
         self._packing = packing
+        self._accum_steps = accum_steps
         self._eos_id: int = manifest["tokenizer"]["eos_token_id"]
         self.seq_len = seq_len
         self._dp_rank = dp_rank
         self._dp_world_size = dp_world_size
         self.infinite = infinite
         self._seed = seed
+
+        if self._packing == "prepacked_random_balanced" and accum_steps < 2:
+            logger.warning(
+                "prepacked_random_balanced with accum_steps=1 provides no throughput "
+                "benefit over prepacked_random. Consider using gradient accumulation."
+            )
 
         self._epoch: int = 0
         self._step: int = 0
@@ -974,10 +984,13 @@ class PlannedPackingDataset(IterableDataset, Stateful):
         """
         n_packs = len(self._example_indices)
         dp = self._dp_world_size
-        remainder = n_packs % dp
-
         rng = np.random.default_rng(self._seed + epoch)
 
+        # Drop to align with GBS (= dp * accum_steps). This ensures dp is
+        # purely an implementation detail: same GBS + same seed → same data
+        # order regardless of dp/accum decomposition.
+        gbs = dp * self._accum_steps
+        remainder = n_packs % gbs
         if remainder > 0:
             drop_indices = rng.choice(n_packs, size=remainder, replace=False)
             keep_mask = np.ones(n_packs, dtype=bool)
@@ -993,6 +1006,14 @@ class PlannedPackingDataset(IterableDataset, Stateful):
         elif self._packing == "prepacked_random":
             rng.shuffle(pack_indices)
             chunk_pack_indices = pack_indices.reshape(n_chunks, dp)
+        elif self._packing == "prepacked_random_balanced":
+            rng.shuffle(pack_indices)
+            chunk_rows = []
+            for w_start in range(0, len(pack_indices), gbs):
+                window = pack_indices[w_start : w_start + gbs]
+                order = np.argsort(self._pack_costs[window])
+                chunk_rows.append(window[order].reshape(self._accum_steps, dp))
+            chunk_pack_indices = np.concatenate(chunk_rows, axis=0)
         else:
             raise ValueError(f"Unknown prepacked mode: {self._packing!r}")
         return chunk_pack_indices
@@ -1164,11 +1185,22 @@ class PlannedPackingDataset(IterableDataset, Stateful):
                 break
 
     def state_dict(self) -> dict[str, Any]:
-        return {"epoch": self._epoch, "step": self._step}
+        return {
+            "epoch": self._epoch,
+            "step": self._step,
+            "accum_steps": self._accum_steps,
+        }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self._epoch = state_dict["epoch"]
         self._step = state_dict["step"]
+        saved_accum = state_dict.get("accum_steps")
+        if saved_accum is not None and saved_accum != self._accum_steps:
+            logger.info(
+                f"accum_steps changed from {saved_accum} to {self._accum_steps} on "
+                f"resume. Pack-to-step groupings will differ for the remainder of "
+                f"epoch {self._epoch}; statistical properties (no bias) are preserved."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1210,6 +1242,7 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
             "attn_balanced",
             "prepacked_attn_grouped",
             "prepacked_random",
+            "prepacked_random_balanced",
         ] = "buffer_shuffle"
         """Packing algorithm. 'longest' picks longest fitting item from buffer
         (deterministic, ~99.9% efficiency at 128k seq_len). 'buffer_shuffle'
@@ -1220,7 +1253,11 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         assignment (packs grouped by attn_cost for sync efficiency).
         'prepacked_random' uses offline pack plan with random chunk assignment
         (smoother loss at the cost of sync efficiency).
-        Both prepacked modes read from {pretok_dir}/pack_plans/seqlen_{seq_len}/
+        'prepacked_random_balanced' uses offline pack plan with random global
+        shuffle plus local cost-balancing within each optimizer step window
+        (dp_degree * accum_steps packs). Preserves unbiased sampling while
+        recovering TPS via cost-homogeneous micro-batches.
+        All prepacked modes read from {pretok_dir}/pack_plans/seqlen_{seq_len}/
         (produced by plan_packing.py); 'buffer_size' is ignored."""
 
         buffer_size: int = 512
@@ -1244,6 +1281,7 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
         seq_len: int,
         local_batch_size: int,
         cp_rank: int = 0,
+        accum_steps: int = 1,
     ) -> None:
         if local_batch_size > 1:
             raise ValueError(
@@ -1266,7 +1304,11 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
                 path = path / "manifest.json"
             manifest_paths.append(path)
 
-        if config.packing in ("prepacked_attn_grouped", "prepacked_random"):
+        if config.packing in (
+            "prepacked_attn_grouped",
+            "prepacked_random",
+            "prepacked_random_balanced",
+        ):
             if len(manifest_paths) > 1:
                 raise ValueError(
                     f"packing={config.packing!r} cannot be used with multiple "
@@ -1281,6 +1323,7 @@ class GranitePreTokenizedDataLoader(ParallelAwareDataloader):
                 packing=config.packing,
                 dp_rank=dp_rank,
                 dp_world_size=dp_world_size,
+                accum_steps=accum_steps,
                 infinite=config.infinite,
                 seed=config.seed,
             )
