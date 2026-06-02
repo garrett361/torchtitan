@@ -908,6 +908,124 @@ class TestPlannedPackingWorkers(unittest.TestCase):
             )
             self.assertEqual(items0, items2)
 
+    def test_worker_count_preserves_ordering(self):
+        """num_workers=0, 2, and 3 all produce identical sequences (balanced)."""
+        from torchdata.stateful_dataloader import StatefulDataLoader
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pretok_dir = _create_test_pretok_dir(Path(tmp), n_examples=200)
+            output_dir = Path(tmp) / "plan"
+            plan_packing(pretok_dir, seq_len=8192, output_dir=output_dir)
+
+            def make_ds():
+                return PlannedPackingDataset(
+                    pack_plan_path=str(output_dir),
+                    seq_len=8192,
+                    packing="prepacked_random_balanced",
+                    dp_rank=0,
+                    dp_world_size=2,
+                    accum_steps=2,
+                    seed=42,
+                    infinite=False,
+                )
+
+            results = {}
+            for nw in (0, 2, 3):
+                ds = make_ds()
+                dl = StatefulDataLoader(ds, num_workers=nw, batch_size=None)
+                results[nw] = [item[0]["input"].tolist() for item in dl]
+
+            self.assertEqual(results[0], results[2])
+            self.assertEqual(results[0], results[3])
+
+    def test_worker_count_preserves_ordering_random(self):
+        """num_workers=0 and 2 produce identical sequences (random mode)."""
+        from torchdata.stateful_dataloader import StatefulDataLoader
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pretok_dir = _create_test_pretok_dir(Path(tmp), n_examples=200)
+            output_dir = Path(tmp) / "plan"
+            plan_packing(pretok_dir, seq_len=8192, output_dir=output_dir)
+
+            def make_ds():
+                return PlannedPackingDataset(
+                    pack_plan_path=str(output_dir),
+                    seq_len=8192,
+                    packing="prepacked_random",
+                    dp_rank=0,
+                    dp_world_size=2,
+                    accum_steps=2,
+                    seed=42,
+                    infinite=False,
+                )
+
+            results = {}
+            for nw in (0, 2):
+                ds = make_ds()
+                dl = StatefulDataLoader(ds, num_workers=nw, batch_size=None)
+                results[nw] = [item[0]["input"].tolist() for item in dl]
+
+            self.assertEqual(results[0], results[2])
+
+    def test_random_and_balanced_same_global_batches_with_workers(self):
+        """Cross-mode pack-multiset equivalence holds through DataLoader with workers.
+
+        Iterates all dp_ranks for both modes and verifies the multiset of packs
+        per optimizer step is identical — balanced only reorders within each step.
+        """
+        from torchdata.stateful_dataloader import StatefulDataLoader
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pretok_dir = _create_test_pretok_dir(Path(tmp), n_examples=500)
+            output_dir = Path(tmp) / "plan"
+            plan_packing(pretok_dir, seq_len=8192, output_dir=output_dir)
+
+            dp = 4
+            accum = 3
+            num_workers = 2
+
+            def collect_all_ranks(packing):
+                """Collect n_total_tokens from all dp_ranks, return per-step multisets."""
+                from collections import Counter
+
+                per_rank = []
+                for rank in range(dp):
+                    ds = PlannedPackingDataset(
+                        pack_plan_path=str(output_dir),
+                        seq_len=8192,
+                        packing=packing,
+                        dp_rank=rank,
+                        dp_world_size=dp,
+                        accum_steps=accum,
+                        seed=42,
+                        infinite=False,
+                    )
+                    dl = StatefulDataLoader(ds, num_workers=num_workers, batch_size=None)
+                    per_rank.append([item[2]["n_total_tokens"] for item in dl])
+                n_items = len(per_rank[0])
+                self.assertTrue(all(len(r) == n_items for r in per_rank))
+                n_steps = n_items // accum
+                step_multisets = []
+                for step in range(n_steps):
+                    packs = Counter()
+                    for rank_items in per_rank:
+                        for i in range(step * accum, (step + 1) * accum):
+                            packs[rank_items[i]] += 1
+                    step_multisets.append(packs)
+                return step_multisets
+
+            steps_random = collect_all_ranks("prepacked_random")
+            steps_balanced = collect_all_ranks("prepacked_random_balanced")
+
+            self.assertEqual(len(steps_random), len(steps_balanced))
+            for step, (sr, sb) in enumerate(zip(steps_random, steps_balanced)):
+                self.assertEqual(
+                    sr,
+                    sb,
+                    f"Step {step}: global batch pack multisets differ between "
+                    f"prepacked_random and prepacked_random_balanced",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
