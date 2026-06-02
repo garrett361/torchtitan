@@ -1167,12 +1167,18 @@ class PlannedPackingDataset(IterableDataset, Stateful):
         )
 
     def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+        num_workers = worker_info.num_workers if worker_info else 1
+        worker_id = worker_info.id if worker_info else 0
+
         epoch = self._epoch
         while True:
             chunk_pack_indices = self._epoch_setup(epoch)
             start_step = self._step if epoch == self._epoch else 0
 
             for step_idx in range(start_step, len(chunk_pack_indices)):
+                if step_idx % num_workers != worker_id:
+                    continue
                 pack_idx = int(chunk_pack_indices[step_idx, self._dp_rank])
                 self._step = step_idx + 1
                 yield self._materialize_and_pack(pack_idx)

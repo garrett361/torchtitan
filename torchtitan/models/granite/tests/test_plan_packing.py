@@ -868,5 +868,46 @@ class TestPrepackedRandomBalanced(unittest.TestCase):
             self.assertGreater(len(results), 0)
 
 
+class TestPlannedPackingWorkers(unittest.TestCase):
+    """Verify PlannedPackingDataset works correctly with multiple DataLoader workers."""
+
+    def test_workers_see_disjoint_data(self):
+        """With num_workers=2, no data duplication occurs."""
+        from torchdata.stateful_dataloader import StatefulDataLoader
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pretok_dir = _create_test_pretok_dir(Path(tmp), n_examples=200)
+            output_dir = Path(tmp) / "plan"
+            plan_packing(pretok_dir, seq_len=8192, output_dir=output_dir)
+
+            def make_ds():
+                return PlannedPackingDataset(
+                    pack_plan_path=str(output_dir),
+                    seq_len=8192,
+                    packing="prepacked_random_balanced",
+                    dp_rank=0,
+                    dp_world_size=2,
+                    accum_steps=2,
+                    seed=42,
+                    infinite=False,
+                )
+
+            ds0 = make_ds()
+            dl0 = StatefulDataLoader(ds0, num_workers=0, batch_size=None)
+            items0 = [item[2]["n_examples_packed"] for item in dl0]
+
+            ds2 = make_ds()
+            dl2 = StatefulDataLoader(ds2, num_workers=2, batch_size=None)
+            items2 = [item[2]["n_examples_packed"] for item in dl2]
+
+            self.assertEqual(
+                len(items0),
+                len(items2),
+                f"num_workers=2 yielded {len(items2)} items vs "
+                f"{len(items0)} with num_workers=0 ({len(items2)/len(items0):.0f}x duplication)",
+            )
+            self.assertEqual(items0, items2)
+
+
 if __name__ == "__main__":
     unittest.main()
