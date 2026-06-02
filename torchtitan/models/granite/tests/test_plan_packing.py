@@ -766,6 +766,53 @@ class TestPrepackedRandomBalanced(unittest.TestCase):
                     f"dp=8/accum=2",
                 )
 
+    def test_random_and_balanced_same_global_batches(self):
+        """prepacked_random and prepacked_random_balanced produce identical pack sets
+        per optimizer step — balanced only reorders within each step window."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pretok_dir = _create_test_pretok_dir(Path(tmp), n_examples=500)
+            output_dir = Path(tmp) / "plan"
+            plan_packing(pretok_dir, seq_len=8192, output_dir=output_dir)
+
+            dp = 8
+            accum = 4
+
+            ds_random = PlannedPackingDataset(
+                pack_plan_path=str(output_dir),
+                seq_len=8192,
+                packing="prepacked_random",
+                dp_world_size=dp,
+                accum_steps=accum,
+                seed=42,
+            )
+            ds_balanced = PlannedPackingDataset(
+                pack_plan_path=str(output_dir),
+                seq_len=8192,
+                packing="prepacked_random_balanced",
+                dp_world_size=dp,
+                accum_steps=accum,
+                seed=42,
+            )
+
+            chunks_random = ds_random._epoch_setup(0)
+            chunks_balanced = ds_balanced._epoch_setup(0)
+
+            n_steps = len(chunks_random) // accum
+            self.assertEqual(n_steps, len(chunks_balanced) // accum)
+
+            for step in range(n_steps):
+                rows_r = chunks_random[step * accum : (step + 1) * accum]
+                rows_b = chunks_balanced[step * accum : (step + 1) * accum]
+                set_r = set(rows_r.flatten().tolist())
+                set_b = set(rows_b.flatten().tolist())
+                self.assertEqual(
+                    set_r,
+                    set_b,
+                    f"Step {step}: pack sets differ between prepacked_random and "
+                    f"prepacked_random_balanced (dp={dp}, accum={accum})",
+                )
+
     def test_state_dict_resume(self):
         ds, _ = self._make_dataset(n_examples=300, dp_world_size=4, accum_steps=2)
         results_full = [(d["attn_cost"].item(), s["n_total_tokens"]) for d, _, s in ds]
