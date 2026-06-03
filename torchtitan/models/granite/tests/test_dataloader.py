@@ -362,6 +362,41 @@ class TestMultiWorkerSharding(unittest.TestCase):
         self.assertEqual(stats_after["n_trained_tokens"], stats_before["n_trained_tokens"])
         self.assertEqual(stats_after["n_examples_packed"], stats_before["n_examples_packed"])
 
+    def test_epochs_reaches_one_after_full_pass(self):
+        """epochs ≈ 1.0 after consuming all examples once (online packing)."""
+        seq_len = 16
+        examples = [
+            ([1, 10, 20, _EOS_ID], [IGNORE_INDEX, IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
+            ([1, 30, 40, _EOS_ID], [IGNORE_INDEX, IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
+            ([1, 50, 60, _EOS_ID], [IGNORE_INDEX, IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
+            ([1, 70, 80, _EOS_ID], [IGNORE_INDEX, IGNORE_INDEX, _EOS_ID, IGNORE_INDEX]),
+        ]
+        manifest_path = _make_shard(self._tmp, examples)
+
+        from torchtitan.components.tokenizer import HuggingFaceTokenizer
+
+        tokenizer = HuggingFaceTokenizer(tokenizer_path="tests/assets/tokenizer")
+
+        loader = GranitePreTokenizedDataLoader(
+            GranitePreTokenizedDataLoader.Config(
+                dataset_path=str(manifest_path),
+                infinite=False,
+                num_workers=0,
+            ),
+            dp_world_size=1,
+            dp_rank=0,
+            tokenizer=tokenizer,
+            seq_len=seq_len,
+            local_batch_size=1,
+        )
+
+        for _ in loader:
+            pass
+
+        stats = loader.get_data_stats()
+        self.assertEqual(stats["n_examples_packed"], len(examples))
+        self.assertAlmostEqual(stats["epochs"], 1.0, delta=0.01)
+
 
 class TestStandardBufferPacking(unittest.TestCase):
     def setUp(self):

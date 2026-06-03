@@ -937,6 +937,7 @@ class PlannedPackingDataset(IterableDataset, Stateful):
         self._example_indices: list[list[int]] = [
             row.as_py() for row in plan_table.column("example_indices")
         ]
+        self._total_examples: int = sum(len(ex) for ex in self._example_indices)
         self._pack_costs: np.ndarray = plan_table.column("attn_cost").to_numpy()
         self._pack_total_tokens: np.ndarray = (
             plan_table.column("total_tokens").to_numpy()
@@ -973,8 +974,12 @@ class PlannedPackingDataset(IterableDataset, Stateful):
         )
 
     @property
-    def num_examples(self) -> int:
+    def num_packs(self) -> int:
         return len(self._example_indices)
+
+    @property
+    def num_examples(self) -> int:
+        return self._total_examples // self._dp_world_size
 
     def _epoch_setup(self, epoch: int) -> np.ndarray:
         """Compute the chunk-to-pack assignment for a given epoch.

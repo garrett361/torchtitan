@@ -312,7 +312,7 @@ class TestPlannedPackingDataset(unittest.TestCase):
         ds, tmp_dir = self._make_dataset(
             n_examples=200, dp_world_size=dp_world_size
         )
-        n_packs = ds.num_examples
+        n_packs = ds.num_packs
         expected_steps = n_packs // dp_world_size
         actual = sum(1 for _ in ds)
         self.assertEqual(actual, expected_steps)
@@ -1025,6 +1025,48 @@ class TestPlannedPackingWorkers(unittest.TestCase):
                     f"Step {step}: global batch pack multisets differ between "
                     f"prepacked_random and prepacked_random_balanced",
                 )
+
+
+    def test_epochs_reaches_one_after_full_pass(self):
+        """epochs ≈ 1.0 after consuming all packs in one epoch.
+
+        Uses dp_world_size=1 so the single rank sees all packs, avoiding
+        variance from random pack-to-rank assignment with small test data.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            pretok_dir = _create_test_pretok_dir(Path(tmp), n_examples=200)
+            seq_len = 8192
+            plan_packing(
+                pretok_dir,
+                seq_len=seq_len,
+                output_dir=pretok_dir / "pack_plans" / f"seqlen_{seq_len}",
+            )
+
+            dp = 1
+            accum = 4
+            tokenizer = HuggingFaceTokenizer(tokenizer_path="tests/assets/tokenizer")
+            loader = GranitePreTokenizedDataLoader(
+                GranitePreTokenizedDataLoader.Config(
+                    dataset_path=str(pretok_dir),
+                    packing="prepacked_random_balanced",
+                    infinite=False,
+                    num_workers=0,
+                ),
+                dp_world_size=dp,
+                dp_rank=0,
+                tokenizer=tokenizer,
+                seq_len=seq_len,
+                local_batch_size=1,
+                accum_steps=accum,
+            )
+
+            for _ in loader:
+                pass
+
+            stats = loader.get_data_stats()
+            # With dp=1, all packs go to rank 0. The only source of deviation
+            # from 1.0 is the window-remainder drop (n_packs % gbs packs dropped).
+            self.assertAlmostEqual(stats["epochs"], 1.0, delta=0.1)
 
 
 if __name__ == "__main__":
