@@ -655,14 +655,14 @@ class StandardPackingDataset(PreTokenizedDataset):
     """
 
     _arrow_list_columns = ("input_ids", "labels")
-    _arrow_scalar_columns = ("n_tokens",)
+    _arrow_scalar_columns = ("n_tokens", "attn_cost")
     _cost_list_columns: tuple[str, ...] = ()
 
     def _cost_from_metadata(self, scalars, list_arrays, idx):
         n = int(scalars["n_tokens"][idx])
         if n > self.seq_len:
             return None
-        return (n, n * (n + 1) // 2)
+        return (n, int(scalars["attn_cost"][idx]))
 
     def _materialize_item(self, row_idx: int) -> _ChatItem:
         table_slice = self._data.data.slice(row_idx, 1)
@@ -746,28 +746,14 @@ class BackboneSuffixDataset(PreTokenizedDataset):
     _arrow_list_columns = (
         "input_ids", "labels", "positions", "suffix_starts", "insertion_limits",
     )
-    _arrow_scalar_columns = ("n_tokens",)
-    _cost_list_columns = ("suffix_starts", "insertion_limits")
+    _arrow_scalar_columns = ("n_tokens", "attn_cost")
+    _cost_list_columns: tuple[str, ...] = ()
 
     def _cost_from_metadata(self, scalars, list_arrays, idx):
         n = int(scalars["n_tokens"][idx])
         if n > self.seq_len:
             return None
-        offsets, values = list_arrays["suffix_starts"]
-        suffix_starts = values[offsets[idx]:offsets[idx + 1]]
-        offsets, values = list_arrays["insertion_limits"]
-        insertion_limits = values[offsets[idx]:offsets[idx + 1]]
-        if len(suffix_starts) == 0:
-            return (n, n * (n + 1) // 2)
-        backbone_len = int(suffix_starts[0])
-        cost = backbone_len * (backbone_len + 1) // 2
-        for k in range(len(suffix_starts)):
-            s_start = int(suffix_starts[k])
-            s_end = int(suffix_starts[k + 1]) if k + 1 < len(suffix_starts) else n
-            s_len = s_end - s_start
-            cost += s_len * (s_len + 1) // 2
-            cost += s_len * (int(insertion_limits[k]) + 1)
-        return (n, cost)
+        return (n, int(scalars["attn_cost"][idx]))
 
     def _materialize_item(self, row_idx: int) -> _BackboneSuffixItem:
         table_slice = self._data.data.slice(row_idx, 1)

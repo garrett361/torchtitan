@@ -607,77 +607,61 @@ class TestCrossRankLPT(unittest.TestCase):
             self.assertTrue(b1[0]["input"].equal(b2[0]["input"]))
 
 
-class TestCostFromMetadata(unittest.TestCase):
-    """Tests for _cost_from_metadata: cost computation from Arrow metadata."""
+class TestRefillBufferReadsAttnCost(unittest.TestCase):
+    """Verify _refill_buffer reads attn_cost from Arrow and populates the buffer."""
 
-    def test_standard_triangular(self):
-        """StandardPackingDataset returns (n, n*(n+1)//2) for valid rows."""
-        import numpy as np
+    def test_standard_buffer_uses_stored_attn_cost(self):
+        """Items in the buffer have cost matching the stored attn_cost column."""
+        ds = _build_dataset(packing="longest", buffer_size=6)
+        ds._prepare_iter()
+        ds._refill_buffer()
 
-        ds = _build_dataset(packing="longest")
-        for n, expected_cost in [(1, 1), (4, 10), (8, 36), (16, 136)]:
-            scalars = {"n_tokens": np.array([n])}
-            result = ds._cost_from_metadata(scalars, {}, 0)
-            self.assertEqual(result, (n, expected_cost))
+        self.assertGreater(len(ds._costs), 0)
+        for i, row_idx in enumerate(ds._row_indices):
+            stored_cost = int(ds._data[row_idx]["attn_cost"])
+            self.assertEqual(ds._costs[i], stored_cost)
 
-    def test_standard_skips_oversized(self):
-        """Returns None when n_tokens > seq_len."""
-        import numpy as np
+    def test_standard_oversized_items_excluded(self):
+        """Items with n_tokens > seq_len are not admitted to the buffer."""
+        ds = _build_dataset(seq_len=4, packing="longest", buffer_size=10)
+        ds._prepare_iter()
+        ds._refill_buffer()
 
-        ds = _build_dataset(seq_len=8, packing="longest")
-        scalars = {"n_tokens": np.array([9])}
-        self.assertIsNone(ds._cost_from_metadata(scalars, {}, 0))
+        for length in ds._lengths:
+            self.assertLessEqual(length, 4)
 
-    def test_backbone_suffix_no_suffixes(self):
-        """With no suffixes, BackboneSuffixDataset returns triangular cost."""
-        import numpy as np
+    def test_backbone_suffix_buffer_uses_stored_attn_cost(self):
+        """BackboneSuffixDataset buffer costs match stored attn_cost column."""
+        from torchtitan.models.granite.tests.test_backbone_suffix_dataset import (
+            _example_no_suffix,
+            _example_one_suffix,
+            _example_two_suffixes,
+            _make_backbone_suffix_shard,
+        )
 
-        ds = _build_backbone_suffix_dataset()
-        scalars = {"n_tokens": np.array([6])}
-        list_arrays = {
-            "suffix_starts": (np.array([0, 0]), np.array([], dtype=np.int64)),
-            "insertion_limits": (np.array([0, 0]), np.array([], dtype=np.int64)),
-        }
-        result = ds._cost_from_metadata(scalars, list_arrays, 0)
-        self.assertEqual(result, (6, 21))
+        from torchtitan.models.granite.pretokenized_dataset import (
+            BackboneSuffixDataset,
+        )
 
-    def test_backbone_suffix_known_structure(self):
-        """Verify cost for B=4, one suffix of length 3, ins_limit=2.
+        import tempfile
+        import shutil
 
-        backbone self: 4*5//2 = 10
-        suffix self:   3*4//2 = 6
-        suffix→backbone: 3*(2+1) = 9
-        total: 25
-        """
-        import numpy as np
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            examples = [_example_no_suffix(), _example_one_suffix(), _example_two_suffixes()]
+            manifest_path = _make_backbone_suffix_shard(tmp, examples)
+            ds = BackboneSuffixDataset(
+                manifest_path, seq_len=32, infinite=False, buffer_size=4
+            )
+            ds._prepare_iter()
+            ds._refill_buffer()
 
-        ds = _build_backbone_suffix_dataset()
-        scalars = {"n_tokens": np.array([7])}
-        list_arrays = {
-            "suffix_starts": (np.array([0, 1]), np.array([4])),
-            "insertion_limits": (np.array([0, 1]), np.array([2])),
-        }
-        result = ds._cost_from_metadata(scalars, list_arrays, 0)
-        self.assertEqual(result, (7, 25))
-
-    def test_backbone_suffix_multiple_suffixes(self):
-        """Verify cost with B=3, two suffixes S1=2 (ins=1), S2=2 (ins=2).
-
-        backbone self: 3*4//2 = 6
-        S1 self: 2*3//2 = 3, S1→backbone: 2*(1+1) = 4
-        S2 self: 2*3//2 = 3, S2→backbone: 2*(2+1) = 6
-        total: 22
-        """
-        import numpy as np
-
-        ds = _build_backbone_suffix_dataset()
-        scalars = {"n_tokens": np.array([7])}
-        list_arrays = {
-            "suffix_starts": (np.array([0, 2]), np.array([3, 5])),
-            "insertion_limits": (np.array([0, 2]), np.array([1, 2])),
-        }
-        result = ds._cost_from_metadata(scalars, list_arrays, 0)
-        self.assertEqual(result, (7, 22))
+            self.assertEqual(len(ds._costs), 3)
+            expected_costs = [ex["attn_cost"] for ex in examples]
+            for i, row_idx in enumerate(ds._row_indices):
+                self.assertEqual(ds._costs[i], expected_costs[row_idx])
+        finally:
+            shutil.rmtree(tmp)
 
 
 class TestSelectAttnBalanced(unittest.TestCase):
@@ -898,6 +882,7 @@ class TestMaterializeItem(unittest.TestCase):
             "suffix_starts": [[3], []],
             "insertion_limits": [[2], []],
             "n_tokens": [5, 3],
+            "attn_cost": [15, 6],
         })
         manifest = {
             "strategy": "backbone_suffix",
@@ -1119,51 +1104,6 @@ class TestEpochWrap(unittest.TestCase):
             x for x in w if "remaining at end of epoch" in str(x.message)
         ]
         self.assertGreater(len(remnant_warnings), 0)
-
-
-def _build_backbone_suffix_dataset(seq_len=16, buffer_size=6):
-    """Helper to build a BackboneSuffixDataset for cost metadata tests."""
-    import json
-    import tempfile
-
-    import numpy as np
-    from datasets import Dataset
-
-    from torchtitan.models.granite.pretokenized_dataset import BackboneSuffixDataset
-
-    manifest = {
-        "strategy": "backbone_suffix",
-        "tokenizer": {"eos_token_id": 0},
-        "shards": {"completed": []},
-        "stats": {"total_examples": 0},
-    }
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    json.dump(manifest, tmp)
-    tmp.close()
-
-    empty_ds = Dataset.from_dict({
-        "input_ids": [[]],
-        "labels": [[]],
-        "positions": [[]],
-        "suffix_starts": [[]],
-        "insertion_limits": [[]],
-        "n_tokens": [0],
-    })
-
-    try:
-        return BackboneSuffixDataset(
-            manifest_path=tmp.name,
-            seq_len=seq_len,
-            dp_rank=0,
-            dp_world_size=1,
-            infinite=False,
-            _manifest=manifest,
-            _full_dataset=empty_ds,
-            packing="attn_balanced",
-            buffer_size=buffer_size,
-        )
-    finally:
-        os.unlink(tmp.name)
 
 
 if __name__ == "__main__":

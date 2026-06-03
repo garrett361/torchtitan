@@ -395,6 +395,7 @@ class TokenizationStrategy(ABC):
             try:
                 self._check_forbidden_content(messages)
                 result = self._tokenize_one(messages)
+                result["attn_cost"] = self.get_attn_cost(result)
                 for key in results:
                     results[key].append(result[key])
             except Exception as e:
@@ -404,6 +405,11 @@ class TokenizationStrategy(ABC):
         if failures:
             _append_failures(self.failures_path, failures)
         return results
+
+    @abstractmethod
+    def get_attn_cost(self, result: dict[str, list[int] | int]) -> int:
+        """Compute attention cost (sum of causal mask entries) for a tokenized sample."""
+        ...
 
     @property
     @abstractmethod
@@ -609,6 +615,20 @@ class BackboneSuffixStrategy(TokenizationStrategy):
             "n_tokens": len(final_input_ids),
         }
 
+    def get_attn_cost(self, result: dict[str, list[int] | int]) -> int:
+        suffix_starts = result["suffix_starts"]
+        insertion_limits = result["insertion_limits"]
+        n = result["n_tokens"]
+        if not suffix_starts:
+            return n * (n + 1) // 2
+        backbone_len = suffix_starts[0]
+        cost = backbone_len * (backbone_len + 1) // 2
+        for k in range(len(suffix_starts)):
+            s_end = suffix_starts[k + 1] if k + 1 < len(suffix_starts) else n
+            s_len = s_end - suffix_starts[k]
+            cost += s_len * (s_len + 1) // 2 + s_len * (insertion_limits[k] + 1)
+        return cost
+
     @property
     def column_schema(self) -> dict:
         import pyarrow as pa
@@ -620,6 +640,7 @@ class BackboneSuffixStrategy(TokenizationStrategy):
             "suffix_starts": pa.list_(pa.int32()),
             "insertion_limits": pa.list_(pa.int32()),
             "n_tokens": pa.int32(),
+            "attn_cost": pa.int64(),
         }
 
 
@@ -658,6 +679,10 @@ class TruncateLastStrategy(TokenizationStrategy):
     def _tokenize_one(self, messages: list[dict]) -> dict[str, list[int] | int]:
         return _tokenize_last_turn(messages, self.tokenizer, self.chat_template_kwargs)
 
+    def get_attn_cost(self, result: dict[str, list[int] | int]) -> int:
+        n = result["n_tokens"]
+        return n * (n + 1) // 2
+
     @property
     def column_schema(self) -> dict:
         import pyarrow as pa
@@ -666,6 +691,7 @@ class TruncateLastStrategy(TokenizationStrategy):
             "input_ids": pa.list_(pa.int32()),
             "labels": pa.list_(pa.int32()),
             "n_tokens": pa.int32(),
+            "attn_cost": pa.int64(),
         }
 
 
@@ -724,6 +750,10 @@ class TruncateEveryTurnStrategy(TokenizationStrategy):
     def _tokenize_one(self, messages: list[dict]) -> dict[str, list[int] | int]:
         return _tokenize_last_turn(messages, self.tokenizer, self.chat_template_kwargs)
 
+    def get_attn_cost(self, result: dict[str, list[int] | int]) -> int:
+        n = result["n_tokens"]
+        return n * (n + 1) // 2
+
     def __call__(self, batch: dict[str, list]) -> dict[str, list]:
         results: dict[str, list] = {k: [] for k in self.column_schema}
         failures: list[dict] = []
@@ -749,12 +779,14 @@ class TruncateEveryTurnStrategy(TokenizationStrategy):
                     for asst_idx in asst_indices:
                         truncated = effective[: asst_idx + 1]
                         result = self._tokenize_one(truncated)
+                        result["attn_cost"] = self.get_attn_cost(result)
                         for key in results:
                             results[key].append(result[key])
                 else:
                     result = _tokenize_all_turns(
                         effective, self.tokenizer, self.chat_template_kwargs
                     )
+                    result["attn_cost"] = self.get_attn_cost(result)
                     for key in results:
                         results[key].append(result[key])
             except Exception as e:
@@ -773,4 +805,5 @@ class TruncateEveryTurnStrategy(TokenizationStrategy):
             "input_ids": pa.list_(pa.int32()),
             "labels": pa.list_(pa.int32()),
             "n_tokens": pa.int32(),
+            "attn_cost": pa.int64(),
         }

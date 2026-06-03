@@ -33,6 +33,7 @@ def _make_backbone_suffix_shard(
         ("suffix_starts", pa.list_(pa.int32())),
         ("insertion_limits", pa.list_(pa.int32())),
         ("n_tokens", pa.int64()),
+        ("attn_cost", pa.int64()),
     ])
     table = pa.table(
         {
@@ -42,6 +43,7 @@ def _make_backbone_suffix_shard(
             "suffix_starts": [ex["suffix_starts"] for ex in examples],
             "insertion_limits": [ex["insertion_limits"] for ex in examples],
             "n_tokens": [ex["n_tokens"] for ex in examples],
+            "attn_cost": [ex["attn_cost"] for ex in examples],
         },
         schema=schema,
     )
@@ -79,6 +81,7 @@ def _example_no_suffix():
         "suffix_starts": [],
         "insertion_limits": [],
         "n_tokens": 6,
+        "attn_cost": 21,
     }
 
 
@@ -94,6 +97,7 @@ def _example_one_suffix():
         "suffix_starts": [4],
         "insertion_limits": [1],
         "n_tokens": 7,
+        "attn_cost": 22,
     }
 
 
@@ -110,6 +114,7 @@ def _example_two_suffixes():
         "suffix_starts": [5, 8],
         "insertion_limits": [1, 3],
         "n_tokens": 10,
+        "attn_cost": 38,
     }
 
 
@@ -167,6 +172,7 @@ class TestBackboneSuffixDatasetOutputShape(unittest.TestCase):
             "suffix_starts": [],
             "insertion_limits": [],
             "n_tokens": 3,
+            "attn_cost": 6,
         }
         ds = self._make_dataset([big, small, tiny], seq_len=seq_len)
         batches = list(ds)

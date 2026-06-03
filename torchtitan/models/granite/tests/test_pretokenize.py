@@ -248,6 +248,17 @@ class TestTruncateLastStrategyBasic(unittest.TestCase):
         self.assertIn("labels", result)
         self.assertIn("n_tokens", result)
 
+    def test_call_output_includes_attn_cost(self):
+        msgs = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "world"},
+        ]
+        output = self.strategy({"messages": [msgs]})
+        self.assertIn("attn_cost", output)
+        self.assertEqual(len(output["attn_cost"]), 1)
+        n = output["n_tokens"][0]
+        self.assertEqual(output["attn_cost"][0], n * (n + 1) // 2)
+
     def test_n_tokens_equals_len_input_ids(self):
         msgs = [
             {"role": "user", "content": "hello"},
@@ -390,8 +401,11 @@ class TestTruncateLastStrategyBasic(unittest.TestCase):
         self.assertEqual(len(output["input_ids"]), 3)
         self.assertEqual(len(output["labels"]), 3)
         self.assertEqual(len(output["n_tokens"]), 3)
+        self.assertEqual(len(output["attn_cost"]), 3)
         for i in range(3):
             self.assertEqual(output["n_tokens"][i], len(output["input_ids"][i]))
+            n = output["n_tokens"][i]
+            self.assertEqual(output["attn_cost"][i], n * (n + 1) // 2)
 
 
 @unittest.skipUnless(
@@ -442,10 +456,13 @@ class TestTruncateLastStrategyOrchestrator(unittest.TestCase):
             self.assertIn("input_ids", loaded.column_names)
             self.assertIn("labels", loaded.column_names)
             self.assertIn("n_tokens", loaded.column_names)
+            self.assertIn("attn_cost", loaded.column_names)
             for row in loaded:
                 self.assertEqual(row["n_tokens"], len(row["input_ids"]))
                 self.assertEqual(len(row["labels"]), len(row["input_ids"]))
                 self.assertEqual(row["labels"][-1], self.tokenizer.eos_id)
+                n = row["n_tokens"]
+                self.assertEqual(row["attn_cost"], n * (n + 1) // 2)
 
 
 @unittest.skipUnless(
@@ -1178,7 +1195,7 @@ class TestPyarrowTotalTrained(unittest.TestCase):
 
 
 class TestVectorizedStats(unittest.TestCase):
-    """Tests for _compute_train_tokens and _compute_attn_cost vectorized helpers."""
+    """Tests for _compute_train_tokens and get_attn_cost."""
 
     def _make_dataset(self, columns: dict) -> "Dataset":
         import pyarrow as pa
@@ -1217,30 +1234,29 @@ class TestVectorizedStats(unittest.TestCase):
         result = _compute_train_tokens(ds)
         np.testing.assert_array_equal(result, [0, 0])
 
-    def test_compute_attn_cost_simple(self):
-        from torchtitan.models.granite.scripts.pretokenize_sft import (
-            _compute_attn_cost,
+    def test_get_attn_cost_simple(self):
+        from torchtitan.models.granite.tokenization_strategies import (
+            TruncateLastStrategy,
         )
 
-        ds = self._make_dataset({"n_tokens": [1, 4, 8, 16]})
-        result = _compute_attn_cost(ds, is_backbone_suffix=False)
-        np.testing.assert_array_equal(result, [1, 10, 36, 136])
+        strategy = TruncateLastStrategy(_HF_ASSETS_PATH)
+        for n, expected in [(1, 1), (4, 10), (8, 36), (16, 136)]:
+            result = strategy.get_attn_cost({"n_tokens": n})
+            self.assertEqual(result, expected)
 
-    def test_compute_attn_cost_backbone_suffix_no_suffixes(self):
+    def test_get_attn_cost_backbone_suffix_no_suffixes(self):
         """n=6, no suffixes → 6*7//2 = 21."""
-        from torchtitan.models.granite.scripts.pretokenize_sft import (
-            _compute_attn_cost,
+        from torchtitan.models.granite.tokenization_strategies import (
+            BackboneSuffixStrategy,
         )
 
-        ds = self._make_dataset({
-            "n_tokens": [6],
-            "suffix_starts": [[]],
-            "insertion_limits": [[]],
+        strategy = BackboneSuffixStrategy(_HF_ASSETS_PATH)
+        result = strategy.get_attn_cost({
+            "n_tokens": 6, "suffix_starts": [], "insertion_limits": [],
         })
-        result = _compute_attn_cost(ds, is_backbone_suffix=True)
-        np.testing.assert_array_equal(result, [21])
+        self.assertEqual(result, 21)
 
-    def test_compute_attn_cost_backbone_suffix_single(self):
+    def test_get_attn_cost_backbone_suffix_single(self):
         """B=4, one suffix len=3, ins_limit=2.
 
         backbone: 4*5//2 = 10
@@ -1248,19 +1264,17 @@ class TestVectorizedStats(unittest.TestCase):
         suffix→backbone: 3*(2+1) = 9
         total: 25
         """
-        from torchtitan.models.granite.scripts.pretokenize_sft import (
-            _compute_attn_cost,
+        from torchtitan.models.granite.tokenization_strategies import (
+            BackboneSuffixStrategy,
         )
 
-        ds = self._make_dataset({
-            "n_tokens": [7],
-            "suffix_starts": [[4]],
-            "insertion_limits": [[2]],
+        strategy = BackboneSuffixStrategy(_HF_ASSETS_PATH)
+        result = strategy.get_attn_cost({
+            "n_tokens": 7, "suffix_starts": [4], "insertion_limits": [2],
         })
-        result = _compute_attn_cost(ds, is_backbone_suffix=True)
-        np.testing.assert_array_equal(result, [25])
+        self.assertEqual(result, 25)
 
-    def test_compute_attn_cost_backbone_suffix_multiple(self):
+    def test_get_attn_cost_backbone_suffix_multiple(self):
         """B=3, S1=2 (ins=1), S2=2 (ins=2).
 
         backbone: 3*4//2 = 6
@@ -1268,33 +1282,32 @@ class TestVectorizedStats(unittest.TestCase):
         S2 self: 2*3//2 = 3, S2→backbone: 2*(2+1) = 6
         total: 22
         """
-        from torchtitan.models.granite.scripts.pretokenize_sft import (
-            _compute_attn_cost,
+        from torchtitan.models.granite.tokenization_strategies import (
+            BackboneSuffixStrategy,
         )
 
-        ds = self._make_dataset({
-            "n_tokens": [7],
-            "suffix_starts": [[3, 5]],
-            "insertion_limits": [[1, 2]],
+        strategy = BackboneSuffixStrategy(_HF_ASSETS_PATH)
+        result = strategy.get_attn_cost({
+            "n_tokens": 7, "suffix_starts": [3, 5], "insertion_limits": [1, 2],
         })
-        result = _compute_attn_cost(ds, is_backbone_suffix=True)
-        np.testing.assert_array_equal(result, [22])
+        self.assertEqual(result, 22)
 
-    def test_compute_attn_cost_backbone_suffix_mixed_batch(self):
-        """Batch with varying suffix counts: 0, 1, and 2 suffixes."""
-        from torchtitan.models.granite.scripts.pretokenize_sft import (
-            _compute_attn_cost,
+    def test_get_attn_cost_backbone_suffix_mixed(self):
+        """Multiple examples with varying suffix counts: 0, 1, and 2 suffixes."""
+        from torchtitan.models.granite.tokenization_strategies import (
+            BackboneSuffixStrategy,
         )
 
-        ds = self._make_dataset({
-            "n_tokens": [6, 7, 7],
-            "suffix_starts": [[], [4], [3, 5]],
-            "insertion_limits": [[], [2], [1, 2]],
-        })
-        result = _compute_attn_cost(ds, is_backbone_suffix=True)
-        np.testing.assert_array_equal(result, [21, 25, 22])
+        strategy = BackboneSuffixStrategy(_HF_ASSETS_PATH)
+        cases = [
+            ({"n_tokens": 6, "suffix_starts": [], "insertion_limits": []}, 21),
+            ({"n_tokens": 7, "suffix_starts": [4], "insertion_limits": [2]}, 25),
+            ({"n_tokens": 7, "suffix_starts": [3, 5], "insertion_limits": [1, 2]}, 22),
+        ]
+        for result_dict, expected in cases:
+            self.assertEqual(strategy.get_attn_cost(result_dict), expected)
 
-    def test_compute_attn_cost_backbone_suffix_zero_backbone(self):
+    def test_get_attn_cost_backbone_suffix_zero_backbone(self):
         """Suffix spanning entire sequence (backbone_len=0, ins_limit=0).
 
         backbone: 0*1//2 = 0
@@ -1302,30 +1315,122 @@ class TestVectorizedStats(unittest.TestCase):
         suffix→backbone: 5*(0+1) = 5
         total: 20
         """
-        from torchtitan.models.granite.scripts.pretokenize_sft import (
-            _compute_attn_cost,
+        from torchtitan.models.granite.tokenization_strategies import (
+            BackboneSuffixStrategy,
         )
 
-        ds = self._make_dataset({
-            "n_tokens": [5],
-            "suffix_starts": [[0]],
-            "insertion_limits": [[0]],
+        strategy = BackboneSuffixStrategy(_HF_ASSETS_PATH)
+        result = strategy.get_attn_cost({
+            "n_tokens": 5, "suffix_starts": [0], "insertion_limits": [0],
         })
-        result = _compute_attn_cost(ds, is_backbone_suffix=True)
-        np.testing.assert_array_equal(result, [20])
+        self.assertEqual(result, 20)
 
-    def test_compute_attn_cost_simple_large_values(self):
-        """Values large enough to overflow int32, verifying int64 dtype."""
-        from torchtitan.models.granite.scripts.pretokenize_sft import (
-            _compute_attn_cost,
+    def test_get_attn_cost_large_values(self):
+        """Values large enough to overflow int32."""
+        from torchtitan.models.granite.tokenization_strategies import (
+            TruncateLastStrategy,
         )
 
-        ds = self._make_dataset({"n_tokens": [65536]})
-        result = _compute_attn_cost(ds, is_backbone_suffix=False)
+        strategy = TruncateLastStrategy(_HF_ASSETS_PATH)
+        result = strategy.get_attn_cost({"n_tokens": 65536})
         expected = 65536 * 65537 // 2
         self.assertGreater(expected, 2**31)
-        np.testing.assert_array_equal(result, [expected])
-        self.assertEqual(result.dtype, np.int64)
+        self.assertEqual(result, expected)
+
+
+@unittest.skipUnless(
+    _HF_ASSETS_PATH, "HF_ASSETS_PATH not set — needs Granite tokenizer"
+)
+class TestColumnSchemaIncludesAttnCost(unittest.TestCase):
+    """Every strategy declares attn_cost in its column_schema."""
+
+    def test_truncate_last(self):
+        import pyarrow as pa
+
+        from torchtitan.models.granite.tokenization_strategies import (
+            TruncateLastStrategy,
+        )
+
+        schema = TruncateLastStrategy(_HF_ASSETS_PATH).column_schema
+        self.assertIn("attn_cost", schema)
+        self.assertEqual(schema["attn_cost"], pa.int64())
+
+    def test_full_thinking(self):
+        import pyarrow as pa
+
+        from torchtitan.models.granite.tokenization_strategies import (
+            FullThinkingStrategy,
+        )
+
+        schema = FullThinkingStrategy(_HF_ASSETS_PATH).column_schema
+        self.assertIn("attn_cost", schema)
+        self.assertEqual(schema["attn_cost"], pa.int64())
+
+    def test_truncate_every_turn(self):
+        import pyarrow as pa
+
+        from torchtitan.models.granite.tokenization_strategies import (
+            TruncateEveryTurnStrategy,
+        )
+
+        schema = TruncateEveryTurnStrategy(_HF_ASSETS_PATH).column_schema
+        self.assertIn("attn_cost", schema)
+        self.assertEqual(schema["attn_cost"], pa.int64())
+
+    def test_backbone_suffix(self):
+        import pyarrow as pa
+
+        from torchtitan.models.granite.tokenization_strategies import (
+            BackboneSuffixStrategy,
+        )
+
+        schema = BackboneSuffixStrategy(_HF_ASSETS_PATH).column_schema
+        self.assertIn("attn_cost", schema)
+        self.assertEqual(schema["attn_cost"], pa.int64())
+
+
+@unittest.skipUnless(
+    _HF_ASSETS_PATH, "HF_ASSETS_PATH not set — needs Granite tokenizer"
+)
+class TestBackboneSuffixAttnCostRealOutput(unittest.TestCase):
+    """Verify get_attn_cost on actual BackboneSuffixStrategy tokenized output."""
+
+    @classmethod
+    def setUpClass(cls):
+        from torchtitan.models.granite.tokenization_strategies import (
+            BackboneSuffixStrategy,
+        )
+
+        cls.strategy = BackboneSuffixStrategy(_HF_ASSETS_PATH)
+
+    def test_multi_turn_cost_matches_formula(self):
+        msgs = [
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "assistant", "content": "4", "reasoning_content": "Simple math"},
+            {"role": "user", "content": "And 3+3?"},
+            {"role": "assistant", "content": "6", "reasoning_content": "Also simple"},
+        ]
+        output = self.strategy({"messages": [msgs]})
+        self.assertEqual(len(output["attn_cost"]), 1)
+
+        n = output["n_tokens"][0]
+        suffix_starts = output["suffix_starts"][0]
+        insertion_limits = output["insertion_limits"][0]
+
+        # Recompute expected cost from the actual structural metadata
+        if not suffix_starts:
+            expected = n * (n + 1) // 2
+        else:
+            backbone_len = suffix_starts[0]
+            expected = backbone_len * (backbone_len + 1) // 2
+            for k in range(len(suffix_starts)):
+                s_end = suffix_starts[k + 1] if k + 1 < len(suffix_starts) else n
+                s_len = s_end - suffix_starts[k]
+                expected += s_len * (s_len + 1) // 2 + s_len * (insertion_limits[k] + 1)
+
+        self.assertEqual(output["attn_cost"][0], expected)
+        # Backbone+suffix cost should be less than full causal
+        self.assertLess(expected, n * (n + 1) // 2)
 
 
 if __name__ == "__main__":

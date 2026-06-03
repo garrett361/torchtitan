@@ -38,11 +38,13 @@ def _make_shard(tmp_path: Path, examples: list[tuple[list[int], list[int]]]) -> 
     shards_dir = tmp_path / "shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
 
+    n_tokens_list = [len(ids) for ids, _ in examples]
     ds = Dataset.from_dict(
         {
             "input_ids": [ids for ids, _ in examples],
             "labels": [lbls for _, lbls in examples],
-            "n_tokens": [len(ids) for ids, _ in examples],
+            "n_tokens": n_tokens_list,
+            "attn_cost": [n * (n + 1) // 2 for n in n_tokens_list],
         }
     )
     ds.save_to_disk(str(shards_dir / "shard_0000"))

@@ -70,44 +70,6 @@ def _compute_train_tokens(ds: Dataset) -> np.ndarray:
     return cs[offsets[1:]] - cs[offsets[:-1]]
 
 
-def _compute_attn_cost(ds: Dataset, *, is_backbone_suffix: bool) -> np.ndarray:
-    """Vectorized per-example attention cost (sum of causal mask entries)."""
-    n_tokens_arr = np.array(ds["n_tokens"], dtype=np.int64)
-    if not is_backbone_suffix:
-        return n_tokens_arr * (n_tokens_arr + 1) // 2
-
-    ss_arr = ds.data.column("suffix_starts").combine_chunks()
-    il_arr = ds.data.column("insertion_limits").combine_chunks()
-    ss_offsets = ss_arr.offsets.to_numpy().astype(np.int64)
-    ss_flat = ss_arr.flatten().to_numpy().astype(np.int64)
-    il_flat = il_arr.flatten().to_numpy().astype(np.int64)
-
-    num_suffixes = ss_offsets[1:] - ss_offsets[:-1]
-    has_suffixes = num_suffixes > 0
-    n_examples = len(ds)
-
-    backbone_len = n_tokens_arr.copy()
-    backbone_len[has_suffixes] = ss_flat[ss_offsets[:-1][has_suffixes]]
-    backbone_cost = backbone_len * (backbone_len + 1) // 2
-
-    example_indices = np.repeat(np.arange(n_examples), num_suffixes)
-    is_last = np.zeros(len(ss_flat), dtype=bool)
-    is_last[ss_offsets[1:][has_suffixes] - 1] = True
-
-    s_end = np.empty(len(ss_flat), dtype=np.int64)
-    s_end[~is_last] = ss_flat[np.where(~is_last)[0] + 1]
-    s_end[is_last] = n_tokens_arr[example_indices[is_last]]
-
-    s_len = s_end - ss_flat
-    per_suffix_cost = s_len * (s_len + 1) // 2 + s_len * (il_flat + 1)
-
-    suffix_cs = np.zeros(len(per_suffix_cost) + 1, dtype=np.int64)
-    np.cumsum(per_suffix_cost, out=suffix_cs[1:])
-    suffix_total = suffix_cs[ss_offsets[1:]] - suffix_cs[ss_offsets[:-1]]
-
-    return backbone_cost + suffix_total
-
-
 _STRATEGIES: dict[str, type[TokenizationStrategy]] = {
     "truncate_last": TruncateLastStrategy,
     "backbone_suffix": BackboneSuffixStrategy,
@@ -307,17 +269,15 @@ def _tokenize_file(
         _write_json_atomic(stats_path, stats)
         return
 
-    is_backbone_suffix = isinstance(strategy, BackboneSuffixStrategy)
     train_tokens_arr = _compute_train_tokens(ds)
-    attn_cost_arr = _compute_attn_cost(ds, is_backbone_suffix=is_backbone_suffix)
     ds = ds.add_column("train_tokens", pa.array(train_tokens_arr, type=pa.int64()))
-    ds = ds.add_column("attn_cost", pa.array(attn_cost_arr, type=pa.int64()))
 
     ds.save_to_disk(str(final_path))
     elapsed = time.monotonic() - t0
 
     n_examples = len(ds)
     n_tokens_arr = np.array(ds["n_tokens"], dtype=np.int64)
+    attn_cost_arr = np.array(ds["attn_cost"], dtype=np.int64)
     total_tokens = int(n_tokens_arr.sum())
     total_trained = int(train_tokens_arr.sum())
     total_attn_cost = int(attn_cost_arr.sum())

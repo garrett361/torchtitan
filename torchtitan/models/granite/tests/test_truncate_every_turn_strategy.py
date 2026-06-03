@@ -41,7 +41,9 @@ class TestTruncateEveryTurnOutputStructure(unittest.TestCase):
             {"role": "assistant", "content": "A", "reasoning_content": "R"},
         ]
         result = self._call([msgs])
-        self.assertEqual(set(result.keys()), {"input_ids", "labels", "n_tokens"})
+        self.assertEqual(
+            set(result.keys()), {"input_ids", "labels", "n_tokens", "attn_cost"}
+        )
 
     def test_n_tokens_consistent(self):
         msgs = [
@@ -90,6 +92,35 @@ class TestTruncateEveryTurnOutputStructure(unittest.TestCase):
         for i in range(2):
             decoded = self.tok.decode(result["input_ids"][i])
             self.assertIn(system_content, decoded)
+
+    def test_fan_out_attn_cost_matches_n_tokens(self):
+        """Each decomposed example has attn_cost = n*(n+1)//2."""
+        msgs = [
+            {"role": "user", "content": "Q"},
+            {"role": "assistant", "content": "A", "reasoning_content": "R"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2", "reasoning_content": "R2"},
+            {"role": "user", "content": "Q3"},
+            {"role": "assistant", "content": "A3", "reasoning_content": "R3"},
+        ]
+        result = self._call([msgs])
+        self.assertEqual(len(result["attn_cost"]), 3)
+        for i in range(3):
+            n = result["n_tokens"][i]
+            self.assertEqual(result["attn_cost"][i], n * (n + 1) // 2)
+
+    def test_no_split_branch_attn_cost(self):
+        """Without historical reasoning, single example still has correct cost."""
+        msgs = [
+            {"role": "user", "content": "Q"},
+            {"role": "assistant", "content": "A"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2"},
+        ]
+        result = self._call([msgs])
+        self.assertEqual(len(result["attn_cost"]), 1)
+        n = result["n_tokens"][0]
+        self.assertEqual(result["attn_cost"][0], n * (n + 1) // 2)
 
 
 @unittest.skipUnless(_HF_ASSETS_PATH, "HF_ASSETS_PATH not set")
