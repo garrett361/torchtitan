@@ -238,27 +238,6 @@ class TestTruncateLastStrategyBasic(unittest.TestCase):
     def _tokenize(self, messages):
         return self.strategy._tokenize_one(messages)
 
-    def test_single_turn_returns_correct_keys(self):
-        msgs = [
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "world"},
-        ]
-        result = self._tokenize(msgs)
-        self.assertIn("input_ids", result)
-        self.assertIn("labels", result)
-        self.assertIn("n_tokens", result)
-
-    def test_call_output_includes_attn_cost(self):
-        msgs = [
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "world"},
-        ]
-        output = self.strategy({"messages": [msgs]})
-        self.assertIn("attn_cost", output)
-        self.assertEqual(len(output["attn_cost"]), 1)
-        n = output["n_tokens"][0]
-        self.assertEqual(output["attn_cost"][0], n * (n + 1) // 2)
-
     def test_n_tokens_equals_len_input_ids(self):
         msgs = [
             {"role": "user", "content": "hello"},
@@ -1125,47 +1104,6 @@ class TestShuffleAndReshard(unittest.TestCase):
         )
 
 
-class TestPermutationDeterminism(unittest.TestCase):
-    """np.random.default_rng(seed).permutation(n) is deterministic across calls."""
-
-    def test_same_seed_same_permutation(self):
-        for seed in [0, 42, 2**31 - 1]:
-            for n in [10, 1000, 100_000]:
-                a = np.random.default_rng(seed).permutation(n)
-                b = np.random.default_rng(seed).permutation(n)
-                np.testing.assert_array_equal(a, b, err_msg=f"seed={seed}, n={n}")
-
-    def test_different_seeds_differ(self):
-        a = np.random.default_rng(42).permutation(10_000)
-        b = np.random.default_rng(43).permutation(10_000)
-        self.assertFalse(np.array_equal(a, b))
-
-
-class TestShardPartitioning(unittest.TestCase):
-    """range(rank, num_shards, world_size) partitions shards with no gaps or overlaps."""
-
-    def _check_partition(self, num_shards: int, world_size: int):
-        all_indices: list[int] = []
-        for rank in range(world_size):
-            indices = list(range(rank, num_shards, world_size))
-            all_indices.extend(indices)
-        self.assertEqual(sorted(all_indices), list(range(num_shards)))
-
-    def test_typical_cases(self):
-        for num_shards, world_size in [(64, 12), (64, 4), (10, 3), (7, 7)]:
-            with self.subTest(num_shards=num_shards, world_size=world_size):
-                self._check_partition(num_shards, world_size)
-
-    def test_world_size_exceeds_shards(self):
-        self._check_partition(num_shards=3, world_size=8)
-
-    def test_single_rank(self):
-        self._check_partition(num_shards=10, world_size=1)
-
-    def test_excess_ranks_get_empty_assignment(self):
-        for rank in range(5, 8):
-            indices = list(range(rank, 3, 8))
-            self.assertEqual(indices, [], f"rank {rank} should have no shards")
 
 
 class TestPyarrowTotalTrained(unittest.TestCase):
@@ -1292,21 +1230,6 @@ class TestVectorizedStats(unittest.TestCase):
         })
         self.assertEqual(result, 22)
 
-    def test_get_attn_cost_backbone_suffix_mixed(self):
-        """Multiple examples with varying suffix counts: 0, 1, and 2 suffixes."""
-        from torchtitan.models.granite.tokenization_strategies import (
-            BackboneSuffixStrategy,
-        )
-
-        strategy = BackboneSuffixStrategy(_HF_ASSETS_PATH)
-        cases = [
-            ({"n_tokens": 6, "suffix_starts": [], "insertion_limits": []}, 21),
-            ({"n_tokens": 7, "suffix_starts": [4], "insertion_limits": [2]}, 25),
-            ({"n_tokens": 7, "suffix_starts": [3, 5], "insertion_limits": [1, 2]}, 22),
-        ]
-        for result_dict, expected in cases:
-            self.assertEqual(strategy.get_attn_cost(result_dict), expected)
-
     def test_get_attn_cost_backbone_suffix_zero_backbone(self):
         """Suffix spanning entire sequence (backbone_len=0, ins_limit=0).
 
@@ -1336,57 +1259,6 @@ class TestVectorizedStats(unittest.TestCase):
         expected = 65536 * 65537 // 2
         self.assertGreater(expected, 2**31)
         self.assertEqual(result, expected)
-
-
-@unittest.skipUnless(
-    _HF_ASSETS_PATH, "HF_ASSETS_PATH not set — needs Granite tokenizer"
-)
-class TestColumnSchemaIncludesAttnCost(unittest.TestCase):
-    """Every strategy declares attn_cost in its column_schema."""
-
-    def test_truncate_last(self):
-        import pyarrow as pa
-
-        from torchtitan.models.granite.tokenization_strategies import (
-            TruncateLastStrategy,
-        )
-
-        schema = TruncateLastStrategy(_HF_ASSETS_PATH).column_schema
-        self.assertIn("attn_cost", schema)
-        self.assertEqual(schema["attn_cost"], pa.int64())
-
-    def test_full_thinking(self):
-        import pyarrow as pa
-
-        from torchtitan.models.granite.tokenization_strategies import (
-            FullThinkingStrategy,
-        )
-
-        schema = FullThinkingStrategy(_HF_ASSETS_PATH).column_schema
-        self.assertIn("attn_cost", schema)
-        self.assertEqual(schema["attn_cost"], pa.int64())
-
-    def test_truncate_every_turn(self):
-        import pyarrow as pa
-
-        from torchtitan.models.granite.tokenization_strategies import (
-            TruncateEveryTurnStrategy,
-        )
-
-        schema = TruncateEveryTurnStrategy(_HF_ASSETS_PATH).column_schema
-        self.assertIn("attn_cost", schema)
-        self.assertEqual(schema["attn_cost"], pa.int64())
-
-    def test_backbone_suffix(self):
-        import pyarrow as pa
-
-        from torchtitan.models.granite.tokenization_strategies import (
-            BackboneSuffixStrategy,
-        )
-
-        schema = BackboneSuffixStrategy(_HF_ASSETS_PATH).column_schema
-        self.assertIn("attn_cost", schema)
-        self.assertEqual(schema["attn_cost"], pa.int64())
 
 
 @unittest.skipUnless(

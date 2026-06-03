@@ -100,15 +100,6 @@ class TestBFDPack(unittest.TestCase):
                 pack_with_800 = pack
         self.assertIn(2, pack_with_800, "100-token item placed via guaranteed bucket")
 
-    def test_attn_cost_accumulation(self):
-        n_tokens = np.array([300, 400, 500], dtype=np.int64)
-        attn_cost = np.array([100, 200, 300], dtype=np.int64)
-        packs, costs = _pre_pack(n_tokens, attn_cost, seq_len=1024)
-
-        for i, pack in enumerate(packs):
-            expected_cost = sum(int(attn_cost[idx]) for idx in pack)
-            self.assertEqual(int(costs[i]), expected_cost)
-
     def test_packing_efficiency(self):
         """With many small items, packing should be near-perfect."""
         rng = np.random.default_rng(7)

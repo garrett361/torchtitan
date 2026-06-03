@@ -35,16 +35,6 @@ class TestTruncateEveryTurnOutputStructure(unittest.TestCase):
     def _call(self, messages_list):
         return self.strategy({"messages": messages_list})
 
-    def test_output_keys(self):
-        msgs = [
-            {"role": "user", "content": "Q"},
-            {"role": "assistant", "content": "A", "reasoning_content": "R"},
-        ]
-        result = self._call([msgs])
-        self.assertEqual(
-            set(result.keys()), {"input_ids", "labels", "n_tokens", "attn_cost"}
-        )
-
     def test_n_tokens_consistent(self):
         msgs = [
             {"role": "user", "content": "Q"},

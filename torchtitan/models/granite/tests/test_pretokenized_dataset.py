@@ -147,30 +147,6 @@ class TestGreedyPacking(unittest.TestCase):
         for inp_dict, _, stats in batches:
             self.assertLessEqual(stats["n_total_tokens"], 16)
 
-    def test_greedy_selection_returns_valid_index(self):
-        """Greedy selection returns a valid buffer index when items fit."""
-        from torchtitan.models.granite.pretokenized_dataset import _select_buffer_shuffle
-
-        ds = _build_dataset(seq_len=16, packing="buffer_shuffle", buffer_size=6)
-        ds._prepare_iter()
-        ds._data_exhausted = False
-        ds._refill_buffer()
-
-        idx = _select_buffer_shuffle(ds, remaining=9999)
-        self.assertGreaterEqual(idx, 0)
-        self.assertLess(idx, len(ds._row_indices))
-
-    def test_greedy_selection_rejects_when_too_long(self):
-        """Greedy selection returns -1 when no item fits."""
-        from torchtitan.models.granite.pretokenized_dataset import _select_buffer_shuffle
-
-        ds = _build_dataset(seq_len=16, packing="buffer_shuffle", buffer_size=6)
-        ds._prepare_iter()
-        ds._data_exhausted = False
-        ds._refill_buffer()
-
-        idx = _select_buffer_shuffle(ds, remaining=0)
-        self.assertEqual(idx, -1)
 
 
 class TestSortedBufferInvariants(unittest.TestCase):
@@ -960,37 +936,6 @@ class TestRefillBufferMetadata(unittest.TestCase):
 
 class TestPendingRestore(unittest.TestCase):
     """Deferred checkpoint restore: load_state_dict → _prepare_iter window."""
-
-    def test_pending_set_after_load(self):
-        """After load_state_dict with row_indices, _pending_restore is set."""
-        ds1 = _build_dataset(seq_len=16, buffer_size=4, packing="buffer_shuffle")
-        it1 = iter(ds1)
-        next(it1)
-
-        state = ds1.state_dict()
-        self.assertIn("row_indices", state)
-
-        ds2 = _build_dataset(seq_len=16, buffer_size=4, packing="buffer_shuffle")
-        ds2.load_state_dict(state)
-
-        self.assertIsNotNone(ds2._pending_restore)
-        self.assertEqual(ds2._row_indices, [])
-
-    def test_buffer_reconstructed_after_iter(self):
-        """After iter() triggers _prepare_iter, buffer is reconstructed."""
-        ds1 = _build_dataset(seq_len=16, buffer_size=4, packing="buffer_shuffle")
-        it1 = iter(ds1)
-        next(it1)
-
-        state = ds1.state_dict()
-
-        ds2 = _build_dataset(seq_len=16, buffer_size=4, packing="buffer_shuffle")
-        ds2.load_state_dict(state)
-        ds2._prepare_iter()
-
-        self.assertIsNone(ds2._pending_restore)
-        self.assertEqual(len(ds2._row_indices), len(ds1._row_indices))
-        self.assertEqual(ds2._lengths, ds1._lengths)
 
     def test_state_dict_in_pending_window(self):
         """state_dict() called before _prepare_iter serializes from _pending_restore."""

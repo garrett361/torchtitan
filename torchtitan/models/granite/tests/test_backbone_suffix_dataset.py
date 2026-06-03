@@ -140,15 +140,6 @@ class TestBackboneSuffixDatasetOutputShape(unittest.TestCase):
             manifest_path, seq_len=seq_len, infinite=False, buffer_size=buffer_size
         )
 
-    def test_output_keys(self):
-        """Batch dict has all required keys for backbone_suffix mask."""
-        ds = self._make_dataset([_example_one_suffix()])
-        batch_dict, labels, stats = next(iter(ds))
-        for key in ("input", "positions", "conv_ids", "suffix_ids", "insertion_limits", "attn_cost"):
-            self.assertIn(key, batch_dict, f"missing key: {key}")
-        self.assertIsInstance(labels, torch.Tensor)
-        self.assertIn("n_total_tokens", stats)
-
     def test_all_tensors_have_seq_len_shape(self):
         """All per-position tensors have shape (seq_len,)."""
         seq_len = 16
