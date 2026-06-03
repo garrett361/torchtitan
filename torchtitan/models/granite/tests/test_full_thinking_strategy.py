@@ -349,18 +349,5 @@ class TestFullThinkingInferenceFidelity(unittest.TestCase):
             self.assertEqual(labels[reg_end - 1], self.im_end_id)
 
 
-@unittest.skipUnless(_HF_ASSETS_PATH, "HF_ASSETS_PATH not set")
-class TestFullThinkingDataloaderDispatch(unittest.TestCase):
-    """Verify manifest with strategy='full_thinking' dispatches correctly."""
-
-    def test_dispatch_to_truncate_last_dataset(self):
-        from torchtitan.models.granite.pretokenized_dataset import _DATASET_CLASSES
-
-        self.assertIn("full_thinking", _DATASET_CLASSES)
-        from torchtitan.models.granite.pretokenized_dataset import StandardPackingDataset
-
-        self.assertIs(_DATASET_CLASSES["full_thinking"], StandardPackingDataset)
-
-
 if __name__ == "__main__":
     unittest.main()

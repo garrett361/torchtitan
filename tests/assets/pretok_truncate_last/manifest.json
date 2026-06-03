@@ -32,6 +32,9 @@
       "max": 8
     }
   },
+  "length_stats": {
+    "mean": 5.7
+  },
   "created_at": "2026-01-01T00:00:00Z",
   "input_dir": "tests/assets/pretok_test_input"
 }

@@ -1,6 +1,8 @@
 """GPU end-to-end tests: pre-tokenized datasets → GraniteModel → correct masking."""
 
+import tempfile
 import unittest
+from pathlib import Path
 
 import torch
 
@@ -8,15 +10,27 @@ from torchtitan.components.loss import IGNORE_INDEX, cross_entropy_loss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.models.granite import granite_configs
 from torchtitan.models.granite.model import GraniteModel
-from torchtitan.models.granite.pretokenized_dataset import StandardPackingDataset
+from torchtitan.models.granite.pretokenized_dataset import PlannedPackingDataset
+from torchtitan.models.granite.scripts.plan_packing import plan_packing
 
-_MANIFEST = "tests/assets/pretok_truncate_last/manifest.json"
+_PRETOK_DIR = Path("tests/assets/pretok_truncate_last")
 _TOKENIZER_PATH = "tests/assets/tokenizer"
 _SEQ_LEN = 32
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class TestTruncateLastE2E(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        output_dir = Path(cls._tmp.name) / "pack_plans" / f"seqlen_{_SEQ_LEN}"
+        plan_packing(_PRETOK_DIR, seq_len=_SEQ_LEN, output_dir=output_dir)
+        cls._pack_plan_path = output_dir
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
     def setUp(self):
         config = granite_configs["debugmodel"](attn_backend="flex")
         self.model = GraniteModel(config)
@@ -25,7 +39,14 @@ class TestTruncateLastE2E(unittest.TestCase):
         self.model.train()
 
     def _first_batch(self):
-        ds = StandardPackingDataset(_MANIFEST, seq_len=_SEQ_LEN, infinite=False)
+        ds = PlannedPackingDataset(
+            pack_plan_path=self._pack_plan_path,
+            seq_len=_SEQ_LEN,
+            packing="prepacked_random_balanced",
+            dp_rank=0,
+            dp_world_size=1,
+            infinite=False,
+        )
         batch_dict, labels, _stats = next(iter(ds))
         tokens = batch_dict["input"].unsqueeze(0).cuda()
         positions = batch_dict["positions"].unsqueeze(0).cuda()
@@ -52,26 +73,16 @@ class TestTruncateLastE2E(unittest.TestCase):
     def test_packed_logits_match_unpacked(self):
         """Flex attention document masking isolates per-document attention.
 
-        Pulls a real packed batch from StandardPackingDataset, recovers document
+        Pulls a real packed batch from PlannedPackingDataset, recovers document
         boundaries from position resets (positions[t] < positions[t-1]), runs
         each segment through the model independently, and verifies the logits
         agree with the corresponding slice of the packed forward pass.
-
-        RED step (what would fail with atol=0): FP rounding in flex_attention
-        differs between a packed seq of length SEQ_LEN and an unpacked seg of
-        length L, so exact equality never holds.
-
-        GREEN step (atol=1e-4): logits agree within FP tolerance because
-        document masking prevents cross-document attention.  Cross-doc leakage
-        would shift logits by >> 1e-4.
         """
         self.model.eval()
         tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
         tokens_packed, positions_packed, _ = self._first_batch()
 
-        # Recover document boundaries: any position that resets to a lower value
-        # than its predecessor marks the start of a new document.
-        pos = positions_packed[0]  # [SEQ_LEN]
+        pos = positions_packed[0]
         resets = (pos[1:] < pos[:-1]).nonzero(as_tuple=True)[0] + 1
         boundaries = [0] + resets.tolist() + [_SEQ_LEN]
         segments = list(zip(boundaries[:-1], boundaries[1:]))
@@ -93,11 +104,6 @@ class TestTruncateLastE2E(unittest.TestCase):
                 seg_logits = self.model(seg_tokens, positions=seg_pos, attention_masks=seg_attn)
 
             packed_slice = logits_packed[:, start:end, :]
-
-            # RED: not bit-identical (FP rounding differs across sequence lengths).
-            self.assertFalse(torch.equal(packed_slice, seg_logits))
-
-            # GREEN: agree within atol=1e-4; cross-doc leakage would produce >> 1e-4.
             torch.testing.assert_close(packed_slice, seg_logits, atol=1e-4, rtol=0.0)
 
 

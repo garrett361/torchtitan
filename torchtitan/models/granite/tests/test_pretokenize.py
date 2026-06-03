@@ -854,20 +854,17 @@ class TestShuffleAndReshard(unittest.TestCase):
         self.assertEqual(reference_ids, resumed_ids)
 
     def test_shuffled_manifest_loadable(self):
-        """Shuffled output loads correctly via StandardPackingDataset."""
+        """Shuffled output loads correctly via _load_shards."""
         self._run_shuffle(seed=42)
 
         from torchtitan.models.granite.pretokenized_dataset import (
-            StandardPackingDataset,
+            _load_manifest,
+            _load_shards,
         )
 
-        ds = StandardPackingDataset(
-            manifest_path=str(self.output_dir / "manifest.json"),
-            seq_len=64,
-            dp_rank=0,
-            dp_world_size=1,
-        )
-        self.assertGreater(ds.num_examples, 0)
+        manifest = _load_manifest(self.output_dir / "manifest.json")
+        ds = _load_shards(manifest, self.output_dir / "shards")
+        self.assertGreater(len(ds), 0)
 
     def test_shuffle_idempotent(self):
         """Re-running after completion is a no-op."""

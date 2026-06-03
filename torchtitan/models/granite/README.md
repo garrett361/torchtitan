@@ -150,22 +150,22 @@ Resumable and idempotent — presence of `*_stats.json` marks a file as done. Re
 
 Splits large JSONL files into ~1 GiB chunks at line boundaries. More files means better multi-rank parallelism during tokenization.
 
-### Online: `GranitePreTokenizedDataLoader`
+### Packing: `GranitePreTokenizedDataLoader`
 
-Reads `manifest.json` and packs examples into fixed-length sequences using cross-rank LPT (Longest Processing Time) packing. All DP ranks jointly form `dp_world_size` batches per step from a shared global data stream, using Arrow-native batch reads for throughput.
+After pretokenization, run `plan_packing.py` to produce offline pack plans. The dataloader reads these plans at training time for cost-balanced batching across DP ranks.
 
 | Config field | Default | Description |
 |---|---|---|
-| `dataset_path` | (required) | Directory (or comma-separated dirs) containing `manifest.json` |
-| `packing` | `"buffer_shuffle"` | `"longest"`, `"buffer_shuffle"`, or `"attn_balanced"` |
-| `buffer_size` | `512` | Lookahead buffer size (per worker) |
+| `dataset_path` | (required) | Directory containing `manifest.json` and `pack_plans/` |
+| `packing` | `"prepacked_random_balanced"` | Packing strategy (see below) |
 | `infinite` | `True` | Loop dataset indefinitely |
-| `snapshot_every_n_steps` | `1024` | StatefulDataLoader snapshot frequency for checkpointing |
+| `seed` | `42` | RNG seed for epoch shuffling |
+| `snapshot_every_n_steps` | `16` | StatefulDataLoader snapshot frequency for checkpointing |
 
 **Packing modes:**
-- `longest`: deterministic; always picks the longest fitting item from the buffer
-- `buffer_shuffle`: picks a random fitting item (deterministic RNG across ranks, default)
-- `attn_balanced`: selects items to minimize cross-rank attention cost imbalance (best perf)
+- `prepacked_random_balanced`: random global shuffle with local cost-balancing within each optimizer step window. Preserves unbiased sampling while recovering TPS via cost-homogeneous micro-batches.
+- `prepacked_attn_grouped`: cost-sorted chunks ensure all DP ranks get packs with near-identical attention cost, minimizing sync idle time.
+- `prepacked_random`: random chunk assignment for smoother loss at the cost of sync efficiency.
 
 ## Chat Template Behavior Notes
 

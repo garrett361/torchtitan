@@ -47,7 +47,7 @@ class TrainingConfig:
     Stop training after this many epochs of the dataset, checkpointing at that step.
 
     Requires a dataset whose ``get_data_stats()["epochs"]`` is non-None. This includes
-    ``ChatDataset`` over a map-style HuggingFace ``Dataset`` and ``StandardPackingDataset``
+    ``ChatDataset`` over a map-style HuggingFace ``Dataset`` and ``PlannedPackingDataset``
     (pre-tokenized Arrow shards). Pure IterableDatasets are not supported.
     ``training.steps`` must still be set as an upper-bound ceiling; it controls the LR
     schedule and is used if epoch termination never fires.

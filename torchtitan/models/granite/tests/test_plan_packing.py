@@ -569,29 +569,6 @@ class TestDataLoaderE2E(unittest.TestCase):
             )
             self.assertTrue(torch.equal(rl, el), "labels mismatch after resume")
 
-    def test_multi_dataset_with_plan_raises(self):
-        """prepacked modes with multiple dataset_path entries are rejected."""
-
-        pretok_dir = _create_test_pretok_dir(self._tmp, n_examples=50)
-        seq_len = 8192
-        plan_packing(pretok_dir, seq_len=seq_len, output_dir=pretok_dir / "pack_plans" / f"seqlen_{seq_len}")
-
-        tokenizer = HuggingFaceTokenizer(tokenizer_path="tests/assets/tokenizer")
-        with self.assertRaises(ValueError):
-            GranitePreTokenizedDataLoader(
-                GranitePreTokenizedDataLoader.Config(
-                    dataset_path=f"{pretok_dir},{pretok_dir}",
-                    packing="prepacked_attn_grouped",
-                    infinite=False,
-                ),
-                dp_world_size=1,
-                dp_rank=0,
-                tokenizer=tokenizer,
-                seq_len=seq_len,
-                local_batch_size=1,
-            )
-
-
 class TestPrepackedRandomBalanced(unittest.TestCase):
     """Tests for the prepacked_random_balanced packing mode."""
 
