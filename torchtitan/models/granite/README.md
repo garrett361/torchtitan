@@ -3,57 +3,9 @@
 ## Tokenization Strategy
 
 Strategy is chosen at pre-tokenization time and recorded in the output manifest
-(`manifest["strategy"]`). The dataloader dispatches to the matching dataset class
-at runtime.
+(`manifest["strategy"]`). A subsequent `plan_packing.py` step produces offline
+pack plans that the dataloader consumes at training time.
 
-### TruncateLastStrategy
-
-The naive `truncate_history_thinking=True` strategy. Schematically, with these settings a multi-turn conversation with assistant reasoning is processed by the chat template as in
-```
-# Raw convo:
-[usr_0, reas_0, ast_0, usr_1, reas_1, ast_1, usr_2, reas_2, ast_2]
-
-# Post chat-template with truncate_history_thinking=True.
-# This is what the model sees.
-[usr_0, ast_0, usr_1, ast_1, usr_2, reas_2, ast_2]
-                                    |--- loss ---|
-```
-Historical thinking traces are removed.
-
-Only the final reasoning turn is seen by the model, and only the final reasoning and assistant response are used in the loss computation. All earlier turns (user, tool, and intermediate assistant) are masked (`IGNORE_INDEX`). Uses `truncate_history_thinking=True`, matching the vLLM/SGLang inference default.
-
-**Trailing non-assistant turns** (tool-last, user-last) are accepted. In both cases,
-messages after the last assistant turn are dropped before tokenization:
-
-- **User-last** (e.g. injected "max iterations" scaffolding): a correctness requirement. A trailing `user` message would shift `last_user_idx` (tracked in the chat template) past the last assistant, causing `truncate_history_thinking` to strip that turn's thinking traces and eliminate the training signal from the example. So, we drop the final user turn and retain the reasoning trace.
-
-- **Tool-last** (agentic trajectories cut off after a tool response): efficiency only. Trailing `tool` messages do not affect `last_user_idx` (leaving the previous thinking trace unaffected) and do not contribute to the loss computation, so we drop these turns as irrelevant for efficiency.
-
-### FullThinkingStrategy
-
-Uses `truncate_history_thinking=False` and all assistant turns that have `reasoning_content` are used in the loss computation. The full thinking context from every turn is preserved in the token sequence — matching an agentic inference setup where the model sees full conversation history including prior reasoning. Schematically
-```
-# Raw convo:
-[usr_0, reas_0, ast_0, usr_1, reas_1, ast_1, usr_2, reas_2, ast_2]
-
-# Post chat-template with truncate_history_thinking=False
-# This is what the model sees.
-[usr_0, reas_0, ast_0, usr_1, reas_1, ast_1, usr_2, reas_2, ast_2]
-        |--- loss ---|        |--- loss ---|       |--- loss ---|
-```
-
-**Loss masking rules:**
-- Assistant turns WITH `reasoning_content`: unmasked (reasoning + response + `</think>` + `<|im_end|>`)
-- Assistant turns WITHOUT `reasoning_content`: masked (present as context only)
-- All other roles (system, user, tool): masked
-
-**Why no-reasoning turns are masked:** The template renders them as `<think></think>{response}` — a token sequence that never occurs at inference time (the model always receives `<think>\n` from the generation prompt, not adjacent `<think></think>`). Unmasking would train prediction under a context the model never sees during generation.
-
-**Trailing non-assistant turns** are handled identically to `TruncateLastStrategy` (dropped before tokenization, due to irrelevance/efficiency).
-
-**Trade-offs vs other strategies:**
-- vs `truncate_last`: sequences are longer (thinking not stripped from history), more assistant turns contribute training signal, but fewer examples fit per packed sequence
-- vs `backbone_suffix`: simpler (no flex attention needed), but historical thinking occupies regular sequence positions and competes with training content for seq_len budget
 
 ### TruncateEveryTurnStrategy
 
@@ -120,10 +72,65 @@ If we model each individual `usr_x,reas_x,ast_x` segment being `O(S)` in length 
 total turns, then the naive strategy has an attention cost of $\sim \sum_{ n=1 }^{ N } (n S)^{ 2 }
 \sim \mathcal{O}(N^{ 3 }S^{ 2 })$. In contrast, for the packed strategy the cost of the backbone (paid only once) is $\mathcal{O}(N^{ 2 }S^{ 2 })$ while the marginal additional cost from the $n$-th suffix (of length $\mathcal{O}(S)$) attending to its $\mathcal{O}(nS)$ causally available tokens is $\mathcal{O}(n S^{ 2 })$, and summing across suffixes gives a total cost of $\mathcal{O}(N^{ 2 }S^{ 2 })$
 
+
+### FullThinkingStrategy
+
+Uses `truncate_history_thinking=False` and all assistant turns that have `reasoning_content` are used in the loss computation. The full thinking context from every turn is preserved in the token sequence — matching an agentic inference setup where the model sees full conversation history including prior reasoning. Schematically
+```
+# Raw convo:
+[usr_0, reas_0, ast_0, usr_1, reas_1, ast_1, usr_2, reas_2, ast_2]
+
+# Post chat-template with truncate_history_thinking=False
+# This is what the model sees.
+[usr_0, reas_0, ast_0, usr_1, reas_1, ast_1, usr_2, reas_2, ast_2]
+        |--- loss ---|        |--- loss ---|       |--- loss ---|
+```
+
+**Loss masking rules:**
+- Assistant turns WITH `reasoning_content`: unmasked (reasoning + response + `</think>` + `<|im_end|>`)
+- Assistant turns WITHOUT `reasoning_content`: masked (present as context only)
+- All other roles (system, user, tool): masked
+
+**Why no-reasoning turns are masked:** The template renders them as `<think></think>{response}` — a token sequence that never occurs at inference time (the model always receives `<think>\n` from the generation prompt, not adjacent `<think></think>`). Unmasking would train prediction under a context the model never sees during generation.
+
+**Trailing non-assistant turns** are handled identically to `TruncateLastStrategy` (dropped before tokenization, due to irrelevance/efficiency).
+
+**Trade-offs vs other strategies:**
+- vs `truncate_last`: sequences are longer (thinking not stripped from history), more assistant turns contribute training signal, but fewer examples fit per packed sequence
+- vs `backbone_suffix`: simpler (no flex attention needed), but historical thinking occupies regular sequence positions and competes with training content for seq_len budget
+
+### TruncateLastStrategy
+
+**Note:** this is mostly a baseline used for testing. `BackboneSuffixStrategy` and `TruncateEveryTurnStrategy` are strictly better in that they do not waste data like this strategy does.
+
+The naive `truncate_history_thinking=True` strategy. Schematically, with these settings a multi-turn conversation with assistant reasoning is processed by the chat template as in
+```
+# Raw convo:
+[usr_0, reas_0, ast_0, usr_1, reas_1, ast_1, usr_2, reas_2, ast_2]
+
+# Post chat-template with truncate_history_thinking=True.
+# This is what the model sees.
+[usr_0, ast_0, usr_1, ast_1, usr_2, reas_2, ast_2]
+                                    |--- loss ---|
+```
+Historical thinking traces are removed.
+
+Only the final reasoning turn is seen by the model, and only the final reasoning and assistant response are used in the loss computation. All earlier turns (user, tool, and intermediate assistant) are masked (`IGNORE_INDEX`). Uses `truncate_history_thinking=True`, matching the vLLM/SGLang inference default.
+
+**Trailing non-assistant turns** (tool-last, user-last) are accepted. In both cases,
+messages after the last assistant turn are dropped before tokenization:
+
+- **User-last** (e.g. injected "max iterations" scaffolding): a correctness requirement. A trailing `user` message would shift `last_user_idx` (tracked in the chat template) past the last assistant, causing `truncate_history_thinking` to strip that turn's thinking traces and eliminate the training signal from the example. So, we drop the final user turn and retain the reasoning trace.
+
+- **Tool-last** (agentic trajectories cut off after a tool response): efficiency only. Trailing `tool` messages do not affect `last_user_idx` (leaving the previous thinking trace unaffected) and do not contribute to the loss computation, so we drop these turns as irrelevant for efficiency.
+
+
+
 ## Pre-Tokenized Data Pipeline
 
-Two-phase workflow: offline pre-tokenization produces Arrow shards, online dataloader
-packs and serves them.
+Three-phase workflow: offline pre-tokenization produces Arrow shards, offline pack
+planning assigns examples to fixed-length packs, and the dataloader serves
+cost-balanced batches at training time.
 
 ### Offline: `pretokenize_sft.py`
 
@@ -150,9 +157,24 @@ Resumable and idempotent — presence of `*_stats.json` marks a file as done. Re
 
 Splits large JSONL files into ~1 GiB chunks at line boundaries. More files means better multi-rank parallelism during tokenization.
 
-### Packing: `GranitePreTokenizedDataLoader`
+### Offline: `plan_packing.py`
 
-After pretokenization, run `plan_packing.py` to produce offline pack plans. The dataloader reads these plans at training time for cost-balanced batching across DP ranks.
+After pretokenization, generate pack plans. Uses best-fit-decreasing bin packing to
+assign examples to fixed-length sequences, then writes an Arrow file mapping each
+pack to its constituent example indices and cost metadata.
+
+```bash
+python -m torchtitan.models.granite.scripts.plan_packing \
+    --pretok_dir /path/to/pretokenized/ \
+    --seq_len 16384
+```
+
+Output lands in `{pretok_dir}/pack_plans/seqlen_{seq_len}/` by default (override
+with `--output`). The dataloader expects this directory structure at training time.
+
+### Online: `GranitePreTokenizedDataLoader`
+
+Reads the pre-computed pack plans and serves cost-balanced batches across DP ranks.
 
 | Config field | Default | Description |
 |---|---|---|
